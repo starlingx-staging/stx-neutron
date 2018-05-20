@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 import abc
 
@@ -151,6 +154,11 @@ class L3agentscheduler(api_extensions.ExtensionDescriptor):
 
 class InvalidL3Agent(agent.AgentNotFound):
     message = _("Agent %(id)s is not a L3 Agent or has been disabled")
+
+
+class IsolatedL3Agent(exceptions.Conflict):
+    message = _("Agent %(id)s does not have access to the required provider "
+                "networks to support the specified router")
 
 
 class RouterHostedByL3Agent(exceptions.Conflict):

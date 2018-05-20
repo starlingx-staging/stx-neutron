@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from neutron_lib.utils import net
 from oslo_config import cfg
@@ -65,6 +68,13 @@ core_opts = [
                help=_("Maximum number of DNS nameservers per subnet")),
     cfg.IntOpt('max_subnet_host_routes', default=20,
                help=_("Maximum number of host routes per subnet")),
+    cfg.IntOpt('max_fixed_ips_per_port', default=5,
+               deprecated_for_removal=True,
+               help=_("Maximum number of fixed ips per port. This option "
+                      "is deprecated and will be removed in the Ocata "
+                      "release.")),
+    cfg.IntOpt('max_vlan_ips_per_port', default=5,
+               help=_("Maximum number of vlan based ips per port.")),
     cfg.BoolOpt('ipv6_pd_enabled', default=False,
                 help=_("Enables IPv6 Prefix Delegation for automatic subnet "
                        "CIDR allocation. "
@@ -131,7 +141,13 @@ core_opts = [
                       'this value without modification. For overlay networks '
                       'such as VXLAN, neutron automatically subtracts the '
                       'overlay protocol overhead from this value. Defaults '
-                      'to 1500, the standard value for Ethernet.'))
+                      'to 1500, the standard value for Ethernet.')),
+    cfg.StrOpt('host_driver',
+               default='neutron.drivers.host.NoopHostDriver',
+               help=_("Default driver to use for host management")),
+    cfg.StrOpt('fm_driver',
+               default='neutron.drivers.fm.NoopFmDriver',
+               help=_("Default driver to use for fault management")),
 ]
 
 core_cli_opts = [
@@ -141,10 +157,31 @@ core_cli_opts = [
                       "This directory must be writable by the agent.")),
 ]
 
+keystone_opts = [
+    cfg.StrOpt('auth_host',
+               help=_("Authentication host server")),
+    cfg.IntOpt('auth_port',
+               help=_("Authentication host port number")),
+    cfg.StrOpt('auth_protocol',
+               help=_("Authentication protocol")),
+    cfg.StrOpt('admin_user',
+               help=_("Admin user")),
+    cfg.StrOpt('admin_password',
+               help=_("Admin password"),
+               secret=True),
+    cfg.StrOpt('admin_tenant_name',
+               help=_("Admin tenant name")),
+    cfg.StrOpt('auth_uri',
+               help=_("Authentication URI")),
+    cfg.StrOpt('identity_uri',
+               help=_("Admin Authentication URI"))
+]
+
 
 def register_core_common_config_opts(cfg=cfg.CONF):
     cfg.register_opts(core_opts)
     cfg.register_cli_opts(core_cli_opts)
+    cfg.register_opts(keystone_opts, "KEYSTONE_AUTHTOKEN")
     wsgi.register_opts(cfg)
 
 

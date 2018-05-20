@@ -36,6 +36,7 @@ EXTENDED_ATTRIBUTES_2_0 = {
         VLANTRANSPARENT: {'allow_post': True, 'allow_put': False,
                           'convert_to': converters.convert_to_boolean,
                           'default': constants.ATTR_NOT_SPECIFIED,
+                          # TODO(alegacy): set to false?
                           'is_visible': True},
     },
 }

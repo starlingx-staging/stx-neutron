@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2016 Wind River Systems, Inc.
+#
 
 from neutron_lib import exceptions as exc
 from neutron_lib.plugins.ml2 import api
@@ -46,17 +49,17 @@ class LocalTypeDriver(driver_api.ML2TypeDriver):
     def is_partial_segment(self, segment):
         return False
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         for key, value in segment.items():
             if value and key != api.NETWORK_TYPE:
                 msg = _("%s prohibited for local provider network") % key
                 raise exc.InvalidInput(error_message=msg)
 
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, session, segment, **filters):
         # No resources to reserve
         return segment
 
-    def allocate_tenant_segment(self, context):
+    def allocate_tenant_segment(self, session, **filters):
         # No resources to allocate
         return {api.NETWORK_TYPE: p_const.TYPE_LOCAL}
 
@@ -65,4 +68,8 @@ class LocalTypeDriver(driver_api.ML2TypeDriver):
         pass
 
     def get_mtu(self, physical_network=None):
+        pass
+
+    def update_provider_allocations(self, context):
+        # Nothing to do here.  Networks are adhoc.
         pass

@@ -12,6 +12,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
+
 import abc
 import itertools
 import operator
@@ -173,7 +177,7 @@ class _TunnelTypeDriverBase(helpers.SegmentTypeDriver):
     def is_partial_segment(self, segment):
         return segment.get(api.SEGMENTATION_ID) is None
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         physical_network = segment.get(api.PHYSICAL_NETWORK)
         if physical_network:
             msg = _("provider:physical_network specified for %s "
@@ -213,15 +217,16 @@ class TunnelTypeDriver(_TunnelTypeDriverBase):
     - get_allocation
     """
 
-    def reserve_provider_segment(self, session, segment):
+    def reserve_provider_segment(self, session, segment, **filters):
         if self.is_partial_segment(segment):
-            alloc = self.allocate_partially_specified_segment(session)
+            alloc = self.allocate_partially_specified_segment(session,
+                                                              **filters)
             if not alloc:
                 raise exc.NoNetworkAvailable()
         else:
             segmentation_id = segment.get(api.SEGMENTATION_ID)
-            alloc = self.allocate_fully_specified_segment(
-                session, **{self.segmentation_key: segmentation_id})
+            filters[self.segmentation_key] = segmentation_id
+            alloc = self.allocate_fully_specified_segment(session, **filters)
             if not alloc:
                 raise exc.TunnelIdInUse(tunnel_id=segmentation_id)
         return {api.NETWORK_TYPE: self.get_type(),
@@ -229,8 +234,8 @@ class TunnelTypeDriver(_TunnelTypeDriverBase):
                 api.SEGMENTATION_ID: getattr(alloc, self.segmentation_key),
                 api.MTU: self.get_mtu()}
 
-    def allocate_tenant_segment(self, session):
-        alloc = self.allocate_partially_specified_segment(session)
+    def allocate_tenant_segment(self, session, **filters):
+        alloc = self.allocate_partially_specified_segment(session, **filters)
         if not alloc:
             return
         return {api.NETWORK_TYPE: self.get_type(),
@@ -281,7 +286,7 @@ class ML2TunnelTypeDriver(_TunnelTypeDriverBase):
     - get_allocation
     """
 
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, context, segment, **filters):
         if self.is_partial_segment(segment):
             alloc = self.allocate_partially_specified_segment(context)
             if not alloc:
@@ -305,6 +310,11 @@ class ML2TunnelTypeDriver(_TunnelTypeDriverBase):
                 api.PHYSICAL_NETWORK: None,
                 api.SEGMENTATION_ID: getattr(alloc, self.segmentation_key),
                 api.MTU: self.get_mtu()}
+
+    def update_provider_allocations(self, context):
+        # Nothing to do here since this driver has static vlan ranges setup in
+        # its configuration file... read once on startup.
+        return
 
     def release_segment(self, context, segment):
         tunnel_id = segment[api.SEGMENTATION_ID]

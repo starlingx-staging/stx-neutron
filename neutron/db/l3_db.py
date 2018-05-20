@@ -11,6 +11,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 import functools
 import itertools
@@ -51,6 +54,7 @@ from neutron.db import models_v2
 from neutron.db import standardattrdescription_db as st_attr
 from neutron.extensions import external_net
 from neutron.extensions import l3
+from neutron.extensions import wrs_net
 from neutron.objects import ports as port_obj
 from neutron.objects import router as l3_obj
 from neutron.plugins.common import utils as p_utils
@@ -197,6 +201,10 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
             resource_extend.apply_funcs(l3.ROUTERS, res, router)
         return db_utils.resource_fields(res, fields)
 
+    def _get_default_router_status(self):
+        """Return the default operational status of a router"""
+        return n_const.ROUTER_STATUS_ACTIVE
+
     def _create_router_db(self, context, router, tenant_id):
         """Create the DB object."""
         router.setdefault('id', uuidutils.generate_uuid())
@@ -206,12 +214,13 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         with context.session.begin(subtransactions=True):
             # pre-generate id so it will be available when
             # configuring external gw port
+            status = router.get('status', self._get_default_router_status())
             router_db = l3_models.Router(
                 id=router['id'],
                 tenant_id=router['tenant_id'],
                 name=router['name'],
                 admin_state_up=router['admin_state_up'],
-                status=n_const.ROUTER_STATUS_ACTIVE,
+                status=status,
                 description=router.get('description'))
             context.session.add(router_db)
             registry.notify(resources.ROUTER, events.PRECOMMIT_CREATE,
@@ -303,6 +312,15 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         # not really a proper place for agent scheduling stuff
         network_id = gw_info.get('network_id') if gw_info else None
         if not network_id:
+            return
+
+        if utils.is_extension_supported(self._core_plugin,
+                                        n_const.HOST_EXT_ALIAS):
+            # If the Host extension is present then do not use this method for
+            # checking the correct scheduling of a router.  The Host extension
+            # does this by examining the internal interfaces as well as the
+            # external interfaces and will only schedule routers to nodes that
+            # have the correct provider networks.
             return
 
         nets = self._core_plugin.get_networks(
@@ -474,10 +492,12 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
                                                include_gateway=True)
             self._create_router_gw_port(context, router,
                                         new_network_id, ext_ips)
+            gw_ips = [x['ip_address'] for x in ext_ips or []
+                      if 'ip_address' in x]
             registry.notify(resources.ROUTER_GATEWAY,
                             events.AFTER_CREATE,
                             self._create_gw_port,
-                            gw_ips=ext_ips,
+                            gw_ips=gw_ips,
                             network_id=new_network_id,
                             router_id=router_id)
 
@@ -753,7 +773,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
             if netaddr.IPNetwork(fixed_ip['ip_address']).version == 6:
                 return True
 
-    def _find_ipv6_router_port_by_network(self, context, router, net_id):
+    def _find_ipv6_router_port_by_network(self, context, router, net_id,
+                                          vlan_id=0):
         router_dev_owner = self._get_device_owner(context, router)
         for port in router.attached_ports:
             p = port['port']
@@ -761,7 +782,12 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
                 # we don't want any special purpose internal ports
                 continue
             if p['network_id'] == net_id and self._port_has_ipv6_address(p):
-                return port
+                # Each port can only be associated to subnets of the same VLAN
+                # so it is sufficient to query for the first subnet in the list
+                subnet_id = p['fixed_ips'][0]['subnet_id']
+                subnet = self._core_plugin._get_subnet(context, subnet_id)
+                if subnet['vlan_id'] == vlan_id:
+                    return port
 
     def _add_interface_by_subnet(self, context, router, subnet_id, owner):
         subnet = self._core_plugin.get_subnet(context, subnet_id)
@@ -783,8 +809,10 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
             ipv6_utils.is_ipv6_pd_enabled(subnet)):
             # Add new prefix to an existing ipv6 port with the same network id
             # if one exists
+            vlan_id = subnet.get(wrs_net.VLAN, n_const.NONE_VLAN_TAG)
             port = self._find_ipv6_router_port_by_network(context, router,
-                                                          subnet['network_id'])
+                                                          subnet['network_id'],
+                                                          vlan_id)
             if port:
                 fixed_ips = list(map(dict, port['port']['fixed_ips']))
                 fixed_ips.append(fixed_ip)
@@ -1210,6 +1238,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
 
     def _update_fip_assoc(self, context, fip, floatingip_db, external_port):
         previous_router_id = floatingip_db.router_id
+        previous_port_id = floatingip_db.fixed_port_id
         port_id, internal_ip_address, router_id = (
             self._check_and_get_fip_assoc(context, fip, floatingip_db))
         update = {'fixed_ip_address': internal_ip_address,
@@ -1226,6 +1255,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
                 'floating_ip_address': floatingip_db.floating_ip_address,
                 'floating_network_id': floatingip_db.floating_network_id,
                 'floating_ip_id': floatingip_db.id,
+                'last_fixed_port_id': previous_port_id,
+                'status': floatingip_db.status,
                 'context': context}
 
     def _is_ipv4_network(self, context, net_id):
@@ -1359,13 +1390,27 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
             context, id, floatingip)
         return floatingip
 
+    def _notify_fip_status(self, context, floatingip_db, status):
+        args = {'fixed_ip_address': floatingip_db.fixed_ip_address,
+                'fixed_port_id': floatingip_db.fixed_port_id,
+                'router_id': floatingip_db.router_id,
+                'last_known_router_id': floatingip_db.last_known_router_id,
+                'floating_ip_address': floatingip_db.floating_ip_address,
+                'floating_network_id': floatingip_db.floating_network_id,
+                'floating_ip_id': floatingip_db.id,
+                'status': status,
+                'context': context}
+        registry.notify(resources.FLOATING_IP,
+                        events.AFTER_UPDATE,
+                        self.update_floatingip_status,
+                        **args)
+
     @db_api.retry_if_session_inactive()
     def update_floatingip_status(self, context, floatingip_id, status):
         """Update operational status for floating IP in neutron DB."""
-        fip_query = model_query.query_with_hooks(
-            context, l3_models.FloatingIP).filter(
-                l3_models.FloatingIP.id == floatingip_id)
-        fip_query.update({'status': status}, synchronize_session=False)
+        floatingip_db = self._get_floatingip(context, floatingip_id)
+        floatingip_db.update({'status': status})
+        self._notify_fip_status(context, floatingip_db, status)
 
     def _delete_floatingip(self, context, id):
         floatingip = self._get_floatingip(context, id)
@@ -1376,6 +1421,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         # floating IP record once the port is deleted. We can't start
         # a transaction first to remove it ourselves because the delete_port
         # method will yield in its post-commit activities.
+        self._notify_fip_status(context, floatingip, constants.DOWN)
         self._core_plugin.delete_port(context.elevated(),
                                       floatingip['floating_port_id'],
                                       l3_port_check=False)
@@ -1498,6 +1544,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         with context.session.begin(subtransactions=True):
             for floating_ip in self._get_floatingips_by_port_id(
                     context, port_id):
+                self._notify_fip_status(context, floating_ip, constants.DOWN)
                 router_ids.add(floating_ip['router_id'])
                 floating_ip.update({'fixed_port_id': None,
                                     'fixed_ip_address': None,
@@ -1632,7 +1679,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         query = query.filter(models_v2.Subnet.network_id.in_(network_ids))
 
         fields = ['id', 'cidr', 'gateway_ip', 'dns_nameservers',
-                  'network_id', 'ipv6_ra_mode', 'subnetpool_id']
+                  'network_id', 'ipv6_ra_mode', 'subnetpool_id',
+                  wrs_net.VLAN]
 
         def make_subnet_dict_with_scope(row):
             subnet_db, address_scope_id = row
@@ -1649,7 +1697,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
     def _get_mtus_by_network_list(self, context, network_ids):
         if not network_ids:
             return {}
-        filters = {'network_id': network_ids}
+        filters = {'id': list(set(network_ids))}
         fields = ['id', 'mtu']
         networks = self._core_plugin.get_networks(context, filters=filters,
                                                   fields=fields)
@@ -1692,6 +1740,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
                                'dns_nameservers': subnet['dns_nameservers'],
                                'ipv6_ra_mode': subnet['ipv6_ra_mode'],
                                'subnetpool_id': subnet['subnetpool_id']}
+                if wrs_net.VLAN in subnet:
+                    subnet_info[wrs_net.VLAN] = subnet[wrs_net.VLAN]
                 for fixed_ip in port['fixed_ips']:
                     if fixed_ip['subnet_id'] == subnet['id']:
                         port['subnets'].append(subnet_info)
@@ -1745,6 +1795,17 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
         self._process_floating_ips(context, routers_dict, floating_ips)
         self._process_interfaces(routers_dict, interfaces)
         return list(routers_dict.values())
+
+    def get_sync_networks(self, context, router_ids,
+                          device_owner=DEVICE_OWNER_ROUTER_INTF):
+        """Query networks provided by the list of router_ids."""
+        if not router_ids:
+            return []
+        filters = {'device_id': router_ids}
+        if device_owner:
+            filters.update({'device_owner': [device_owner]})
+        interfaces = self._core_plugin.get_ports(context.elevated(), filters)
+        return [interface['network_id'] for interface in interfaces]
 
 
 @registry.has_registry_receivers
@@ -1926,6 +1987,19 @@ class L3_NAT_db_mixin(L3_NAT_dbonly_mixin, L3RpcNotifierMixin):
         for rp in router_db.attached_ports.filter_by(port_type=old_owner):
             rp.port_type = new_owner
             rp.port.device_owner = new_owner
+
+    def _is_router_status_managed(self):
+        """Returns whether the router status is managed by the plugin.  That
+        is, whether the state can change based on operational conditions or
+        whether it is static.
+        """
+        return False
+
+    def _get_router_default_status(self):
+        if self._is_router_status_managed():
+            # If state is managed then only set to ACTIVE when scheduled
+            return n_const.ROUTER_STATUS_DOWN
+        return n_const.ROUTER_STATUS_ACTIVE
 
 
 @removals.remove(

@@ -295,7 +295,8 @@ class DhcpAgentNotifyAPI(object):
         if method_name.endswith("_delete_end"):
             if 'id' in obj_value:
                 self._notify_agents(context, method_name,
-                                    {obj_type + '_id': obj_value['id']},
+                                    {obj_type + '_id': obj_value['id'],
+                                     'network_id': network_id},
                                     network_id)
         else:
             self._notify_agents(context, method_name, data, network_id)

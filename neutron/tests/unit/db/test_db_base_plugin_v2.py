@@ -309,7 +309,8 @@ class NeutronDbPluginV2TestCase(testlib_api.WebTestCase):
                      'availability_zone_hints') + (arg_list or ())):
             # Arg must be present
             if arg in kwargs:
-                data['network'][arg] = kwargs[arg]
+                new_arg = arg.replace('__', ':')
+                data['network'][new_arg] = kwargs[arg]
         network_req = self.new_create_request('networks', data, fmt)
         if set_context and tenant_id:
             # create a specific auth context for this request
@@ -325,20 +326,23 @@ class NeutronDbPluginV2TestCase(testlib_api.WebTestCase):
         return self._create_bulk(fmt, number, 'network', base_data, **kwargs)
 
     def _create_subnet(self, fmt, net_id, cidr,
-                       expected_res_status=None, **kwargs):
+                       expected_res_status=None, arg_list=None, **kwargs):
         data = {'subnet': {'network_id': net_id,
                            'ip_version': 4,
                            'tenant_id': self._tenant_id}}
         if cidr:
             data['subnet']['cidr'] = cidr
-        for arg in ('ip_version', 'tenant_id', 'subnetpool_id', 'prefixlen',
-                    'enable_dhcp', 'allocation_pools', 'segment_id',
-                    'dns_nameservers', 'host_routes',
-                    'shared', 'ipv6_ra_mode', 'ipv6_address_mode',
-                    'service_types'):
+        for arg in (('ip_version', 'tenant_id', 'subnetpool_id', 'prefixlen',
+                     'enable_dhcp', 'allocation_pools', 'segment_id',
+                     'dns_nameservers', 'host_routes',
+                     'shared', 'ipv6_ra_mode', 'ipv6_address_mode',
+                     'service_types') +
+                    (arg_list or ())):
             # Arg must be present and not null (but can be false)
             if kwargs.get(arg) is not None:
-                data['subnet'][arg] = kwargs[arg]
+                new_arg = arg.replace('___', '-')
+                new_arg = new_arg.replace('__', ':')
+                data['subnet'][new_arg] = kwargs[arg]
 
         if ('gateway_ip' in kwargs and
             kwargs['gateway_ip'] is not constants.ATTR_NOT_SPECIFIED):
@@ -458,7 +462,8 @@ class NeutronDbPluginV2TestCase(testlib_api.WebTestCase):
                      allocation_pools=None, ip_version=4, enable_dhcp=True,
                      dns_nameservers=None, host_routes=None, shared=None,
                      ipv6_ra_mode=None, ipv6_address_mode=None,
-                     tenant_id=None, set_context=False, segment_id=None):
+                     tenant_id=None, set_context=False, segment_id=None,
+                     **kwargs):
         res = self._create_subnet(fmt,
                                   net_id=network['network']['id'],
                                   cidr=cidr,
@@ -475,7 +480,8 @@ class NeutronDbPluginV2TestCase(testlib_api.WebTestCase):
                                   shared=shared,
                                   ipv6_ra_mode=ipv6_ra_mode,
                                   ipv6_address_mode=ipv6_address_mode,
-                                  set_context=set_context)
+                                  set_context=set_context,
+                                  **kwargs)
         # Things can go wrong - raise HTTP exc with res code only
         # so it can be caught by unit tests
         if res.status_int >= webob.exc.HTTPClientError.code:
@@ -629,7 +635,8 @@ class NeutronDbPluginV2TestCase(testlib_api.WebTestCase):
                ipv6_address_mode=None,
                tenant_id=None,
                service_types=None,
-               set_context=False):
+               set_context=False,
+               **kwargs):
         with optional_ctx(network, self.network,
                           set_context=set_context,
                           tenant_id=tenant_id) as network_to_use:
@@ -648,7 +655,8 @@ class NeutronDbPluginV2TestCase(testlib_api.WebTestCase):
                                        ipv6_ra_mode=ipv6_ra_mode,
                                        ipv6_address_mode=ipv6_address_mode,
                                        tenant_id=tenant_id,
-                                       set_context=set_context)
+                                       set_context=set_context,
+                                       **kwargs)
             yield subnet
 
     @contextlib.contextmanager
@@ -1872,7 +1880,7 @@ fixed_ips=ip_address%%3D%s&fixed_ips=ip_address%%3D%s&fixed_ips=subnet_id%%3D%s
                     self.fmt,
                     tenant_id=tenant_id,
                     net_id=net_id,
-                    cidr='2607:f0d0:1002:51::/124',
+                    cidr='2607:f0d0:1002:51::/64',
                     ip_version=6,
                     gateway_ip=constants.ATTR_NOT_SPECIFIED)
                 subnet2 = self.deserialize(self.fmt, res)
@@ -3673,7 +3681,9 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
                                [{'nexthop': '10.0.2.20',
                                  'destination': '100.0.0.0/8'},
                                 {'nexthop': '10.0.2.20',
-                                 'destination': '100.0.0.0/8'}]]
+                                 'destination': '100.0.0.0/8'}],
+                               [{'destination': '100.1.1.1/8',
+                                 'nexthop': '10.0.2.20'}]]
             tenant_id = network['network']['tenant_id']
             for hostroutes in hostroute_pools:
                 data = {'subnet': {'network_id': network['network']['id'],
@@ -3889,7 +3899,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
 
     def test_create_subnet_with_v6_allocation_pool(self):
         gateway_ip = 'fe80::1'
-        cidr = 'fe80::/80'
+        cidr = 'fe80::/64'
         allocation_pools = [{'start': 'fe80::2',
                              'end': 'fe80::ffff:fffa:ffff'}]
         self._test_create_subnet(gateway_ip=gateway_ip,
@@ -4190,7 +4200,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
 
     def test_create_subnet_ipv6_gw_is_nw_end_addr_returns_201(self):
         gateway_ip = '2001::ffff'
-        cidr = '2001::/112'
+        cidr = '2001::/64'
         subnet = self._test_create_subnet(
             gateway_ip=gateway_ip, cidr=cidr,
             ip_version=constants.IP_VERSION_6,
@@ -4314,6 +4324,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
                                               ipv6_address_mode=addr_mode)
             if (insert_db_reference_error or insert_address_allocated
                 or device_owner == constants.DEVICE_OWNER_ROUTER_SNAT
+                or device_owner == constants.DEVICE_OWNER_DHCP
                 or device_owner in constants.ROUTER_INTERFACE_OWNERS):
                 # DVR SNAT, router interfaces and DHCP ports should not have
                 # been updated with addresses from the new auto-address subnet
@@ -4573,7 +4584,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
     def test_update_subnet_inconsistent_ipv6_gatewayv4(self):
         with self.network() as network:
             with self.subnet(network=network,
-                             ip_version=6, cidr='fe80::/48') as subnet:
+                             ip_version=6, cidr='fe80::/64') as subnet:
                 data = {'subnet': {'gateway_ip': '10.1.1.1'}}
                 req = self.new_update_request('subnets', data,
                                               subnet['subnet']['id'])
@@ -4593,11 +4604,11 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
                                  res.status_int)
 
     def test_update_subnet_inconsistent_ipv6_hostroute_dst_v4(self):
-        host_routes = [{'destination': 'fe80::0/48',
+        host_routes = [{'destination': 'fe80::0/64',
                         'nexthop': '10.0.2.20'}]
         with self.network() as network:
             with self.subnet(network=network,
-                             ip_version=6, cidr='fe80::/48') as subnet:
+                             ip_version=6, cidr='fe80::/64') as subnet:
                 data = {'subnet': {'host_routes': host_routes}}
                 req = self.new_update_request('subnets', data,
                                               subnet['subnet']['id'])
@@ -4610,7 +4621,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
                         'nexthop': 'fe80::1'}]
         with self.network() as network:
             with self.subnet(network=network,
-                             ip_version=6, cidr='fe80::/48') as subnet:
+                             ip_version=6, cidr='fe80::/64') as subnet:
                 data = {'subnet': {'host_routes': host_routes}}
                 req = self.new_update_request('subnets', data,
                                               subnet['subnet']['id'])

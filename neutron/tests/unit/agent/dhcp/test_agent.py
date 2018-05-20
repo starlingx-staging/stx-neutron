@@ -102,7 +102,7 @@ fake_allocation_pool_subnet1 = dhcp.DictModel(dict(id='', start='172.9.9.2',
 
 fake_port1 = dhcp.DictModel(dict(id='12345678-1234-aaaa-1234567890ab',
                             device_id='dhcp-12345678-1234-aaaa-1234567890ab',
-                            device_owner='',
+                            device_owner=const.DEVICE_OWNER_DHCP,
                             allocation_pools=fake_subnet1_allocation_pools,
                             mac_address='aa:bb:cc:dd:ee:ff',
                             network_id=FAKE_NETWORK_UUID,
@@ -287,7 +287,7 @@ class TestDhcpAgent(base.BaseTestCase):
                 mocks['start_ready_ports_loop'].assert_called_once_with()
 
     def test_call_driver(self):
-        network = mock.Mock()
+        network = copy.deepcopy(fake_network)
         network.id = '1'
         dhcp = dhcp_agent.DhcpAgent(cfg.CONF)
         self.assertTrue(dhcp.call_driver('foo', network))
@@ -299,7 +299,7 @@ class TestDhcpAgent(base.BaseTestCase):
 
     def _test_call_driver_failure(self, exc=None,
                                   trace_level='exception', expected_sync=True):
-        network = mock.Mock()
+        network = copy.deepcopy(fake_network)
         network.id = '1'
         self.driver.return_value.foo.side_effect = exc or Exception
         dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
@@ -484,18 +484,17 @@ class TestDhcpAgent(base.BaseTestCase):
                              ['Agent has just been revived'])
 
     def test_periodic_resync_helper(self):
-        with mock.patch.object(dhcp_agent.eventlet, 'sleep') as sleep:
-            dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
-            resync_reasons = collections.OrderedDict(
-                (('a', 'reason1'), ('b', 'reason2')))
-            dhcp.needs_resync_reasons = resync_reasons
-            with mock.patch.object(dhcp, 'sync_state') as sync_state:
-                sync_state.side_effect = RuntimeError
-                with testtools.ExpectedException(RuntimeError):
-                    dhcp._periodic_resync_helper()
-                sync_state.assert_called_once_with(resync_reasons.keys())
-                sleep.assert_called_once_with(dhcp.conf.resync_interval)
-                self.assertEqual(0, len(dhcp.needs_resync_reasons))
+        dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
+        resync_reasons = collections.OrderedDict(
+            (('a', 'reason1'), ('b', 'reason2')))
+        dhcp.needs_resync_reasons = resync_reasons
+        with mock.patch.object(dhcp, 'sync_state') as sync_state:
+            sync_state.side_effect = RuntimeError
+            with testtools.ExpectedException(RuntimeError):
+                dhcp._periodic_resync_helper()
+            sync_state.assert_called_once_with(resync_reasons.keys())
+
+            self.assertEqual(0, len(dhcp.needs_resync_reasons))
 
     def test_populate_cache_on_start_without_active_networks_support(self):
         # emul dhcp driver that doesn't support retrieving of active networks
@@ -511,17 +510,25 @@ class TestDhcpAgent(base.BaseTestCase):
             self.assertFalse(dhcp.cache.get_network_ids())
             self.assertTrue(log.called)
 
+    def _get_network_info(self, network_id):
+        return dhcp.NetModel(dict(id=network_id, subnets=[], ports=[]))
+
     def test_populate_cache_on_start(self):
         networks = ['aaa', 'bbb']
         self.driver.existing_dhcp_networks.return_value = networks
 
-        dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
+        with mock.patch(DHCP_PLUGIN) as plug:
+            mock_plugin = mock.Mock()
+            mock_plugin.get_network_info.side_effect = self._get_network_info
+            plug.return_value = mock_plugin
 
-        self.driver.existing_dhcp_networks.assert_called_once_with(
-            dhcp.conf,
-        )
+            dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
 
-        self.assertEqual(set(networks), set(dhcp.cache.get_network_ids()))
+            self.driver.existing_dhcp_networks.assert_called_once_with(
+                dhcp.conf,
+            )
+
+            self.assertEqual(set(networks), set(dhcp.cache.get_network_ids()))
 
     def test_none_interface_driver(self):
         cfg.CONF.set_override('interface_driver', None)
@@ -994,7 +1001,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
                                    subnets=[fake_subnet1, fake_subnet3],
                                    ports=[fake_port1]))
 
-        payload = dict(subnet_id=fake_subnet1.id)
+        payload = dict(subnet_id=fake_subnet1.id, network_id=fake_network.id)
         self.cache.get_network_by_subnet_id.return_value = prev_state
         self.cache.get_network_by_id.return_value = prev_state
         self.plugin.get_network_info.return_value = fake_network
@@ -1016,6 +1023,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
         self.dhcp.port_update_end(None, payload)
         self.cache.assert_has_calls(
             [mock.call.get_network_by_id(fake_port2.network_id),
+             mock.call.get_port_by_id(fake_port2.id),
              mock.call.put_port(mock.ANY)])
         self.call_driver.assert_called_once_with('reload_allocations',
                                                  fake_network)
@@ -1037,6 +1045,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
         self.dhcp.port_update_end(None, payload)
         self.cache.assert_has_calls(
             [mock.call.get_network_by_id(fake_port1.network_id),
+             mock.call.get_port_by_id(fake_port1.id),
              mock.call.put_port(mock.ANY)])
         self.call_driver.assert_has_calls(
             [mock.call.call_driver('reload_allocations', fake_network)])
@@ -1088,7 +1097,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
             [mock.call.call_driver('reload_allocations', fake_network)])
 
     def test_port_delete_end(self):
-        payload = dict(port_id=fake_port2.id)
+        payload = dict(port_id=fake_port2.id, network_id=fake_network.id)
         self.cache.get_network_by_id.return_value = fake_network
         self.cache.get_port_by_id.return_value = fake_port2
 
@@ -1096,14 +1105,13 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
         self.cache.assert_has_calls(
             [mock.call.get_port_by_id(fake_port2.id),
              mock.call.deleted_ports.add(fake_port2.id),
-             mock.call.get_port_by_id(fake_port2.id),
              mock.call.get_network_by_id(fake_network.id),
              mock.call.remove_port(fake_port2)])
         self.call_driver.assert_has_calls(
             [mock.call.call_driver('reload_allocations', fake_network)])
 
     def test_port_delete_end_unknown_port(self):
-        payload = dict(port_id='unknown')
+        payload = dict(port_id='unknown', network_id='unknown')
         self.cache.get_port_by_id.return_value = None
 
         self.dhcp.port_delete_end(None, payload)
@@ -1118,7 +1126,8 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
         port['device_id'] = device_id
         self.cache.get_network_by_id.return_value = fake_network
         self.cache.get_port_by_id.return_value = port
-        self.dhcp.port_delete_end(None, {'port_id': port.id})
+        self.dhcp.port_delete_end(None, {'port_id': port.id,
+                                         'network_id': fake_network.id})
         self.call_driver.assert_has_calls(
             [mock.call.call_driver('disable', fake_network)])
 
@@ -1487,13 +1496,16 @@ class TestDeviceManager(base.BaseTestCase):
                           'device_id': mock.ANY}})])
 
         if port == fake_ipv6_port:
-            expected_ips = ['2001:db8::a8bb:ccff:fedd:ee99/64',
-                            '169.254.169.254/16']
+            expected_ips = ['2001:db8::a8bb:ccff:fedd:ee99/64']
         else:
-            expected_ips = ['172.9.9.9/24', '169.254.169.254/16']
+            expected_ips = ['172.9.9.9/24']
         expected = [
             mock.call.get_device_name(port),
             mock.call.configure_ipv6_ra(net.namespace, 'default', 0),
+            mock.call.init_l3(
+                'lo',
+                ['169.254.169.254/32'],
+                namespace=net.namespace),
             mock.call.init_l3(
                 'tap12345678-12',
                 expected_ips,
@@ -1628,6 +1640,7 @@ class TestDeviceManager(base.BaseTestCase):
         dh.setup_dhcp_port(fake_network_copy)
         port_body = {'port': {
                      'network_id': fake_network.id,
+                     'device_id': mock.ANY,
                      'fixed_ips': [{'subnet_id': fake_fixed_ip1.subnet_id,
                                     'ip_address': fake_fixed_ip1.ip_address},
                                    {'subnet_id': fake_subnet2.id}]}}

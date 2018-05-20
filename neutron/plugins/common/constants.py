@@ -48,6 +48,9 @@ DEFAULT_SERVICE_PLUGINS = {
     'network_ip_availability': 'network-ip-availability',
     'flavors': 'flavors',
     'revisions': 'revisions',
+    'trunk': 'trunk',
+    'sfc': 'sfc',
+    'flow_classifier': 'flow_classifier'
 }
 
 # Service operation status constants

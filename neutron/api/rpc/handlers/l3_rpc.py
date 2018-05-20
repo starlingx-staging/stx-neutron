@@ -117,6 +117,11 @@ class L3RpcCallback(object):
         router_ids = kwargs.get('router_ids')
         host = kwargs.get('host')
         context = neutron_context.get_admin_context()
+        if utils.is_extension_supported(self.plugin, n_const.HOST_EXT_ALIAS):
+            if not self.plugin.is_host_available(context, host):
+                LOG.debug("host {} disabled; not returning any "
+                          "routers to agent".format(host))
+                return {}
         if utils.is_extension_supported(
             self.l3plugin, constants.L3_AGENT_SCHEDULER_EXT_ALIAS):
             routers = (

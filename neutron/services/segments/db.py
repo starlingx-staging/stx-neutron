@@ -211,6 +211,8 @@ def _get_phys_nets(agent):
     mappings = configurations_dict.get('bridge_mappings', {})
     mappings.update(configurations_dict.get('interface_mappings', {}))
     mappings.update(configurations_dict.get('device_mappings', {}))
+    # TODO(alegacy): need to align our attribute name to one of the above
+    mappings.update(configurations_dict.get('mappings', {}))
     return list(mappings.keys())
 
 
@@ -314,6 +316,6 @@ def subscribe():
                        resources.SEGMENT, events.PRECOMMIT_CREATE)
     registry.subscribe(_delete_segments_for_network,
                        resources.NETWORK,
-                       events.BEFORE_DELETE)
+                       events.PRECOMMIT_DELETE)
 
 subscribe()

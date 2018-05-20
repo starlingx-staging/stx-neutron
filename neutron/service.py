@@ -400,6 +400,7 @@ class Service(n_rpc.Service):
             except Exception:
                 LOG.exception("Exception occurs when timer stops")
         self.timers = []
+        self.manager.after_stop()
 
     def wait(self):
         super(Service, self).wait()

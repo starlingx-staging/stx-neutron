@@ -13,12 +13,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import copy
+import itertools
 
 import netaddr
+import six
+
 from neutron_lib.api.definitions import portbindings
 from neutron_lib import constants
 from neutron_lib import exceptions as n_exc
+from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 from oslo_utils import excutils
@@ -29,8 +34,10 @@ from neutron.common import ipv6_utils
 from neutron.db import api as db_api
 from neutron.db import ipam_backend_mixin
 from neutron.db import models_v2
+from neutron.extensions import wrs_net
 from neutron.ipam import driver
 from neutron.ipam import exceptions as ipam_exc
+from neutron.ipam import utils as ipam_utils
 from neutron.objects import ports as port_obj
 from neutron.objects import subnet as obj_subnet
 
@@ -192,28 +199,49 @@ class IpamPluggableBackend(ipam_backend_mixin.IpamBackendMixin):
                                         ipam_driver, port_copy['port'], ips,
                                         revert_on_fail=False)
 
-    def _allocate_ips_for_port(self, context, port):
-        """Allocate IP addresses for the port. IPAM version.
+    def _filter_ips_by_subnets(self, fixed_ips, subnets):
+        """Filter the list of fixed_ips to be those from subnets that exist
+        within the provided subnet list.  This is so that
+        _test_fixed_ips_for_port() does not think that entries from different
+        vlans are not invalid.
+        """
+        result = []
+
+        def get_matching_subnet(fixed_ip):
+            for subnet in subnets:
+                if 'subnet_id' in fixed_ip:
+                    if subnet['id'] == fixed_ip['subnet_id']:
+                        return subnet
+                elif 'ip_address' in fixed_ip:
+                    if ipam_utils.check_subnet_ip(subnet['cidr'],
+                                                  fixed_ip['ip_address']):
+                        return subnet
+
+        for fixed_ip in fixed_ips:
+            if not get_matching_subnet(fixed_ip):
+                # Could be invalid, but also could just be from a different
+                # vlan so exclude it.
+                continue
+            result.append(fixed_ip)
+        return result
+
+    def _allocate_ips_for_port_by_subnets(self, context, p, subnets):
+        """Allocate IP addresses for the port for a given vlan. IPAM version.
 
         If port['fixed_ips'] is set to 'ATTR_NOT_SPECIFIED', allocate IP
         addresses for the port. If port['fixed_ips'] contains an IP address or
         a subnet_id then allocate an IP address accordingly.
         """
-        p = port['port']
         fixed_configured = p['fixed_ips'] is not constants.ATTR_NOT_SPECIFIED
-        subnets = self._ipam_get_subnets(context,
-                                         network_id=p['network_id'],
-                                         host=p.get(portbindings.HOST_ID),
-                                         service_type=p.get('device_owner'),
-                                         fixed_configured=fixed_configured)
 
         v4, v6_stateful, v6_stateless = self._classify_subnets(
             context, subnets)
 
         if fixed_configured:
+            fixed_ips = self._filter_ips_by_subnets(p['fixed_ips'], subnets)
             ips = self._test_fixed_ips_for_port(context,
                                                 p["network_id"],
-                                                p['fixed_ips'],
+                                                fixed_ips,
                                                 p['device_owner'],
                                                 subnets)
         else:
@@ -244,6 +272,66 @@ class IpamPluggableBackend(ipam_backend_mixin.IpamBackendMixin):
                                 'subnet_cidr': subnet['cidr'],
                                 'eui64_address': True,
                                 'mac': port['mac_address']})
+        return ips
+
+    def _group_subnets_by_vlan(self, subnets):
+        """
+        Accept a list of subnets as an argument and triage that by vlan_id.
+        """
+        vlan_subnets = collections.defaultdict(list)
+        for s in subnets:
+            vlan_subnets[s.get(wrs_net.VLAN, 0)].append(s)
+        return vlan_subnets
+
+    def _diff_fixed_ip_list(self, a, b):
+        r = list(itertools.ifilterfalse(lambda x: x in a, b))
+        r += list(itertools.ifilterfalse(lambda x: x in b, a))
+        return r
+
+    def _allocate_ips_for_port(self, context, port):
+        """Allocate IP addresses for the port. IPAM version.
+
+        If port['fixed_ips'] is set to 'ATTR_NOT_SPECIFIED', allocate IP
+        addresses for the port. If port['fixed_ips'] contains an IP address or
+        a subnet_id then allocate an IP address accordingly.
+        """
+        p = port['port']
+        fixed_configured = p['fixed_ips'] is not constants.ATTR_NOT_SPECIFIED
+        subnets = self._ipam_get_subnets(context,
+                                         network_id=p['network_id'],
+                                         host=p.get(portbindings.HOST_ID),
+                                         service_type=p.get('device_owner'),
+                                         fixed_configured=fixed_configured)
+        if fixed_configured:
+            # NOTE(alegacy): Because of how we allocate ips seperately for each
+            # layer of vlan subnets we need to do some upfront validation.
+            # This is because one of 2 things could happen.  A subnet that is
+            # intended for a specific vlan will appear as an error on all of
+            # the other subnets, or an ip address request will get ignored
+            # altogether.  So filter the list of fixed_ips to find those that
+            # do not match any subnets.  Those are the ones that will cause an
+            # error.  We could just raise an exception directly here but the
+            # unit tests except different exception types for different types
+            # of failures.  Rather than duplicate the exception raising code
+            # just pass these erroneous fixed_ip entries to the _get_subnet
+            # function and let it raise the exceptions as they are expected by
+            # the unit tests.
+            fixed_ips = self._filter_ips_by_subnets(p['fixed_ips'], subnets)
+            if len(fixed_ips) != len(p['fixed_ips']):
+                delta = self._diff_fixed_ip_list(p['fixed_ips'], fixed_ips)
+                for fixed in delta:
+                    self._get_subnet_for_fixed_ip(context, fixed, subnets)
+        ips = []
+        grouped_subnets = self._group_subnets_by_vlan(subnets)
+        for vlan_id, subnets in six.iteritems(grouped_subnets):
+            if len(ips) >= cfg.CONF.max_vlan_ips_per_port:
+                # Automatically add IP addresses for the first X VLAN subnets.
+                # If there are more subnets in the system then the user needs
+                # to manage the IP address assignments manually.  This
+                # condition exist to limit the number of active VLAN interfaces
+                # in vswitch.
+                continue
+            ips += self._allocate_ips_for_port_by_subnets(context, p, subnets)
         return ips
 
     def _test_fixed_ips_for_port(self, context, network_id, fixed_ips,
@@ -456,6 +544,8 @@ class IpamPluggableBackend(ipam_backend_mixin.IpamBackendMixin):
             port_qry = context.session.query(models_v2.Port)
             ports = port_qry.filter(
                 and_(models_v2.Port.network_id == network_id,
+                     models_v2.Port.device_owner !=
+                     constants.DEVICE_OWNER_DHCP,
                      ~models_v2.Port.device_owner.in_(
                          constants.ROUTER_INTERFACE_OWNERS_SNAT)))
             updated_ports = []
@@ -475,9 +565,10 @@ class IpamPluggableBackend(ipam_backend_mixin.IpamBackendMixin):
                     # Do the insertion of each IP allocation entry within
                     # the context of a nested transaction, so that the entry
                     # is rolled back independently of other entries whenever
-                    # the corresponding port has been deleted.
-                    with db_api.context_manager.writer.using(context):
-                        allocated.create()
+                    # the corresponding port has been deleted; since OVO
+                    # already opens a nested transaction, we don't need to do
+                    # it explicitly here.
+                    allocated.create()
                     updated_ports.append(port['id'])
                 except db_exc.DBReferenceError:
                     LOG.debug("Port %s was deleted while updating it with an "
@@ -494,6 +585,67 @@ class IpamPluggableBackend(ipam_backend_mixin.IpamBackendMixin):
                               "create or update port request. Ignoring.",
                               port['id'])
             return updated_ports
+
+    def _is_deviceowner_compute(self, port):
+        return port['device_owner'].startswith(
+            constants.DEVICE_OWNER_COMPUTE_PREFIX)
+
+    def _allocate_ips_for_subnet(self, context, subnet, ipam_subnet):
+        """Allocates an IP from the subnet for each port in the same network"""
+        network_id = subnet['network_id']
+        ports = (context.session.query(models_v2.Port).
+                 filter(models_v2.Port.network_id == network_id))
+        compute_ports = [p for p in ports if self._is_deviceowner_compute(p)]
+        ipam_driver = driver.Pool.get_instance(None, context)
+        factory = ipam_driver.get_address_request_factory()
+        updated_ports = []
+        for port in compute_ports:
+            count = len(port.get('fixed_ips', []))
+            if count >= cfg.CONF.max_vlan_ips_per_port:
+                # Automatically add IP addresses for the first X VLAN subnets.
+                # If there are more subnets in the system then the user needs
+                # to manage the IP address assignments manually.
+                continue
+            ip = {'subnet_id': subnet['id']}
+            ip_request = factory.get_request(context, port, ip)
+            ip_address = ipam_subnet.allocate(ip_request)
+            allocated = models_v2.IPAllocation(network_id=network_id,
+                                               port_id=port['id'],
+                                               ip_address=ip_address,
+                                               subnet_id=subnet['id'])
+            try:
+                # Do the insertion of each IP allocation entry within
+                # the context of a nested transaction, so that the entry
+                # is rolled back independently of other entries whenever
+                # the corresponding port has been deleted.
+                with context.session.begin_nested():
+                    context.session.add(allocated)
+                updated_ports.append(port['id'])
+            except db_exc.DBReferenceError:
+                LOG.debug("Port %s was deleted while updating it with an "
+                          "VLAN subnet address. Ignoring.", port['id'])
+                LOG.debug("Reverting IP allocation for %s", ip_address)
+                # Do not fail if reverting allocation was unsuccessful
+                try:
+                    ipam_subnet.deallocate(ip_address)
+                except Exception:
+                    LOG.debug("Reverting IP allocation failed for %s",
+                              ip_address)
+        return updated_ports
+
+    def add_vlan_addrs_on_network_ports(self, context, subnet, ipam_subnet):
+        """For a vlan tagged subnet, add addrs for ports on the network."""
+        with context.session.begin(subtransactions=True):
+            filters = dict(network_id=[subnet['network_id']],
+                           vlan_id=[subnet.get(wrs_net.VLAN, 0)])
+            count = self._query_subnets_count(context, filters=filters)
+            if count == 1:
+                # This is the first subnet on this network for the given VLAN
+                # id value therefore allocate an IP address; we do not add
+                # multiple IP addresses on the same VLAN to the same port.
+                return self._allocate_ips_for_subnet(
+                    context, subnet, ipam_subnet)
+        return []
 
     def allocate_subnet(self, context, network, subnet, subnetpool_id):
         subnetpool = None

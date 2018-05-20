@@ -55,10 +55,14 @@ import neutron.db.l3_dvr_db
 import neutron.db.l3_gwmode_db
 import neutron.db.l3_hamode_db
 import neutron.db.migration.cli
+import neutron.db.providernet_db
 import neutron.extensions.l3
 import neutron.extensions.securitygroup
 import neutron.plugins.ml2.config
 import neutron.plugins.ml2.drivers.mech_sriov.agent.common.config
+import neutron.plugins.wrs.agent.avs.agent
+import neutron.plugins.wrs.drivers.mech_vswitch
+import neutron.setting
 import neutron.wsgi
 
 
@@ -302,4 +306,32 @@ def list_xenapi_opts():
     return [
         ('xenapi',
          neutron.conf.agent.xenapi_conf.XENAPI_OPTS)
+    ]
+
+
+def list_settings_opts():
+    return [
+        ('settings',
+         neutron.setting.setting_opts)
+    ]
+
+
+def list_pnet_connectivity_opts():
+    return [
+        ('pnet_connectivity',
+         neutron.db.providernet_db.PNET_CONNECTIVITY_OPTS)
+    ]
+
+
+def list_avs_agent_opts():
+    return [
+        ('securitygroup',
+         neutron.conf.agent.securitygroups_rpc.security_group_opts)
+    ]
+
+
+def list_vhost_opts():
+    return [
+        ('vhost',
+         neutron.conf.agent.securitygroups_rpc.security_group_opts)
     ]

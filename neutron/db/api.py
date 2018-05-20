@@ -21,6 +21,7 @@ from debtcollector import removals
 from neutron_lib.db import api
 from neutron_lib import exceptions
 from oslo_config import cfg
+from oslo_context import context as common_context
 from oslo_db import api as oslo_db_api
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
@@ -207,6 +208,25 @@ def get_reader_session():
 def get_writer_session():
     """Helper to get writer session"""
     return context_manager.writer.get_sessionmaker()()
+
+
+def get_current_session(autocommit=True, expire_on_commit=False,
+                        use_slave=False, **kwargs):
+    """Helper method to acquire a session if one isn't already present on the
+    current context.  We do not want to get another session if one already
+    exists because if we exceed the connection pool size then it is possible
+    that we deadlock while waiting for a connection to become available (if all
+    other threads are doing the same thing and also acquiring a second
+    session).
+    """
+    kwargs.update({'autocommit': autocommit,
+                   'expire_on_commit': expire_on_commit,
+                   'use_slave': use_slave})
+    context = common_context.get_current()
+    if context and hasattr(context, 'session'):
+        if context.session:
+            return context.session
+    return get_session(**kwargs)
 
 
 @contextlib.contextmanager

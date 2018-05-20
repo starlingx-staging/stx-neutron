@@ -484,7 +484,7 @@ class FakeV4MultipleAgentsWithDnsProvided(object):
         self.namespace = 'qdhcp-ns'
 
 
-class FakeV6Subnet(object):
+class FakeV6Subnet(Dictable):
     def __init__(self):
         self.id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
         self.ip_version = 6
@@ -617,7 +617,7 @@ class FakeDualNetwork(object):
 class FakeDeviceManagerNetwork(object):
     def __init__(self):
         self.id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
-        self.subnets = [FakeV4Subnet(), FakeV6SubnetDHCPStateful()]
+        self.subnets = [FakeV4Subnet(), FakeV6Subnet()]
         self.ports = [FakePort1(),
                       FakeV6Port(),
                       FakeDualPort(),
@@ -1093,10 +1093,9 @@ class TestDhcpLocalProcess(TestBase):
             lp = LocalChild(self.conf, FakeDualNetwork())
             with mock.patch('neutron.agent.linux.ip_lib.IPWrapper') as ip:
                 lp.disable()
+                ip.assert_has_calls([mock.call().garbage_collect_namespace()])
 
             self._assert_disabled(lp)
-
-        ip.return_value.netns.delete.assert_called_with('qdhcp-ns')
 
     def test_disable_config_dir_removed_after_destroy(self):
         parent = mock.MagicMock()
@@ -1158,6 +1157,7 @@ class TestDnsmasq(TestBase):
             '--dhcp-optsfile=/dhcp/%s/opts' % network.id,
             '--dhcp-leasefile=/dhcp/%s/leases' % network.id,
             '--dhcp-match=set:ipxe,175',
+            '--dhcp-authoritative',
             '--bind-interfaces',
             '--interface=tap0',
         ]
@@ -1823,23 +1823,25 @@ class TestDnsmasq(TestBase):
          exp_addn_name, exp_addn_data,
          exp_opt_name, exp_opt_data,) = self._test_reload_allocation_data
 
-        net = FakeDualNetwork()
-        hpath = '/dhcp/%s/host' % net.id
-        ipath = '/dhcp/%s/interface' % net.id
-        self.useFixture(tools.OpenFixture(hpath))
-        self.useFixture(tools.OpenFixture(ipath, 'tapdancingmice'))
-        test_pm = mock.Mock()
-        dm = self._get_dnsmasq(net, test_pm)
-        dm.reload_allocations()
-        self.assertTrue(test_pm.register.called)
-        self.external_process().enable.assert_called_once_with(
-            reload_cfg=True)
+        with mock.patch.object(dhcp.Dnsmasq, '_namespace_created') as created:
+            created.return_value = True
+            net = FakeDualNetwork()
+            hpath = '/dhcp/%s/host' % net.id
+            ipath = '/dhcp/%s/interface' % net.id
+            self.useFixture(tools.OpenFixture(hpath))
+            self.useFixture(tools.OpenFixture(ipath, 'tapdancingmice'))
+            test_pm = mock.Mock()
+            dm = self._get_dnsmasq(net, test_pm)
+            dm.reload_allocations()
+            self.assertTrue(test_pm.register.called)
+            self.external_process().enable.assert_called_once_with(
+                reload_cfg=True)
 
-        self.safe.assert_has_calls([
-            mock.call(exp_host_name, exp_host_data),
-            mock.call(exp_addn_name, exp_addn_data),
-            mock.call(exp_opt_name, exp_opt_data),
-        ])
+            self.safe.assert_has_calls([
+                mock.call(exp_host_name, exp_host_data),
+                mock.call(exp_addn_name, exp_addn_data),
+                mock.call(exp_opt_name, exp_opt_data),
+            ])
 
     def test_release_unused_leases(self):
         dnsmasq = self._get_dnsmasq(FakeDualNetwork())
@@ -2156,20 +2158,30 @@ class TestDnsmasq(TestBase):
             'not_uuid_like_name': True
         }
 
+        def read_value_from_conf_file_fake(file_name, kind,
+                                           converter=None):
+            dirname = os.path.dirname(file_name)
+            return os.path.basename(dirname)
+
         def active_fake(self, instance, cls):
             return cases[instance.network.id]
 
         with mock.patch('os.listdir') as mock_listdir:
             with mock.patch.object(dhcp.Dnsmasq, 'active') as mock_active:
-                mock_active.__get__ = active_fake
-                mock_listdir.return_value = list(cases)
+                with mock.patch.object(
+                    dhcp.DhcpLocalProcess,
+                    '_read_value_from_conf_file') as mock_read:
+                    mock_active.__get__ = active_fake
+                    mock_listdir.return_value = list(cases)
+                    mock_read.side_effect = read_value_from_conf_file_fake
 
-                result = dhcp.Dnsmasq.existing_dhcp_networks(self.conf)
+                    result = dhcp.Dnsmasq.existing_dhcp_networks(self.conf)
 
-                mock_listdir.assert_called_once_with(path)
-                self.assertItemsEqual(['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-                                       'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
-                                      result)
+                    mock_listdir.assert_called_once_with(path)
+                    self.assertItemsEqual(
+                        ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                         'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],
+                        result)
 
     def test__output_hosts_file_log_only_twice(self):
         dm = self._get_dnsmasq(FakeDualStackNetworkSingleDHCP())
@@ -2263,13 +2275,13 @@ class TestDnsmasq(TestBase):
             'host-192-168-0-1.openstacklocal.,192.168.0.1\n').lstrip()
         exp_opt_name = '/dhcp/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/opts'
         exp_opt_data = (
-            'tag:tag0,option6:domain-search,openstacklocal\n'
-            'tag:tag1,option:dns-server,8.8.8.8\n'
-            'tag:tag1,option:classless-static-route,20.0.0.1/24,20.0.0.1,'
+            'tag:tag0,option:dns-server,8.8.8.8\n'
+            'tag:tag0,option:classless-static-route,20.0.0.1/24,20.0.0.1,'
             '169.254.169.254/32,192.168.0.1,0.0.0.0/0,192.168.0.1\n'
-            'tag:tag1,249,20.0.0.1/24,20.0.0.1,169.254.169.254/32,'
+            'tag:tag0,249,20.0.0.1/24,20.0.0.1,169.254.169.254/32,'
             '192.168.0.1,0.0.0.0/0,192.168.0.1\n'
-            'tag:tag1,option:router,192.168.0.1\n'
+            'tag:tag0,option:router,192.168.0.1\n'
+            'tag:tag1,option6:domain-search,openstacklocal\n'
             'tag:hhhhhhhh-hhhh-hhhh-hhhh-hhhhhhhhhhhh,'
             'option6:dns-server,ffea:3ba5:a17a:4ba3::100').lstrip()
 
@@ -2468,11 +2480,21 @@ class TestDeviceManager(TestConfBase):
                                                        mock.ANY)
 
             expect_ips = ['192.168.0.6/24', 'fdca:3ba5:a17a:4ba3::2/64']
+            expected_calls = [mock.call.get_device_name(mock.ANY)]
+            expected_calls.append(mock.call.configure_ipv6_ra(
+                'qdhcp-ns',
+                'default',
+                n_const.ACCEPT_RA_DISABLED))
             if enable_isolated_metadata or force_metadata:
-                expect_ips.append(dhcp.METADATA_DEFAULT_CIDR)
-            mgr.driver.init_l3.assert_called_with('ns-XXX',
-                                                  expect_ips,
-                                                  namespace='qdhcp-ns')
+                expected_calls.append(mock.call.init_l3(
+                    'lo',
+                    ['%s/32' % dhcp.METADATA_DEFAULT_IP],
+                    namespace='qdhcp-ns'))
+            expected_calls.append(mock.call.init_l3(
+                'ns-XXX',
+                expect_ips,
+                namespace='qdhcp-ns'))
+            mgr.driver.assert_has_calls(expected_calls)
 
     def test_setup_reserved_and_disable_metadata(self):
         """Test reserved port case of DeviceManager's DHCP port setup

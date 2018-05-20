@@ -22,6 +22,7 @@ import sys
 from keystoneauth1 import loading as ks_loading
 from neutron_lib.api import validators
 from oslo_config import cfg
+from oslo_db import options as db_options
 from oslo_log import log as logging
 import oslo_messaging
 from oslo_middleware import cors
@@ -45,12 +46,44 @@ EXTRA_LOG_LEVEL_DEFAULTS = [
     'ovsdbapp.backend.ovs_idl.vlog=INFO'
 ]
 
+keystone_opts = [
+    cfg.StrOpt('auth_host',
+               help=_("Authentication host server")),
+    cfg.IntOpt('auth_port',
+               help=_("Authentication host port number")),
+    cfg.StrOpt('auth_protocol',
+               help=_("Authentication protocol")),
+    cfg.StrOpt('admin_user',
+               help=_("Admin user")),
+    cfg.StrOpt('admin_password',
+               help=_("Admin password"),
+               secret=True),
+    cfg.StrOpt('admin_tenant_name',
+               help=_("Admin tenant name")),
+    cfg.StrOpt('auth_uri',
+               help=_("Authentication URI")),
+    cfg.StrOpt('identity_uri',
+               help=_("Admin Authentication URI"))
+]
+
+
 # Register the configuration options
 common_config.register_core_common_config_opts()
 
 # Ensure that the control exchange is set correctly
 oslo_messaging.set_transport_defaults(control_exchange='neutron')
 
+
+def set_db_defaults():
+    # Update the default QueuePool parameters. These can be tweaked by the
+    # conf variables - max_pool_size, max_overflow and pool_timeout
+    db_options.set_defaults(
+        cfg.CONF,
+        connection='sqlite://',
+        max_pool_size=10,
+        max_overflow=20)
+
+set_db_defaults()
 
 NOVA_CONF_SECTION = 'nova'
 

@@ -12,6 +12,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2016 Wind River Systems, Inc.
+#
+
 
 import datetime
 import random
@@ -19,6 +23,7 @@ import time
 
 from neutron_lib import constants
 from neutron_lib import context as ncontext
+from neutron_lib import exceptions as n_exc
 from oslo_config import cfg
 from oslo_log import log as logging
 import oslo_messaging
@@ -33,9 +38,11 @@ from neutron.common import utils
 from neutron.db import agents_db
 from neutron.db.availability_zone import network as network_az
 from neutron.db.models import agent as agent_model
+from neutron.db import models_v2
 from neutron.db.network_dhcp_agent_binding import models as ndab_model
 from neutron.extensions import agent as ext_agent
 from neutron.extensions import dhcpagentscheduler
+from neutron.extensions import wrs_net
 from neutron import worker as neutron_worker
 
 
@@ -46,6 +53,11 @@ AGENTS_SCHEDULER_OPTS = [
                default='neutron.scheduler.'
                        'dhcp_agent_scheduler.WeightScheduler',
                help=_('Driver to use for scheduling network to DHCP agent')),
+    cfg.IntOpt('network_reschedule_threshold',
+               default=1,
+               help=_('Threshold that when current network distribution has '
+                      'one DHCP agent with this many more networks than '
+                      'another DHCP agent, then rescheduling is needed')),
     cfg.BoolOpt('network_auto_schedule', default=True,
                 help=_('Allow auto scheduling networks to DHCP agent.')),
     cfg.BoolOpt('allow_automatic_dhcp_failover', default=True,
@@ -436,23 +448,32 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
         # reserve the port, so the ip is reused on a subsequent add
         device_id = utils.get_dhcp_agent_device_id(network_id,
                                                    agent['host'])
-        filters = dict(device_id=[device_id])
+        filters = dict(network_id=[network_id],
+                       device_owner=[constants.DEVICE_OWNER_DHCP])
         ports = self.get_ports(context, filters=filters)
         # NOTE(kevinbenton): there should only ever be one port per
         # DHCP agent per network so we don't have to worry about one
         # update_port passing and another failing
         for port in ports:
-            port['device_id'] = n_const.DEVICE_ID_RESERVED_DHCP_PORT
-            self.update_port(context, port['id'], dict(port=port))
+            if port['device_id'].startswith(device_id):
+                port['device_id'] = n_const.DEVICE_ID_RESERVED_DHCP_PORT
+                try:
+                    self.update_port(context, port['id'], dict(port=port))
+                except n_exc.PortNotFound:
+                    LOG.warning("Port %(port)s deleted concurrently "
+                                "by agent",
+                                {'port': port['id']})
         with context.session.begin():
             context.session.delete(binding)
+        LOG.warning("Unbinding network %(network)s from agent %(agent)s",
+                    {'network': network_id, 'agent': id})
 
         if not notify:
             return
         dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
         if dhcp_notifier:
             dhcp_notifier.network_removed_from_agent(
-                context, network_id, agent.host)
+                context, network_id, agent['host'])
 
     def list_networks_on_dhcp_agent(self, context, id):
         query = context.session.query(
@@ -503,14 +524,231 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
         else:
             return {'agents': []}
 
+    @utils.synchronized('schedule-networks', external=True)
     def schedule_network(self, context, created_network):
         if self.network_scheduler:
             return self.network_scheduler.schedule(
                 self, context, created_network)
 
+    @utils.synchronized('auto-schedule-networks', external=True)
     def auto_schedule_networks(self, context, host):
         if self.network_scheduler:
             self.network_scheduler.auto_schedule_networks(self, context, host)
+
+    def _relocate_network(self, context, agent_id, network):
+        LOG.debug("relocating network {}".format(network['id']))
+        try:
+            self.remove_network_from_dhcp_agent(context,
+                                                agent_id,
+                                                network['id'])
+        except dhcpagentscheduler.NetworkNotHostedByDhcpAgent:
+            # measures against concurrent operation
+            LOG.warning("Network %(net)s already removed from DHCP "
+                        "agent %(agent)s",
+                        {"net": network['id'],
+                         "agent": agent_id})
+            return []
+
+        agents = self.schedule_network(context, network)
+        dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
+        if not agents:
+            LOG.warning(("Relocation of network {} has failed").format(
+                network['id']))
+            return []
+        elif dhcp_notifier:
+            for agent in agents:
+                dhcp_notifier.network_added_to_agent(
+                    context, network['id'], agent['host'])
+        return agents
+
+    def relocate_networks(self, context, agent):
+        """Remove networks from given agent and attempt to reschedule to a
+        different agent.  This function assumes that it whatever condition led
+        to needing to relocate the networks away from the agent will also
+        prevent it from rescheduling to that same agent; therefore all
+        agent/host state changes must be persisted to the database before
+        invoking this function.
+        """
+        agent_id = agent['id']
+        result = self.list_networks_on_dhcp_agent(context, agent_id)
+        networks = result.get('networks')
+
+        device_id = utils.get_dhcp_agent_device_id("%", agent['host'])
+        with context.session.begin():
+            # Reserve all the DHCP ports for networks on this agent,
+            # so that the ips are reused on subsequent adds.
+            query = context.session.query(models_v2.Port)
+            query = query.filter(
+                models_v2.Port.device_id.like(device_id)
+            )
+            query.update({'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT},
+                         synchronize_session=False)
+
+            # Delete all the dhcp network bindings for this agent.
+            query = context.session.query(ndab_model.NetworkDhcpAgentBinding)
+            query = query.filter(
+                ndab_model.NetworkDhcpAgentBinding.dhcp_agent_id == agent_id
+            )
+            query.delete(synchronize_session=False)
+
+        # Iterate through networks on the agent, notifying the guest that each
+        # network is removed, and then reschedule the network to a new agent.
+        dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
+        for network in networks:
+            network_id = network['id']
+            if dhcp_notifier:
+                dhcp_notifier.network_removed_from_agent(
+                    context, network_id, agent['host'])
+            new_agents = self.schedule_network(context, network)
+            if not new_agents:
+                LOG.warning(("Relocation of network {} has failed").format(
+                    network_id))
+                continue
+            elif dhcp_notifier:
+                for new_agent in new_agents:
+                    dhcp_notifier.network_added_to_agent(
+                        context, network_id, new_agent['host'])
+
+    def _can_dhcp_agent_host_network(self, context, agent, network_id):
+        """Return true if the agent specified can host the network.
+
+        :returns: True if given DHCP agent can host the given network id
+        """
+        if not self.is_host_available(context, agent['host']):
+            return False
+
+        candidate_hosts = self.filter_hosts_with_network_access(
+            context, network_id, [agent['host']])
+        return bool(candidate_hosts)
+
+    def _count_net_vlan_segments(self, networks):
+        count = 0
+        for network in networks:
+            count += network['dhcp_vlan_segments']
+        return count
+
+    def redistribute_networks(self, context,
+                              _meets_network_rescheduling_threshold):
+        """Redistribute to a more optimal network distribution"""
+        # Don't reschedule if more than one DHCP agent per DHCP server
+        if cfg.CONF.dhcp_agents_per_network > 1:
+            LOG.warning("DHCP agent redistribution disabled because "
+                        "dhcp_agents_per_network is greater than 1")
+            return
+        start_time = time.time()
+        filters = {'agent_type': [constants.AGENT_TYPE_DHCP]}
+        agents = self.get_agents(context, filters)
+        networks_on_agents = []
+        rescheduled_networks = []
+        network_vlans = {}
+
+        # Count vlan segments on networks
+        subnet_filters = {"enable_dhcp": [True]}
+        for subnet in self.get_subnets(context, filters=subnet_filters):
+            network_id = subnet['network_id']
+            vlan_id = subnet.get(wrs_net.VLAN, 0)
+            if network_id not in network_vlans:
+                network_vlans[network_id] = set()
+            network_vlans[network_id].add(vlan_id)
+        # Create a list of tuples (agent_id, [network_id_0, ..., network_id_n])
+        for agent in agents:
+            result = self.list_networks_on_dhcp_agent(context, agent['id'])
+            for network in result['networks']:
+                network_id = network['id']
+                vlan_segments = len(network_vlans.get(network_id, []))
+                network['dhcp_vlan_segments'] = vlan_segments
+            networks_on_agents.append((agent, result))
+        db_completion_time = time.time()
+
+        found_match = None
+        # Loop through agents to try redistributing on all but the last agent
+        while len(networks_on_agents) > 1 or found_match:
+            # Sort by number of networks during first run,
+            # and re-sort the list if any networks are relocated
+            networks_on_agents.sort(
+                key=(lambda x: self._count_net_vlan_segments(x[1]['networks']))
+            )
+
+            # If arriving here either during first run, or after going through
+            # without any relocations, then pop the agent with most networks,
+            # and try redistributing its networks.
+            if not found_match:
+                busiest_agent_networks = networks_on_agents.pop()
+            found_match = None
+            networks_on_busiest_agent = self._count_net_vlan_segments(
+                busiest_agent_networks[1]['networks']
+            )
+
+            # Iterate through list of DHCP agents sorted in ascending order
+            # by the number of networks they are hosting
+            for agent_networks in networks_on_agents:
+                minimum_networks = self._count_net_vlan_segments(
+                    agent_networks[1]['networks']
+                )
+                # Stop trying to reschedule from the busiest agent, if there is
+                # no possibility to reschedule to the agent of the current
+                # iteration. Because the list of agents is sorted by number
+                # of networks, if the agent of the current iteration doesn't
+                # meet the rescheduling threshold from the busiest agent, then
+                # no agent will.
+                if not _meets_network_rescheduling_threshold(
+                        networks_on_busiest_agent, minimum_networks):
+                    break
+
+                # Sort based on number of vlan segments, so that network with
+                # most vlan segments is rescheduled first.
+                busiest_agent_networks[1]['networks'].sort(
+                    key=(lambda x: self._count_net_vlan_segments([x])),
+                    reverse=True
+                )
+
+                # Loop through networks on busiest agent, and see if it can be
+                # rescheduled to the agent of the current iteration.  This is
+                # only to check if rescheduling is possible; if it can be
+                # rescheduled, then it will still use the default scheduler to
+                # schedule it.
+                for network in busiest_agent_networks[1]['networks']:
+                    # Reschedule network at most once per run. This will
+                    # minimize the downtime of the network's DHCP service,
+                    # as well as linearly bound the number of relocations.
+                    if network['id'] in rescheduled_networks:
+                        continue
+
+                    # In the case of multiple vlans on network, check that it
+                    # still meets the rescheduling threshold
+                    vlan_subnets = self._count_net_vlan_segments([network])
+                    if not _meets_network_rescheduling_threshold(
+                        networks_on_busiest_agent - vlan_subnets + 1,
+                        minimum_networks):
+                        continue
+
+                    if self._can_dhcp_agent_host_network(context,
+                                                         agent_networks[0],
+                                                         network['id']):
+                        rescheduled_networks.append(network['id'])
+                        new_agents = self._relocate_network(
+                            context, busiest_agent_networks[0]['id'], network
+                        )
+                        for new_agent in new_agents:
+                            for networks_on_agent in networks_on_agents:
+                                agent = networks_on_agent[0]
+                                if agent['host'] == new_agent['host']:
+                                    networks_on_agent[1]['networks'].append(
+                                        network
+                                    )
+                        found_match = network
+                        break
+                if found_match:
+                    busiest_agent_networks[1]['networks'].remove(found_match)
+                    break
+        end_time = time.time()
+
+        LOG.warning("redistribute_networks took %(total_time)d seconds to "
+                    "relocate %(count)d networks including "
+                    "%(db_access_time)d seconds accessing DB",
+                    {'total_time': (end_time - start_time),
+                     'count': len(rescheduled_networks),
+                     'db_access_time': (db_completion_time - start_time)})
 
 
 class AZDhcpAgentSchedulerDbMixin(DhcpAgentSchedulerDbMixin,

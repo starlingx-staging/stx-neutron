@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from neutron_lib import exceptions as exc
 from neutron_lib.plugins.ml2 import api
@@ -67,7 +70,7 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
     def is_partial_segment(self, segment):
         return False
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         physical_network = segment.get(api.PHYSICAL_NETWORK)
         if not physical_network:
             msg = _("physical_network required for flat provider network")
@@ -86,7 +89,7 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
                 msg = _("%s prohibited for flat provider network") % key
                 raise exc.InvalidInput(error_message=msg)
 
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, context, segment, **filters):
         physical_network = segment[api.PHYSICAL_NETWORK]
         try:
             LOG.debug("Reserving flat network on physical "
@@ -101,7 +104,7 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
         segment[api.MTU] = self.get_mtu(alloc.physical_network)
         return segment
 
-    def allocate_tenant_segment(self, context):
+    def allocate_tenant_segment(self, context, **filters):
         # Tenant flat networks are not supported.
         return
 
@@ -128,3 +131,8 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
         if physical_network in self.physnet_mtus:
             mtu.append(int(self.physnet_mtus[physical_network]))
         return min(mtu) if mtu else 0
+
+    def update_provider_allocations(self, context):
+        # Nothing to do here since this driver has static vlan ranges setup in
+        # its configuration file... read once on startup.
+        return

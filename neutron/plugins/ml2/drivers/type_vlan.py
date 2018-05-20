@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 import sys
 
@@ -142,7 +145,7 @@ class VlanTypeDriver(helpers.SegmentTypeDriver):
     def is_partial_segment(self, segment):
         return segment.get(api.SEGMENTATION_ID) is None
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         physical_network = segment.get(api.PHYSICAL_NETWORK)
         segmentation_id = segment.get(api.SEGMENTATION_ID)
         if physical_network:
@@ -175,8 +178,7 @@ class VlanTypeDriver(helpers.SegmentTypeDriver):
                 msg = _("%s prohibited for VLAN provider network") % key
                 raise exc.InvalidInput(error_message=msg)
 
-    def reserve_provider_segment(self, context, segment):
-        filters = {}
+    def reserve_provider_segment(self, context, segment, **filters):
         physical_network = segment.get(api.PHYSICAL_NETWORK)
         if physical_network is not None:
             filters['physical_network'] = physical_network
@@ -200,10 +202,11 @@ class VlanTypeDriver(helpers.SegmentTypeDriver):
                 api.SEGMENTATION_ID: alloc.vlan_id,
                 api.MTU: self.get_mtu(alloc.physical_network)}
 
-    def allocate_tenant_segment(self, context):
+    def allocate_tenant_segment(self, context, **filters):
         for physnet in self.network_vlan_ranges:
+            filters['physical_network'] = physnet
             alloc = self.allocate_partially_specified_segment(
-                context, physical_network=physnet)
+                context, **filters)
             if alloc:
                 break
         else:
@@ -255,3 +258,8 @@ class VlanTypeDriver(helpers.SegmentTypeDriver):
         if physical_network in self.physnet_mtus:
             mtu.append(int(self.physnet_mtus[physical_network]))
         return min(mtu) if mtu else 0
+
+    def update_provider_allocations(self, context):
+        # Nothing to do here since this driver has static vlan ranges setup in
+        # its configuration file... read once on startup.
+        return

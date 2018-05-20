@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
 
 """
 IPv6-related utilities and helper functions.
@@ -75,3 +78,8 @@ def is_ipv6_pd_enabled(subnet):
        constants.IPV6_PD_POOL_ID
     """
     return subnet.get('subnetpool_id') == const.IPV6_PD_POOL_ID
+
+
+def get_link_local_address_by_mac(mac_address):
+    eui = netaddr.EUI(mac_address)
+    return str(eui.ipv6_link_local())

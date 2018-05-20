@@ -368,14 +368,14 @@ class TimeoutTestCase(base.DietTestCase):
 
     def test_method_timeout_increases_on_timeout_exception(self):
         rpc._BackingOffContextWrapper._METHOD_TIMEOUTS['method_1'] = 1
-        for i in range(5):
+        for i in range(4):
             with testtools.ExpectedException(messaging.MessagingTimeout):
                 self.client.call(self.call_context, 'method_1')
 
         # we only care to check the timeouts sent to the transport
         timeouts = [call[1]['timeout']
                     for call in rpc.TRANSPORT._send.call_args_list]
-        self.assertEqual([1, 2, 4, 8, 16], timeouts)
+        self.assertEqual([1, 2, 4, 8], timeouts)
 
     def test_method_timeout_10x_config_ceiling(self):
         rpc.TRANSPORT.conf.rpc_response_timeout = 10
@@ -384,12 +384,12 @@ class TimeoutTestCase(base.DietTestCase):
             with testtools.ExpectedException(messaging.MessagingTimeout):
                 self.client.call(self.call_context, 'method_1')
         self.assertEqual(
-            10 * rpc.TRANSPORT.conf.rpc_response_timeout,
+            1 * rpc.TRANSPORT.conf.rpc_response_timeout,
             rpc._BackingOffContextWrapper._METHOD_TIMEOUTS['method_1'])
         with testtools.ExpectedException(messaging.MessagingTimeout):
             self.client.call(self.call_context, 'method_1')
         self.assertEqual(
-            10 * rpc.TRANSPORT.conf.rpc_response_timeout,
+            1 * rpc.TRANSPORT.conf.rpc_response_timeout,
             rpc._BackingOffContextWrapper._METHOD_TIMEOUTS['method_1'])
 
     def test_timeout_unchanged_on_other_exception(self):
@@ -460,7 +460,7 @@ class TimeoutTestCase(base.DietTestCase):
     def test_set_max_timeout_overrides_default_timeout(self):
         rpc.TRANSPORT.conf.rpc_response_timeout = 10
         self.assertEqual(
-            10 * 10, rpc._BackingOffContextWrapper.get_max_timeout())
+            10, rpc._BackingOffContextWrapper.get_max_timeout())
         rpc._BackingOffContextWrapper.set_max_timeout(10)
         self.assertEqual(10, rpc._BackingOffContextWrapper.get_max_timeout())
 

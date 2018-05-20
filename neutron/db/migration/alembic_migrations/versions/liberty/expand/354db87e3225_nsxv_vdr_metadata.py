@@ -16,7 +16,7 @@
 """nsxv_vdr_metadata.py
 
 Revision ID: 354db87e3225
-Revises: kilo
+Revises: wrs_kilo
 Create Date: 2015-04-19 14:59:15.102609
 
 """
@@ -24,13 +24,10 @@ Create Date: 2015-04-19 14:59:15.102609
 from alembic import op
 import sqlalchemy as sa
 
-from neutron.db.migration import cli
-
 
 # revision identifiers, used by Alembic.
 revision = '354db87e3225'
-down_revision = 'kilo'
-branch_labels = (cli.EXPAND_BRANCH,)
+down_revision = 'wrs_kilo_upgrade'
 
 
 def upgrade():

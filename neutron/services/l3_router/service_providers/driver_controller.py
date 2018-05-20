@@ -130,7 +130,7 @@ class DriverController(object):
             if 'distributed' not in router:
                 router['distributed'] = old_router['distributed']
             if 'ha' not in router:
-                router['ha'] = old_router['distributed']
+                router['ha'] = old_router['ha']
             new_drv = self._attrs_to_driver(router)
         if new_drv:
             LOG.debug("Router %(id)s migrating from %(old)s provider to "

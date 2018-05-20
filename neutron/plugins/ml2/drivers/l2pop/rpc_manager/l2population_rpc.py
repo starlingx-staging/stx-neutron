@@ -19,10 +19,46 @@ import itertools
 from neutron_lib import constants as n_const
 from oslo_config import cfg
 from oslo_log import helpers as log_helpers
+import oslo_messaging
 import six
 
+from neutron.common import rpc as n_rpc
+from neutron.common import topics
 from neutron.plugins.ml2.drivers.l2pop import rpc as l2pop_rpc
 from neutron.plugins.ml2.drivers.openvswitch.agent import vlanmanager
+
+
+class L2populationRpcQueryMixin(object):
+    """Agent side of the L2-population RPC API.
+
+    API version history:
+        1.0 - Initial version.
+    """
+
+    def __init__(self, topic=topics.PLUGIN):
+        topic = topics.get_topic_name(
+            topic, topics.L2POPULATION, l2pop_rpc.L2POP_QUERY)
+        target = oslo_messaging.Target(topic=topic, version='1.0')
+        self.client = n_rpc.get_client(target)
+
+    def get_fdb_entries(self, context, network_ids, host=None,
+                        source=None):
+        """
+        Retrieves the FDB entries required to populate the FDB on a given
+        host.
+
+        If 'source' is specified as a requestor then no records from that
+        source are included in the results.
+
+        If host is not supplied then the full set of FDB entries for the
+        network is returned.
+        """
+        cctxt = self.client.prepare()
+        results = cctxt.call(context, 'get_fdb_entries',
+                             network_ids=network_ids,
+                             host=host,
+                             source=source)
+        return L2populationRpcCallBackMixin._unmarshall_fdb_entries(results)
 
 
 @six.add_metaclass(abc.ABCMeta)

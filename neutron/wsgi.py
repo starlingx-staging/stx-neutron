@@ -42,6 +42,7 @@ import webob.exc
 from neutron._i18n import _
 from neutron.common import config
 from neutron.common import exceptions as n_exc
+from neutron.common import utils
 from neutron.conf import wsgi as wsgi_config
 from neutron.db import api
 
@@ -108,6 +109,7 @@ class Server(object):
         self.disable_ssl = disable_ssl
         # Pool for a greenthread in which wsgi server will be running
         self.pool = eventlet.GreenPool(1)
+        self.thread_pool = utils.GuaranteedGreenPool(self.num_threads)
         self.name = name
         self._server = None
         # A value of 0 is converted to None because None is what causes the
@@ -218,7 +220,7 @@ class Server(object):
     def _run(self, application, socket):
         """Start a WSGI server in a new green thread."""
         eventlet.wsgi.server(socket, application,
-                             max_size=self.num_threads,
+                             custom_pool=self.thread_pool,
                              log=LOG,
                              keepalive=CONF.wsgi_keep_alive,
                              log_format=CONF.wsgi_log_format,

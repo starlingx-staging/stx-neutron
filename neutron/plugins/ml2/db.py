@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from debtcollector import removals
 from neutron_lib.api.definitions import portbindings
@@ -24,7 +27,7 @@ from oslo_db import exception as db_exc
 from oslo_log import log
 from oslo_utils import uuidutils
 import six
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import exc
 
 from neutron._i18n import _
@@ -339,6 +342,18 @@ def is_dhcp_active_on_any_subnet(context, subnet_ids):
     return bool(context.session.query(models_v2.Subnet).
                 enable_eagerloads(False).filter_by(enable_dhcp=True).
                 filter(models_v2.Subnet.id.in_(subnet_ids)).count())
+
+
+def get_subnets_by_port(session, port_id):
+    try:
+        query = (session.query(models_v2.Subnet)
+                 .join(models_v2.Port,
+                       and_((models_v2.Port.network_id ==
+                             models_v2.Subnet.network_id),
+                            models_v2.Port.id == port_id)))
+        return query.all()
+    except exc.NoResultFound:
+        return None
 
 
 def _prevent_segment_delete_with_port_bound(resource, event, trigger,

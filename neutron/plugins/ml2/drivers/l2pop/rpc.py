@@ -21,11 +21,12 @@ import oslo_messaging
 from neutron.common import rpc as n_rpc
 from neutron.common import topics
 
-
 LOG = logging.getLogger(__name__)
 
 
 PortInfo = collections.namedtuple("PortInfo", "mac_address ip_address")
+
+L2POP_QUERY = "query"
 
 
 class L2populationAgentNotifyAPI(object):
@@ -85,3 +86,25 @@ class L2populationAgentNotifyAPI(object):
             else:
                 self._notification_fanout(context, 'update_fdb_entries',
                                           fdb_entries)
+
+
+class L2populationServerQueryAPI(object):
+    """Server side of the L2POP RPC API.
+
+    API version history:
+        1.0 - Initial version.
+    """
+
+    def __init__(self, endpoint):
+        """
+        Create an RPC listener to handle RPC query requests coming from
+        agents.  These query RPCs exist for the purpose of the BGP DR agent
+        and are not intended for regular L2 agents.
+        """
+        self.l2pop_listener = n_rpc.create_connection()
+        topic = topics.get_topic_name(
+            topics.PLUGIN, topics.L2POPULATION, L2POP_QUERY)
+        self.l2pop_listener.create_consumer(topic, [endpoint], fanout=False)
+
+    def start(self):
+        return self.l2pop_listener.consume_in_threads()

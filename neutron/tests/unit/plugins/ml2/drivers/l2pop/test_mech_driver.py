@@ -315,7 +315,8 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
                     port['network_id']: {
                         'ports': {'20.0.0.1': [constants.FLOODING_ENTRY],
                                   '20.0.0.2': [constants.FLOODING_ENTRY]},
-                        'network_type': 'vxlan', 'segment_id': 1}}
+                        'network_type': 'vxlan', 'audit': True,
+                        'segment_id': 1}}
                 self.assertEqual(1, self.mock_cast.call_count)
                 self.mock_cast.assert_called_with(
                     mock.ANY, 'add_fdb_entries', cast_expected, HOST_4)
@@ -414,7 +415,7 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
                                      l2pop_rpc.PortInfo(p1['mac_address'],
                                                         p1_ips[0])],
                         '20.0.0.2': [constants.FLOODING_ENTRY]},
-                    'network_type': 'vxlan', 'segment_id': 1}}
+                    'network_type': 'vxlan', 'audit': True, 'segment_id': 1}}
                 self.mock_cast.assert_called_with(
                     mock.ANY, 'add_fdb_entries', cast_expected_host, HOST)
                 self.mock_fanout.assert_called_with(
@@ -433,7 +434,7 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
                                      l2pop_rpc.PortInfo(p1['mac_address'],
                                                         p1_ips[0])],
                         '20.0.0.1': [constants.FLOODING_ENTRY]},
-                    'network_type': 'vxlan', 'segment_id': 1}}
+                    'network_type': 'vxlan', 'audit': True, 'segment_id': 1}}
                 fanout_expected = {port['network_id']: {
                     'ports': {'20.0.0.2': [constants.FLOODING_ENTRY]},
                     'network_type': 'vxlan', 'segment_id': 1}}
@@ -528,6 +529,7 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
                                                    p1['mac_address'],
                                                    p1_ips[0])]},
                                  'network_type': 'vlan',
+                                 'physical_network': 'physnet1',
                                  'segment_id': 2}}
 
                     self.mock_fanout.assert_called_with(
@@ -615,6 +617,7 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
                                                     p2['mac_address'],
                                                     p2_ips[0])]},
                                   'network_type': 'vxlan',
+                                  'audit': True,
                                   'segment_id': 1}}
 
                     self.mock_cast.assert_called_with(mock.ANY,
@@ -677,6 +680,7 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
                                                 p1['mac_address'],
                                                 p1_ips[0])]},
                                          'network_type': 'vxlan',
+                                          'audit': True,
                                          'segment_id': 1}}
 
                             self.mock_cast.assert_called_with(
@@ -1251,7 +1255,7 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
             self._mock_network_ports(HOST + '1', [None]))
         agent_ips[tunnel_agent] = '10.0.0.1'
 
-        def agent_ip_side_effect(agent):
+        def agent_ip_side_effect(agent, **kwargs):
             return agent_ips[agent]
 
         with mock.patch.object(l2pop_db, 'get_agent_ip',
@@ -1261,7 +1265,10 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
                                   return_value=fdb_network_ports),\
                 mock.patch.object(l2pop_db,
                                   'get_distributed_active_network_ports',
-                                  return_value=tunnel_network_ports):
+                                  return_value=tunnel_network_ports), \
+                mock.patch.object(l2pop_mech_driver,
+                                  'register_fdb_extend_func',
+                                  return_value=None):
             session = mock.Mock()
             agent = mock.Mock()
             agent.host = HOST
@@ -1290,6 +1297,7 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
 
         expected_result = {'segment_id': 1,
                            'network_type': 'vxlan',
+                           'audit': True,
                            'ports':
                            {'10.0.0.1':
                             [constants.FLOODING_ENTRY],
@@ -1306,6 +1314,7 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
 
         expected_result = {'segment_id': 1,
                            'network_type': 'vxlan',
+                           'audit': True,
                            'ports':
                            {'10.0.0.1':
                             [constants.FLOODING_ENTRY]}}
@@ -1328,6 +1337,7 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
 
         expected_result = {'segment_id': 1,
                            'network_type': 'vxlan',
+                           'audit': True,
                            'ports':
                            {'10.0.0.1':
                             [constants.FLOODING_ENTRY],

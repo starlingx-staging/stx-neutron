@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2015 Wind River Systems, Inc.
+#
 
 from neutron_lib.api.definitions import port_security as psec
 from neutron_lib.api.definitions import portbindings
@@ -26,6 +29,7 @@ from sqlalchemy.orm import exc
 
 from neutron.api.rpc.handlers import dvr_rpc
 from neutron.api.rpc.handlers import securitygroups_rpc as sg_rpc
+from neutron.common import constants
 from neutron.common import rpc as n_rpc
 from neutron.common import topics
 from neutron.db import l3_hamode_db
@@ -64,6 +68,45 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
                           else n_const.PORT_STATUS_DOWN)
             if port['status'] != new_status:
                 return new_status
+
+    def get_provider_details(self, rpc_context, **kwargs):
+        """Agent requests provider network details configuration details."""
+        agent_id = kwargs.get('agent_id')
+        hostname = kwargs.get('host')
+        network_type = kwargs.get('network_type')
+        physical_network = kwargs.get('physical_network')
+        segmentation_id = kwargs.get('segmentation_id')
+
+        LOG.debug("Provider network configuration details requested from "
+                  "%(agent_id)s on %(host)s for providernet "
+                  "%(type)s:%(name)s:%(id)s",
+                  {'agent_id': agent_id, 'host': hostname,
+                   'type': network_type,
+                   'name': physical_network,
+                   'id': segmentation_id})
+        plugin = directory.get_plugin()
+        data = plugin.get_providernet_segment_details(
+            rpc_context, network_type, physical_network, segmentation_id)
+        LOG.debug("Returning: %s", data)
+        return data
+
+    def get_host_details(self, rpc_context, **kwargs):
+        """Agent requests host configuration details."""
+        agent_id = kwargs.get('agent_id')
+        hostname = kwargs.get('host')
+        LOG.debug("Host configuration details requested from "
+                  "%(agent_id)s on %(host)s",
+                  {'agent_id': agent_id, 'host': hostname})
+        plugin = directory.get_plugin()
+        host = plugin.get_host_by_name(rpc_context, hostname)
+        # For now only return id, name, and host_state_up
+        data = {'id': host['id'],
+                'name': host['name']}
+        if host.get('availability') == constants.HOST_UP:
+            data['host_state_up'] = True
+        else:
+            data['host_state_up'] = False
+        return data
 
     def get_device_details(self, rpc_context, **kwargs):
         """Agent requests device details."""
@@ -124,24 +167,51 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
                          'vif_type': port_context.vif_type})
             return {'device': device}
 
+        # obtain WRS subnet bindings
+        subnets = port_context.subnet_segments()
+
+        # obtain WRS qos policies
+        plugin = directory.get_plugin()
+        port_qos_id = plugin.get_qos_by_port(rpc_context, port['id'])
+        if port_qos_id is not None:
+            port_qos_policy = plugin.get_policy_for_qos(rpc_context,
+                                                        port_qos_id)
+        else:
+            port_qos_policy = None
+
+        # obtain WRS qos policies
+        network_qos_id = plugin.get_qos_by_network(rpc_context,
+                                                   port['network_id'])
+        if network_qos_id is not None:
+            network_qos_policy = plugin.get_policy_for_qos(rpc_context,
+                                                           network_qos_id)
+        else:
+            network_qos_policy = None
+
         network_qos_policy_id = port_context.network._network.get(
             qos_consts.QOS_POLICY_ID)
         entry = {'device': device,
                  'network_id': port['network_id'],
                  'port_id': port['id'],
+                 'tenant_id': port['tenant_id'],
                  'mac_address': port['mac_address'],
                  'admin_state_up': port['admin_state_up'],
                  'network_type': segment[api.NETWORK_TYPE],
                  'segmentation_id': segment[api.SEGMENTATION_ID],
                  'physical_network': segment[api.PHYSICAL_NETWORK],
                  'mtu': port_context.network._network.get('mtu'),
+                 'network': port_context.network.current,
+                 'subnets': subnets,
+                 'port_qos_policy': port_qos_policy,
+                 'network_qos_policy': network_qos_policy,
                  'fixed_ips': port['fixed_ips'],
                  'device_owner': port['device_owner'],
                  'allowed_address_pairs': port['allowed_address_pairs'],
-                 'port_security_enabled': port.get(psec.PORTSECURITY, True),
+                 'port_security_enabled': port.get(psec.PORTSECURITY, False),
                  'qos_policy_id': port.get(qos_consts.QOS_POLICY_ID),
                  'network_qos_policy_id': network_qos_policy_id,
-                 'profile': port[portbindings.PROFILE]}
+                 'profile': port[portbindings.PROFILE],
+                 'trunk_port': bool('trunk_details' in port)}
         LOG.debug("Returning: %s", entry)
         return entry
 
@@ -395,6 +465,12 @@ class AgentNotifierApi(dvr_rpc.DVRAgentRpcApiMixin,
         self.topic_network_update = topics.get_topic_name(topic,
                                                           topics.NETWORK,
                                                           topics.UPDATE)
+        self.topic_subnet_create = topics.get_topic_name(topic,
+                                                         topics.SUBNET,
+                                                         topics.CREATE)
+        self.topic_subnet_delete = topics.get_topic_name(topic,
+                                                         topics.SUBNET,
+                                                         topics.DELETE)
 
         target = oslo_messaging.Target(topic=topic, version='1.0')
         self.client = n_rpc.get_client(target)
@@ -421,3 +497,16 @@ class AgentNotifierApi(dvr_rpc.DVRAgentRpcApiMixin,
         cctxt = self.client.prepare(topic=self.topic_network_update,
                                     fanout=True, version='1.4')
         cctxt.cast(context, 'network_update', network=network)
+
+    def subnet_create(self, context, subnet, network_type, segmentation_id,
+                      physical_network):
+        cctxt = self.client.prepare(topic=self.topic_subnet_create,
+                                    fanout=True)
+        cctxt.cast(context, 'subnet_create', subnet=subnet,
+                   network_type=network_type, segmentation_id=segmentation_id,
+                   physical_network=physical_network)
+
+    def subnet_delete(self, context, subnet):
+        cctxt = self.client.prepare(topic=self.topic_subnet_delete,
+                                    fanout=True)
+        cctxt.cast(context, 'subnet_delete', subnet=subnet)

@@ -71,6 +71,9 @@ class SriovNicSwitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
     def get_mappings(self, agent):
         return agent['configurations'].get('device_mappings', {})
 
+    def initialize(self):
+        pass
+
     def bind_port(self, context):
         LOG.debug("Attempting to bind port %(port)s on "
                   "network %(network)s",

@@ -301,7 +301,8 @@ class HaRouter(router.RouterInfo):
 
     def remove_floating_ip(self, device, ip_cidr):
         self._remove_vip(ip_cidr)
-        if device.addr.list(to=ip_cidr):
+        to = common_utils.cidr_to_ip(ip_cidr)
+        if device.addr.list(to=to):
             super(HaRouter, self).remove_floating_ip(device, ip_cidr)
 
     def internal_network_updated(self, interface_name, ip_cidrs, mtu):
@@ -439,7 +440,8 @@ class HaRouter(router.RouterInfo):
                                prefix=router.EXTERNAL_DEV_PREFIX)
 
     def delete(self):
-        self.destroy_state_change_monitor(self.process_monitor)
+        if self.process_monitor:
+            self.destroy_state_change_monitor(self.process_monitor)
         self.disable_keepalived()
         self.ha_network_removed()
         super(HaRouter, self).delete()

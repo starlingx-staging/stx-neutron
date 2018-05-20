@@ -16,14 +16,14 @@
 """qos dscp db addition
 
 Revision ID: 45f8dd33480b
-Revises: 0e66c5227a8a
+Revises: wrs_mitaka
 Create Date: 2015-12-03 07:16:24.742290
 
 """
 
 # revision identifiers, used by Alembic.
 revision = '45f8dd33480b'
-down_revision = '0e66c5227a8a'
+down_revision = 'wrs_mitaka'
 
 from alembic import op
 import sqlalchemy as sa

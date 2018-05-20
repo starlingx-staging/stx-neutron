@@ -14,8 +14,11 @@
 
 import collections
 
+import eventlet
+
 from neutron_lib.plugins import directory
 from neutron_lib.utils import net
+from oslo_config import cfg
 from oslo_log import log as logging
 import oslo_messaging
 
@@ -25,9 +28,13 @@ from neutron.callbacks import registry
 from neutron.common import constants
 from neutron.common import rpc as n_rpc
 from neutron.common import topics
+from neutron.conf.agent import securitygroups_rpc as sc_cfg
 from neutron.db import securitygroups_rpc_base as sg_rpc_base
 
+
 LOG = logging.getLogger(__name__)
+
+sc_cfg.register_securitygroups_opts()
 
 
 class SecurityGroupServerRpcApi(object):
@@ -133,6 +140,9 @@ class SecurityGroupAgentRpcApiMixin(object):
     #   1.1 Support Security Group RPC
     SG_RPC_VERSION = "1.1"
 
+    defer_notify_suppress = False
+    defer_notify_delay = cfg.CONF.SECURITYGROUP.notify_interval
+
     def _get_security_group_topic(self):
         return topics.get_topic_name(self.topic,
                                      topics.SECURITY_GROUP,
@@ -158,8 +168,8 @@ class SecurityGroupAgentRpcApiMixin(object):
         cctxt.cast(context, 'security_groups_member_updated',
                    security_groups=security_groups)
 
-    def security_groups_provider_updated(self, context,
-                                         devices_to_update=None):
+    def _security_groups_provider_updated(self, context,
+                                          devices_to_update=None):
         """Notify provider updated security groups."""
         # TODO(kevinbenton): remove in Queens
         # NOTE(ihrachys) the version here should really be 1.3, but since we
@@ -176,6 +186,32 @@ class SecurityGroupAgentRpcApiMixin(object):
                                     fanout=True)
         cctxt.cast(context, 'security_groups_provider_updated',
                    devices_to_update=devices_to_update)
+
+    def security_groups_provider_updated(self, context,
+                                         devices_to_update=None):
+        """Notify provider updated security groups."""
+        if not self.defer_notify_delay:
+            self._security_groups_provider_updated(
+                context, devices_to_update=devices_to_update)
+            return
+        # defer the notification, subsequent calls will not be sent
+        # until the previous notification has completed
+        if not self.defer_notify_suppress:
+            self.defer_notify_suppress = True
+            LOG.debug("spawning deferred security_groups_provider_updated")
+            try:
+                eventlet.spawn_after(self.defer_notify_delay,
+                                     self._security_groups_provider_updated,
+                                     context,
+                                     devices_to_update=devices_to_update)
+            except Exception:
+                LOG.error("failed to spawn "
+                          "security_groups_provider_updated thread")
+                self._security_groups_provider_updated(
+                    context, devices_to_update=devices_to_update)
+                self.defer_notify_suppress = False
+        else:
+            LOG.debug("suppressing security_groups_provider_updated")
 
 
 class SecurityGroupAgentRpcCallbackMixin(object):

@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 #
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 # Borrowed from nova code base, more utilities will be added/borrowed as and
 # when needed.
 
@@ -155,13 +157,17 @@ def get_random_mac(base_mac):
     return net.get_random_mac(base_mac)
 
 
-def get_dhcp_agent_device_id(network_id, host):
+def get_dhcp_agent_device_id(network_id, host, vlan_id=0):
     # Split host so as to always use only the hostname and
     # not the domain name. This will guarantee consistency
     # whether a local hostname or an fqdn is passed in.
     local_hostname = host.split('.')[0]
     host_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, str(local_hostname))
-    return 'dhcp%s-%s' % (host_uuid, network_id)
+    device_id = 'dhcp%s-%s' % (host_uuid, network_id)
+    # append the vlan to the device name if one is specified
+    if vlan_id:
+        device_id = '%s-%s' % (device_id, vlan_id)
+    return device_id
 
 
 class exception_logger(object):
@@ -241,6 +247,15 @@ def ip_to_cidr(ip, prefix=None):
         # Can't pass ip and prefix separately.  Must concatenate strings.
         net = netaddr.IPNetwork(str(net.ip) + '/' + str(prefix))
     return str(net)
+
+
+def cidr_to_ip(ip_cidr):
+    """Strip the cidr notation from an ip cidr or ip
+
+    :param ip_cidr: An ipv4 or ipv6 address, with or without cidr notation
+    """
+    net = netaddr.IPNetwork(ip_cidr)
+    return str(net.ip)
 
 
 def fixed_ip_cidrs(fixed_ips):
@@ -839,3 +854,38 @@ def resolve_ref(ref):
     if isinstance(ref, weakref.ref):
         ref = ref()
     return ref
+
+
+class GuaranteedGreenPool(eventlet.GreenPool):
+    """
+    Same as GreenPool but guarantees that spawn_n will not block.  It does
+    so by blocking a previous call to spawn_n() from returning until it is
+    known that another spawn_n() will succeed.  The previous spawn_n is
+    blocked after having already initiated the greenthread therefore it is
+    executing while blocked rather than blocking before executing.
+
+    The usecase for this is a server that is in a loop to call accept() and
+    then spawn a thread to deal with the incoming socket request.  We are
+    trying to avoid doing the accept() until we know that a worker is
+    available to do the work.  Since some clients maintain their socket
+    indefinitely it is possible that the full thread pool is used by
+    persistent connections that will never stop running and so it is
+    possible that a worker gets stuck.
+    """
+
+    def spawn(self, function, *args, **kwargs):
+        self.sem.release()
+        gt = super(GuaranteedGreenPool, self).spawn(function, *args, **kwargs)
+        # At this point the greenthread is executing 'function'.  We do not
+        # want to return until we know that at least one greenthread has
+        # finished and another call to spawn_n() will success.
+        self.sem.acquire()
+        return gt
+
+    def spawn_n(self, function, *args, **kwargs):
+        self.sem.release()
+        super(GuaranteedGreenPool, self).spawn_n(function, *args, **kwargs)
+        # At this point the greenthread is executing 'function'.  We do not
+        # want to return until we know that at least one greenthread has
+        # finished and another call to spawn_n() will success.
+        self.sem.acquire()

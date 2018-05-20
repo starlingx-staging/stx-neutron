@@ -14,7 +14,10 @@
 #    under the License.
 
 import collections
+import functools
 import os
+import threading
+import time
 
 import eventlet
 from neutron_lib import constants
@@ -38,6 +41,7 @@ from neutron.common import constants as n_const
 from neutron.common import rpc as n_rpc
 from neutron.common import topics
 from neutron.common import utils
+from neutron.extensions import wrs_net
 from neutron import manager
 
 LOG = logging.getLogger(__name__)
@@ -67,6 +71,25 @@ def _net_lock(network_id):
     lock_name = 'dhcp-agent-network-lock-%s' % network_id
     return lockutils.lock(lock_name, utils.SYNCHRONIZED_PREFIX)
 
+# Wait for a short interval before running agent startup (in seconds)
+DHCP_AGENT_INITIAL_DELAY = 15
+
+
+def run_if_rpc_enabled():
+    """Control whether RPC methods should be invoked based on whether the
+    initial state synchronization has completed or not.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def inner(self, *args, **kwargs):
+            if getattr(self, 'enable_rpc', True):
+                func(self, *args, **kwargs)
+            else:
+                LOG.warning("{} RPC method ignored before initial state"
+                            " synchronization".format(func.__name__))
+        return inner
+    return decorator
+
 
 class DhcpAgent(manager.Manager):
     """DHCP agent service manager.
@@ -84,6 +107,7 @@ class DhcpAgent(manager.Manager):
         self.needs_resync_reasons = collections.defaultdict(list)
         self.dhcp_ready_ports = set()
         self.conf = conf or cfg.CONF
+        self._periodic_resync_event = threading.Event()
         self.cache = NetworkCache()
         self.dhcp_driver_cls = importutils.import_class(self.conf.dhcp_driver)
         self.plugin_rpc = DhcpPluginApi(topics.PLUGIN, self.conf.host)
@@ -109,9 +133,9 @@ class DhcpAgent(manager.Manager):
                 self.conf
             )
             for net_id in existing_networks:
-                net = dhcp.NetModel({"id": net_id, "subnets": [],
-                                     "non_local_subnets": [], "ports": []})
-                self.cache.put(net)
+                network = self.plugin_rpc.get_network_info(net_id)
+                if network:
+                    self.cache.put(network)
         except NotImplementedError:
             # just go ahead with an empty networks cache
             LOG.debug("The '%s' DHCP-driver does not support retrieving of a "
@@ -122,23 +146,34 @@ class DhcpAgent(manager.Manager):
         self.run()
         LOG.info("DHCP agent started")
 
+    def after_stop(self):
+        network_ids = self.cache.get_network_ids()
+        for network_id in network_ids:
+            network = self.cache.get_network_by_id(network_id)
+            self.disable_isolated_metadata_proxy(network)
+        LOG.info("DHCP agent stopped")
+
     def run(self):
         """Activate the DHCP agent."""
+        self.sync_state()
         self.periodic_resync()
         self.start_ready_ports_loop()
 
     def call_driver(self, action, network, **action_kwargs):
         """Invoke an action on a DHCP driver instance."""
+        vlan_id = action_kwargs.pop('vlan_id', n_const.NONE_VLAN_TAG)
         LOG.debug('Calling driver for network: %(net)s action: %(action)s',
-                  {'net': network.id, 'action': action})
+                  {'net': network.id, 'vlan': vlan_id, 'action': action})
         try:
             # the Driver expects something that is duck typed similar to
             # the base models.
+            driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
             driver = self.dhcp_driver_cls(self.conf,
                                           network,
                                           self._process_monitor,
                                           self.dhcp_version,
-                                          self.plugin_rpc)
+                                          self.plugin_rpc,
+                                          **driver_kwargs)
             getattr(driver, action)(**action_kwargs)
             return True
         except exceptions.Conflict:
@@ -166,12 +201,20 @@ class DhcpAgent(manager.Manager):
             else:
                 LOG.exception('Unable to %(action)s dhcp for %(net_id)s.',
                               {'net_id': network.id, 'action': action})
+        finally:
+            # Update the network cache in case the driver updated the port list
+            self.cache.put(network)
 
     def schedule_resync(self, reason, network_id=None):
         """Schedule a resync for a given network and reason. If no network is
         specified, resync all networks.
         """
         self.needs_resync_reasons[network_id].append(reason)
+        self._periodic_resync_event.set()
+        # yield to other threads since it is possible to go in to a
+        # failure loop where we keep rescheduling a sync but no other threads
+        # waiting on the dhcp-agent lock will make any progress.
+        time.sleep(0)
 
     @_sync_lock
     def sync_state(self, networks=None):
@@ -242,7 +285,8 @@ class DhcpAgent(manager.Manager):
     def _periodic_resync_helper(self):
         """Resync the dhcp state at the configured interval."""
         while True:
-            eventlet.sleep(self.conf.resync_interval)
+            if self._periodic_resync_event.wait(self.conf.resync_interval):
+                self._periodic_resync_event.clear()
             if self.needs_resync_reasons:
                 # be careful to avoid a race with additions to list
                 # from other threads
@@ -275,6 +319,16 @@ class DhcpAgent(manager.Manager):
         if network:
             self.configure_dhcp_for_network(network)
 
+    def _get_dhcp_enabled_vlans(self, network):
+        """
+        Return a vlan_id set for the network vlans with dhcp enabled.
+        The primary network with vlan None is also included in the set.
+        """
+        network_subnets = (network.subnets +
+                           getattr(network, 'non_local_subnets', []))
+        return set([getattr(s, wrs_net.VLAN, 0)
+                    for s in network_subnets if s.enable_dhcp])
+
     @utils.exception_logger()
     def safe_configure_dhcp_for_network(self, network):
         try:
@@ -291,16 +345,20 @@ class DhcpAgent(manager.Manager):
         if not network.admin_state_up:
             return
 
-        for subnet in network.subnets:
-            if subnet.enable_dhcp:
-                if self.call_driver('enable', network):
-                    self.update_isolated_metadata_proxy(network)
-                    self.cache.put(network)
-                    # After enabling dhcp for network, mark all existing
-                    # ports as ready. So that the status of ports which are
-                    # created before enabling dhcp can be updated.
-                    self.dhcp_ready_ports |= {p.id for p in network.ports}
-                break
+        enabled = False
+        vlan_ids = self._get_dhcp_enabled_vlans(network)
+        for vlan_id in vlan_ids:
+            driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+            if self.call_driver('enable', network, **driver_kwargs):
+                # After enabling dhcp for network, mark all existing
+                # ports as ready. So that the status of ports which are
+                # created before enabling dhcp can be updated.
+                self.dhcp_ready_ports |= {p.id for p in network.ports}
+                enabled = True
+
+        if enabled:
+            self.update_isolated_metadata_proxy(network)
+            self.cache.put(network)
 
     def disable_dhcp_helper(self, network_id):
         """Disable DHCP for a network known to the agent."""
@@ -314,13 +372,18 @@ class DhcpAgent(manager.Manager):
             # destroy_monitored_metadata_proxy() is a noop when
             # there is no process running.
             self.disable_isolated_metadata_proxy(network)
-            if self.call_driver('disable', network):
-                self.cache.remove(network)
+            vlan_ids = self._get_dhcp_enabled_vlans(network)
+            for vlan_id in vlan_ids:
+                driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+                self.call_driver('disable', network, **driver_kwargs)
+            self.cache.remove(network)
 
     def refresh_dhcp_helper(self, network_id):
         """Refresh or disable DHCP for a network depending on the current state
         of the network.
         """
+        # NOTE(jrichard): In next rebase, do not carry forward changes related
+        # to vlan subnets.
         old_network = self.cache.get_network_by_id(network_id)
         if not old_network:
             # DHCP current not running for network.
@@ -330,22 +393,47 @@ class DhcpAgent(manager.Manager):
         if not network:
             return
 
-        if not any(s for s in network.subnets if s.enable_dhcp):
-            self.disable_dhcp_helper(network.id)
-            return
         # NOTE(kevinbenton): we don't exclude dhcp disabled subnets because
         # they still change the indexes used for tags
         old_non_local_subnets = getattr(old_network, 'non_local_subnets', [])
         new_non_local_subnets = getattr(network, 'non_local_subnets', [])
-        old_cidrs = [s.cidr for s in (old_network.subnets +
-                                      old_non_local_subnets)]
-        new_cidrs = [s.cidr for s in (network.subnets +
-                                      new_non_local_subnets)]
-        if old_cidrs == new_cidrs:
-            self.call_driver('reload_allocations', network)
-            self.cache.put(network)
-        elif self.call_driver('restart', network):
-            self.cache.put(network)
+
+        old_network_subnets = old_network.subnets + old_non_local_subnets
+        new_network_subnets = network.subnets + new_non_local_subnets
+
+        new_vlans = self._get_dhcp_enabled_vlans(network)
+        if not new_vlans:
+            # DHCP not currently configured for network
+            return self.disable_dhcp_helper(network_id)
+
+        # DHCP is enabled, update each network vlan according
+        # to the current DHCP enabled state
+        old_vlans = self._get_dhcp_enabled_vlans(old_network)
+
+        added_vlans = new_vlans - old_vlans
+        for vlan_id in added_vlans:
+            driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+            self.call_driver('enable', network, **driver_kwargs)
+
+        removed_vlans = old_vlans - new_vlans
+        for vlan_id in removed_vlans:
+            driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+            self.call_driver('disable', network, **driver_kwargs)
+
+        changed_vlans = old_vlans & new_vlans
+        for vlan_id in changed_vlans:
+            old_cidrs = set(s.cidr for s in old_network_subnets
+                            if (getattr(s, wrs_net.VLAN, 0) == vlan_id))
+            new_cidrs = set(s.cidr for s in new_network_subnets
+                            if (getattr(s, wrs_net.VLAN, 0) == vlan_id))
+            driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+            if old_cidrs == new_cidrs:
+                self.call_driver('reload_allocations', network,
+                                 **driver_kwargs)
+            else:
+                self.call_driver('restart', network, **driver_kwargs)
+
+        self.cache.put(network)
         # mark all ports as active in case the sync included
         # new ports that we hadn't seen yet.
         self.dhcp_ready_ports |= {p.id for p in network.ports}
@@ -354,6 +442,7 @@ class DhcpAgent(manager.Manager):
         self.update_isolated_metadata_proxy(network)
 
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def network_create_end(self, context, payload):
         """Handle the network.create.end notification event."""
         network_id = payload['network']['id']
@@ -361,6 +450,7 @@ class DhcpAgent(manager.Manager):
             self.enable_dhcp_helper(network_id)
 
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def network_update_end(self, context, payload):
         """Handle the network.update.end notification event."""
         network_id = payload['network']['id']
@@ -371,6 +461,7 @@ class DhcpAgent(manager.Manager):
                 self.disable_dhcp_helper(network_id)
 
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def network_delete_end(self, context, payload):
         """Handle the network.delete.end notification event."""
         network_id = payload['network_id']
@@ -378,6 +469,7 @@ class DhcpAgent(manager.Manager):
             self.disable_dhcp_helper(network_id)
 
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def subnet_update_end(self, context, payload):
         """Handle the subnet.update.end notification event."""
         network_id = payload['subnet']['network_id']
@@ -388,19 +480,34 @@ class DhcpAgent(manager.Manager):
     subnet_create_end = subnet_update_end
 
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def subnet_delete_end(self, context, payload):
         """Handle the subnet.delete.end notification event."""
         subnet_id = payload['subnet_id']
-        network = self.cache.get_network_by_subnet_id(subnet_id)
-        if not network:
-            return
-        with _net_lock(network.id):
+        with _net_lock(payload['network_id']):
             network = self.cache.get_network_by_subnet_id(subnet_id)
             if not network:
                 return
             self.refresh_dhcp_helper(network.id)
 
+    def _get_port_subnet_ids(self, port):
+        """
+        Get the list of subnet id values that this port is servicing.
+        """
+        return [ip['subnet_id'] for ip in port['fixed_ips'] or []]
+
+    def _get_port_vlan_ids(self, port, network):
+        """
+        Get the list of DHCP enabled subnet VLAN id values this port is
+        servicing.
+        """
+        subnet_ids = self._get_port_subnet_ids(port)
+        return list(set([s.get(wrs_net.VLAN, n_const.NONE_VLAN_TAG)
+                         for s in network.subnets
+                         if s.id in subnet_ids and s.enable_dhcp]))
+
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def port_update_end(self, context, payload):
         """Handle the port.update.end notification event."""
         updated_port = dhcp.DictModel(payload['port'])
@@ -414,10 +521,9 @@ class DhcpAgent(manager.Manager):
             LOG.info("Trigger reload_allocations for port %s",
                      updated_port)
             driver_action = 'reload_allocations'
+            orig = self.cache.get_port_by_id(updated_port['id'])
+            orig = orig or {'fixed_ips': []}
             if self._is_port_on_this_agent(updated_port):
-                orig = self.cache.get_port_by_id(updated_port['id'])
-                # assume IP change if not in cache
-                orig = orig or {'fixed_ips': []}
                 old_ips = {i['ip_address'] for i in orig['fixed_ips'] or []}
                 new_ips = {i['ip_address'] for i in updated_port['fixed_ips']}
                 old_subs = {i['subnet_id'] for i in orig['fixed_ips'] or []}
@@ -435,27 +541,44 @@ class DhcpAgent(manager.Manager):
                     LOG.debug("Agent IPs on network %s changed from %s to %s",
                               network.id, old_ips, new_ips)
                     driver_action = 'restart'
+                elif not old_ips and not new_ips:
+                    driver_action = 'disable'
             self.cache.put_port(updated_port)
-            self.call_driver(driver_action, network)
-            self.dhcp_ready_ports.add(updated_port.id)
+            # NOTE(alegacy): the port may no longer have any IP addresses so if
+            # that's the case we need to use the old ones in order to determine
+            # which VLAN we are operating against.
+            orig_vlan_ids = self._get_port_vlan_ids(orig, network)
+            updated_vlan_ids = self._get_port_vlan_ids(updated_port, network)
+            for vlan_id in set(orig_vlan_ids) | set(updated_vlan_ids):
+                driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+                self.call_driver(driver_action, network, **driver_kwargs)
+                self.dhcp_ready_ports.add(updated_port.id)
 
     def _is_port_on_this_agent(self, port):
+        if port['device_owner'] != constants.DEVICE_OWNER_DHCP:
+            # This method is only used to determine whether a port which has
+            # been updated is the port used by the agent.  The name
+            # "_is_port_on_this_agent" is misleading.  A better name would have
+            # been "_is_agent_port".
+            return False
+        # Regardless of which VLAN the port is servicing the device_id will
+        # start with the same prefix so match against anything that starts with
+        # the default device_id for this agent.
         thishost = utils.get_dhcp_agent_device_id(
             port['network_id'], self.conf.host)
-        return port['device_id'] == thishost
+        return port['device_id'].startswith(thishost)
 
     # Use the update handler for the port create event.
     port_create_end = port_update_end
 
     @_wait_if_syncing
+    @run_if_rpc_enabled()
     def port_delete_end(self, context, payload):
         """Handle the port.delete.end notification event."""
-        port = self.cache.get_port_by_id(payload['port_id'])
-        self.cache.deleted_ports.add(payload['port_id'])
-        if not port:
-            return
-        with _net_lock(port.network_id):
-            port = self.cache.get_port_by_id(payload['port_id'])
+        port_id = payload['port_id']
+        with _net_lock(payload['network_id']):
+            port = self.cache.get_port_by_id(port_id)
+            self.cache.deleted_ports.add(port_id)
             if not port:
                 return
             network = self.cache.get_network_by_id(port.network_id)
@@ -464,10 +587,14 @@ class DhcpAgent(manager.Manager):
                 # the agent's port has been deleted. disable the service
                 # and add the network to the resync list to create
                 # (or acquire a reserved) port.
-                self.call_driver('disable', network)
+                driver_action = 'disable'
                 self.schedule_resync("Agent port was deleted", port.network_id)
             else:
-                self.call_driver('reload_allocations', network)
+                driver_action = 'reload_allocations'
+
+            for vlan_id in self._get_port_vlan_ids(port, network):
+                driver_kwargs = {} if not vlan_id else {'vlan_id': vlan_id}
+                self.call_driver(driver_action, network, **driver_kwargs)
 
     def update_isolated_metadata_proxy(self, network):
         """Spawn or kill metadata proxy.
@@ -562,12 +689,22 @@ class DhcpPluginApi(object):
         # can be independently tracked server side.
         return context.get_admin_context_without_session()
 
+    @staticmethod
+    def _remove_vlan_subnets(network):
+        # TODO(alegacy): Can be removed in R6 since no subnets will have VLAN
+        # values at that point.  Only maintained in R5 so that we exclude
+        # VLAN based subnets from being handled prior to the upgrade activation
+        # at which point they will be deleted from the database.
+        network['subnets'] = [s for s in network['subnets']
+                              if not s.get(wrs_net.VLAN)]
+        return network
+
     def get_active_networks_info(self):
         """Make a remote process call to retrieve all network info."""
         cctxt = self.client.prepare(version='1.1')
         networks = cctxt.call(self.context, 'get_active_networks_info',
                               host=self.host)
-        return [dhcp.NetModel(n) for n in networks]
+        return [dhcp.NetModel(self._remove_vlan_subnets(n)) for n in networks]
 
     def get_network_info(self, network_id):
         """Make a remote process call to retrieve network info."""
@@ -575,7 +712,7 @@ class DhcpPluginApi(object):
         network = cctxt.call(self.context, 'get_network_info',
                              network_id=network_id, host=self.host)
         if network:
-            return dhcp.NetModel(network)
+            return dhcp.NetModel(self._remove_vlan_subnets(network))
 
     def create_dhcp_port(self, port):
         """Make a remote process call to create the dhcp port."""
@@ -659,10 +796,10 @@ class NetworkCache(object):
 
         non_local_subnets = getattr(network, 'non_local_subnets', [])
         for subnet in (network.subnets + non_local_subnets):
-            del self.subnet_lookup[subnet.id]
+            self.subnet_lookup.pop(subnet.id, None)
 
         for port in network.ports:
-            del self.port_lookup[port.id]
+            self.port_lookup.pop(port.id, None)
 
     def put_port(self, port):
         network = self.get_network_by_id(port.network_id)
@@ -681,7 +818,7 @@ class NetworkCache(object):
         for index in range(len(network.ports)):
             if network.ports[index] == port:
                 del network.ports[index]
-                del self.port_lookup[port.id]
+                self.port_lookup.pop(port.id, None)
                 break
 
     def get_port_by_id(self, port_id):
@@ -691,24 +828,35 @@ class NetworkCache(object):
                 if port.id == port_id:
                     return port
 
+    def _get_dhcp_enabled_vlans_count(self, network):
+        """
+        Return a count of network vlans with dhcp enabled.
+        The primary network with vlan None is also included in the count.
+        """
+        return len(set([getattr(s, wrs_net.VLAN, 0)
+                        for s in network.subnets if s.enable_dhcp]))
+
     def get_state(self):
         net_ids = self.get_network_ids()
         num_nets = len(net_ids)
         num_subnets = 0
         num_ports = 0
+        num_vlan_subnets = 0
         for net_id in net_ids:
             network = self.get_network_by_id(net_id)
             non_local_subnets = getattr(network, 'non_local_subnets', [])
             num_subnets += len(network.subnets)
             num_subnets += len(non_local_subnets)
             num_ports += len(network.ports)
+            num_vlan_subnets += self._get_dhcp_enabled_vlans_count(network)
         return {'networks': num_nets,
                 'subnets': num_subnets,
-                'ports': num_ports}
+                'ports': num_ports,
+                'vlan_segments': num_vlan_subnets}
 
 
 class DhcpAgentWithStateReport(DhcpAgent):
-    def __init__(self, host=None, conf=None):
+    def __init__(self, host=None, conf=None, initial_delay=None):
         super(DhcpAgentWithStateReport, self).__init__(host=host, conf=conf)
         self.state_rpc = agent_rpc.PluginReportStateAPI(topics.REPORTS)
         self.agent_state = {
@@ -726,7 +874,8 @@ class DhcpAgentWithStateReport(DhcpAgent):
         if report_interval:
             self.heartbeat = loopingcall.FixedIntervalLoopingCall(
                 self._report_state)
-            self.heartbeat.start(interval=report_interval)
+            self.heartbeat.start(interval=report_interval,
+                                 initial_delay=initial_delay)
 
     def _report_state(self):
         try:
@@ -748,6 +897,10 @@ class DhcpAgentWithStateReport(DhcpAgent):
             return
         except Exception:
             LOG.exception("Failed reporting state!")
+            # Ensure that we resync our state the next time we successfully
+            # connect to the server because it may have moved networks
+            # off of this agent.
+            self.needs_resync = True
             return
         if self.agent_state.pop('start_flag', None):
             self.run()
@@ -760,3 +913,18 @@ class DhcpAgentWithStateReport(DhcpAgent):
 
     def after_start(self):
         LOG.info("DHCP agent started")
+
+
+class DhcpAgentWithDelayedStart(DhcpAgentWithStateReport):
+    def __init__(self, host=None):
+        self.enable_rpc = False
+        super(DhcpAgentWithDelayedStart, self).__init__(
+            host=host, initial_delay=DHCP_AGENT_INITIAL_DELAY)
+
+    def init_host(self):
+        # Do not run the sync_state until we have called report_state
+        return
+
+    def _report_state(self):
+        super(DhcpAgentWithDelayedStart, self)._report_state()
+        self.enable_rpc = True

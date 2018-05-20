@@ -45,3 +45,27 @@ class ExtensionDriverNotFound(exceptions.InvalidConfigurationOption):
 class UnknownNetworkType(exceptions.NeutronException):
     """Network with unknown type."""
     message = _("Unknown network type %(network_type)s.")
+
+
+# Pre-defined Audit Failures
+MECH_DRIVER_AUDIT_FAILURE_REASON_CONN = \
+    "ML2 Driver Agent non-reachable"
+
+MECH_DRIVER_AUDIT_FAILURE_REASON_RESPONSE = \
+    "ML2 Driver Agent reachable but non-responsive"
+
+MECH_DRIVER_AUDIT_FAILURE_REASON_AUTH = \
+    "ML2 Driver Agent authentication failure"
+
+MECH_DRIVER_AUDIT_FAILURE_REASON_DBSYNC = \
+    "ML2 Driver Agent is unable to sync Neutron database"
+
+
+class MechanismDriverAuditFailure(exceptions.NeutronException):
+    """Mechanism driver auditing failed."""
+    message = _("(\"%(driver)s\", \"%(reason)s\")")
+
+
+class MechanismDriverAuditSuccess(exceptions.NeutronException):
+    """Mechanism driver auditing succeeded."""
+    message = _("%(driver)s")

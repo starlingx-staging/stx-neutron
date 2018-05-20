@@ -307,3 +307,28 @@ class AgentMechanismGreTestCase(AgentMechanismBaseTestCase):
                                   self.GRE_SEGMENTS)
         self.driver.bind_port(context)
         self._check_unbound(context)
+
+
+class AgentMechanismVxlanTestCase(AgentMechanismBaseTestCase):
+    VXLAN_SEGMENTS = [{mech_api.ID: 'unknown_segment_id',
+                       mech_api.NETWORK_TYPE: 'no_such_type',
+                       mech_api.NETWORK_ID: 'fake_network_id'},
+                      {mech_api.ID: 'vlan_segment_id',
+                       mech_api.NETWORK_TYPE: 'vxlan',
+                       mech_api.PHYSICAL_NETWORK: 'fake_physical_network',
+                       mech_api.SEGMENTATION_ID: 1234,
+                       mech_api.NETWORK_ID: 'fake_network_id'}]
+
+    def test_type_vlan(self):
+        context = FakePortContext(self.AGENT_TYPE,
+                                  self.AGENTS,
+                                  self.VXLAN_SEGMENTS)
+        self.driver.bind_port(context)
+        self._check_bound(context, self.VXLAN_SEGMENTS[1])
+
+    def test_type_vlan_bad(self):
+        context = FakePortContext(self.AGENT_TYPE,
+                                  self.AGENTS_BAD,
+                                  self.VXLAN_SEGMENTS)
+        self.driver.bind_port(context)
+        self._check_unbound(context)

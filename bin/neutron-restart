@@ -1,0 +1,145 @@
+#!/bin/bash
+#
+# Copyright (c) 2016 Wind River Systems, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+#
+# This script provides restart code for neutron
+#
+
+#
+# The patching subsystem provides a patch-functions bash source file
+# with useful function and variable definitions.
+#
+. /etc/patching/patch-functions
+
+service_or_agent_input=$1
+
+restart_service_or_agent()
+{
+    [[ $1 == $service_or_agent_input || $service_or_agent_input == "--all" ]] || \
+    [[ $service_or_agent_input == "--agents-using-haproxy" && \
+        ( $1 == "neutron-avr-agent" || $1 == "neutron-dhcp-agent" ) ]]
+}
+
+restart_neutron_server()
+{
+    if [ ! -f $PATCH_FLAGDIR/neutron-server.restarted ] && restart_service_or_agent neutron-server
+    then
+        # Check SM to see if neutron-server is running
+        sm-query service neutron-server | grep -q 'enabled-active'
+        if [ $? -eq 0 ]
+        then
+            loginfo "$0: Restarting neutron-server"
+
+            # Ask SM to restart neutron-server
+            sm-restart service neutron-server
+            touch $PATCH_FLAGDIR/neutron-server.restarted
+
+            # Wait up to 30 seconds for service to recover
+            let -i UNTIL=$SECONDS+30
+            while [ $UNTIL -ge $SECONDS ]
+            do
+                # Check to see if it's running
+                sm-query service neutron-server | grep -q 'enabled-active'
+                if [ $? -eq 0 ]
+                then
+                    break
+                fi
+
+                # Still not running? Let's wait 5 seconds and check again
+                sleep 5
+            done
+
+            sm-query service neutron-server | grep -q 'enabled-active'
+            if [ $? -ne 0 ]
+            then
+                # Still not running! Clear the flag and mark the RC as failed
+                loginfo "$0: Failed to restart neutron-server"
+                rm -f $PATCH_FLAGDIR/neutron-server.restarted
+                GLOBAL_RC=$PATCH_STATUS_FAILED
+                sm-query service neutron-server
+            fi
+        fi
+    fi
+}
+
+restart_neutron_agent()
+{
+    AGENT_TO_RESTART=$1
+    if [ ! -f $PATCH_FLAGDIR/$AGENT_TO_RESTART.restarted ] && restart_service_or_agent $AGENT_TO_RESTART
+    then
+        /etc/init.d/$AGENT_TO_RESTART status | grep -q "$AGENT_TO_RESTART is running"
+        if [ $? -eq 0 ]
+        then
+            loginfo "$0: Restarting $AGENT_TO_RESTART"
+            /etc/init.d/$AGENT_TO_RESTART stop > /dev/null
+            pmon-restart $AGENT_TO_RESTART
+            touch $PATCH_FLAGDIR/$AGENT_TO_RESTART.restarted
+            loginfo "$0: Restarting $AGENT_TO_RESTART"
+
+            # Wait up to 30 seconds for agent to recover
+            let -i UNTIL=$SECONDS+30
+            while [ $UNTIL -ge $SECONDS ]
+            do
+                # Check to see if it's running
+                /etc/init.d/$AGENT_TO_RESTART status | grep -q "$AGENT_TO_RESTART is running"
+                if [ $? -eq 0 ]
+                then
+                    break
+                fi
+                # Still not running? Let's wait 5 seconds and check again
+                sleep 5
+            done
+
+            /etc/init.d/$AGENT_TO_RESTART status | grep -q "$AGENT_TO_RESTART is running"
+            if [ $? -ne 0 ]
+            then
+                # Still not running! Clear the flag and mark the RC as failed
+                loginfo "$0: Failed to restart $AGENT_TO_RESTART"
+                rm -f $PATCH_FLAGDIR/$AGENT_TO_RESTART.restarted
+                GLOBAL_RC=$PATCH_STATUS_FAILED
+                /etc/init.d/$AGENT_TO_RESTART status
+            fi
+        fi
+    fi
+}
+
+show_help()
+{
+    echo "Usage:"
+    echo "    $0 --all                                    # Restart all neutron services and agents"
+    echo "    $0 --agents-using-haproxy                   # Restart agents using haproxy"
+    echo "    $0 <NEUTRON_AGENT_OR_SERVICE_TO_RESTART>    # Restart specified neutron agent or service"
+    echo "    $0 --help                                   # Show this help message"
+    exit 0
+}
+
+
+
+if [[ $service_or_agent_input == "--help" || -z $service_or_agent_input ]]
+then
+    show_help
+fi
+
+
+if is_controller
+then
+    # neutron-server only runs on the controller
+    restart_neutron_server
+    restart_neutron_agent neutron-bgp-dragent
+fi
+
+
+if is_compute || is_cpe
+then
+    restart_neutron_agent neutron-avr-agent
+    restart_neutron_agent neutron-avs-agent
+    restart_neutron_agent neutron-dhcp-agent
+    restart_neutron_agent neutron-metadata-agent
+    restart_neutron_agent neutron-sriov-nic-agent
+fi
+
+exit $GLOBAL_RC

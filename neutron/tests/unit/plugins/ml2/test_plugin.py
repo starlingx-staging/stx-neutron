@@ -17,6 +17,7 @@ import functools
 
 import fixtures
 import mock
+import six
 import testtools
 import webob
 
@@ -314,7 +315,8 @@ class TestMl2NetworksV2(test_plugin.TestNetworksV2,
                 expected_segments = net[mpnet.SEGMENTS]
                 self.assertEqual(len(expected_segments), len(segments))
                 for expected, actual in zip(expected_segments, segments):
-                    self.assertEqual(expected, actual)
+                    for k, v in six.iteritems(expected):
+                        self.assertEqual(expected[k], actual[k])
 
     def _lookup_network_by_segmentation_id(self, seg_id, num_expected_nets):
         params_str = "%s=%s" % (pnet.SEGMENTATION_ID, seg_id)
@@ -355,7 +357,8 @@ class TestMl2NetworksV2(test_plugin.TestNetworksV2,
         expected_segments = self.mp_nets[0][mpnet.SEGMENTS]
         self.assertEqual(len(expected_segments), len(segments))
         for expected, actual in zip(expected_segments, segments):
-            self.assertEqual(expected, actual)
+            for k, v in six.iteritems(expected):
+                self.assertEqual(expected[k], actual[k])
 
     def test_create_network_segment_allocation_fails(self):
         plugin = directory.get_plugin()
@@ -436,7 +439,11 @@ class TestMl2NetworksWithVlanTransparency(
     TestMl2NetworksWithVlanTransparencyBase):
     _mechanism_drivers = ['test']
 
-    def test_create_network_vlan_transparent_fail(self):
+    # FIXME(alegacy): disabling this test because it does not make sense that
+    # all mech drivers have to agree on whether vlan transparency is supported
+    # or not.  In our system that is managed on a per-provider network basis;
+    # not system wide.
+    def notest_create_network_vlan_transparent_fail(self):
         with mock.patch.object(mech_test.TestMechanismDriver,
                                'check_vlan_transparency',
                                return_value=False):
@@ -2165,8 +2172,10 @@ class TestMultiSegmentNetworks(Ml2PluginV2TestCase):
         segment = {pnet.NETWORK_TYPE: None,
                    pnet.PHYSICAL_NETWORK: 'phys_net',
                    pnet.SEGMENTATION_ID: None}
+        mock_context = mock.Mock()
         with testtools.ExpectedException(exc.InvalidInput):
-            self.driver.type_manager._process_provider_create(segment)
+            self.driver.type_manager._process_provider_create(
+                mock_context, segment)
 
     def test_create_network_plugin(self):
         data = {'network': {'name': 'net1',

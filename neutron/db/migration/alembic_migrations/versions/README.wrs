@@ -1,0 +1,41 @@
+Our alembic migration scripts need to take in to consideration that our 15.12
+code was shipped based on the stable/kilo branch.  The last alembic version
+hash value in the field is currently:  38c55b05413c.  This will be the starting
+point when we upgrade from 15.12 to 16.xx therefore it is the first down
+revision referenced in our current active stream.  Not that 38c55b05413c will
+only exist once all of the feature patches are applied over this commit.  This
+is just laying the ground work for the later patches.
+
+The migration branches will look like this going forward.
+
+         38c55b05413c          ...last version shipped in 15.12
+              |
+              |
+        wrs_kilo_shipped       ...WRS content during 15.12
+              |
+              |
+  (contract)     (expand)      ...branch labels
+      |              |
+      |              |
+      |       wrs_kilo_upgrade ...required changes to avoid conflicts with
+      |                           liberty/mitaka content
+      |              |
+   liberty        liberty      ...upstream content changes from liberty
+      |              |
+      |              |
+    mitaka         mitaka      ...upstream content changes from mitaka
+      |              |
+      |              |
+   wrs_mitaka    wrs_mitaka    ...WRS content during 16.xxx
+      |              |
+      |              |
+    newton         newton      ...upstream content changes from newton
+      |              |
+      |              |
+   wrs_newton    wrs_newton    ...WRS content during 17.xxx
+      |              |
+      |              |
+  CONTRACT_HEAD   EXPAND_HEAD
+
+*NOTE: since we do not do in-place DB upgrades we are not using the contract
+ series.  They are shown here for completeness only.

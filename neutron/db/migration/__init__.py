@@ -23,17 +23,25 @@ from sqlalchemy.engine import reflection
 from neutron._i18n import _
 
 # Neutron milestones for upgrade aliases
+WRS_KILO_SHIPPED = 'wrs_kilo_shipped'
+WRS_KILO_UPGRADE = 'wrs_kilo_upgrade'
 LIBERTY = 'liberty'
 MITAKA = 'mitaka'
+WRS_MITAKA = 'wrs_mitaka'
 NEWTON = 'newton'
+WRS_NEWTON = 'wrs_newton'
 OCATA = 'ocata'
 PIKE = 'pike'
 
 NEUTRON_MILESTONES = [
     # earlier milestones were not tagged
+    WRS_KILO_SHIPPED,
+    WRS_KILO_UPGRADE,
     LIBERTY,
     MITAKA,
+    WRS_MITAKA,
     NEWTON,
+    WRS_NEWTON,
     OCATA,
     PIKE,
     # Do not add the milestone until the end of the release

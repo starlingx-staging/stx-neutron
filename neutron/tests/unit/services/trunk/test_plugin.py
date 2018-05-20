@@ -91,7 +91,9 @@ class TrunkPluginTestCase(test_plugin.Ml2PluginV2TestCase):
                 parent_port, child_port, child_port['port']['id'],
                 trunk_exc.PortInUseAsSubPort)
 
-    def test_delete_trunk_raise_in_use(self):
+    # NOTE(alegacy): we have changed this behaviour to allow deleting a trunk
+    # that is bound as long as the driver says that it can handle bound ports.
+    def notest_delete_trunk_raise_in_use(self):
         with self.port() as port:
             trunk = self._create_test_trunk(port)
             core_plugin = directory.get_plugin()

@@ -12,6 +12,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
+
 
 import datetime
 
@@ -47,6 +51,10 @@ from neutron.extensions import availability_zone as az_ext
 LOG = logging.getLogger(__name__)
 
 AGENT_OPTS = [
+    cfg.IntOpt('agent_down_time', default=75,
+               help=_("Seconds to regard the agent is down; should be at "
+                      "least twice report_interval, to be sure the "
+                      "agent is down for good.")),
     cfg.StrOpt('dhcp_load_type', default='networks',
                choices=['networks', 'subnets', 'ports'],
                help=_('Representing the resource type whose load is being '
@@ -232,6 +240,7 @@ class AgentDbMixin(ext_agent.AgentPluginBase, AgentAvailabilityZoneMixin):
                         context=context, agent=agent)
         with context.session.begin(subtransactions=True):
             context.session.delete(agent)
+            self.clear_agent_fault(agent)
 
     @db_api.retry_if_session_inactive()
     def update_agent(self, context, id, agent):
@@ -239,7 +248,11 @@ class AgentDbMixin(ext_agent.AgentPluginBase, AgentAvailabilityZoneMixin):
         with context.session.begin(subtransactions=True):
             agent = self._get_agent(context, id)
             agent.update(agent_data)
-        return self._make_agent_dict(agent)
+        agent_data = self._make_agent_dict(agent)
+        registry.notify(resources.AGENT, events.AFTER_UPDATE,
+                        self, context=context, host=agent['host'],
+                        plugin=self, agent=agent_data)
+        return agent_data
 
     @db_api.retry_if_session_inactive()
     def get_agents_db(self, context, filters=None):
@@ -376,6 +389,10 @@ class AgentDbMixin(ext_agent.AgentPluginBase, AgentAvailabilityZoneMixin):
                 status = n_const.AGENT_NEW
             greenthread.sleep(0)
 
+        # NOTE(alegacy): update the state dict to include the 'id' so that
+        # registered users can tell which agent this is without an
+        # additional DB query.
+        agent_state['id'] = agent_db.id
         registry.notify(resources.AGENT, event_type, self, context=context,
                         host=agent_state['host'], plugin=self,
                         agent=agent_state)

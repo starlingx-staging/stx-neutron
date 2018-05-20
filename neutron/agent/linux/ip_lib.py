@@ -45,6 +45,7 @@ IP_NONLOCAL_BIND = 'net.ipv4.ip_nonlocal_bind'
 
 LOOPBACK_DEVNAME = 'lo'
 GRE_TUNNEL_DEVICE_NAMES = ['gre0', 'gretap0']
+SIT_DEVNAME_PREFIX = 'sit'
 
 SYS_NET_PATH = '/sys/class/net'
 DEFAULT_GW_PATTERN = re.compile(r"via (\S+)")
@@ -123,7 +124,8 @@ class IPWrapper(SubProcessBase):
     def device(self, name):
         return IPDevice(name, namespace=self.namespace)
 
-    def get_devices(self, exclude_loopback=True, exclude_gre_devices=True):
+    def get_devices(self, exclude_loopback=True, exclude_gre_devices=True,
+                    exclude_sit=False):
         retval = []
         if self.namespace:
             # we call out manually because in order to avoid screen scraping
@@ -153,6 +155,8 @@ class IPWrapper(SubProcessBase):
         for name in output:
             if (exclude_loopback and name == LOOPBACK_DEVNAME or
                     exclude_gre_devices and name in GRE_TUNNEL_DEVICE_NAMES):
+                continue
+            if exclude_sit and name.startswith(SIT_DEVNAME_PREFIX):
                 continue
             retval.append(IPDevice(name, namespace=self.namespace))
 
@@ -216,7 +220,7 @@ class IPWrapper(SubProcessBase):
         return ip
 
     def namespace_is_empty(self):
-        return not self.get_devices()
+        return not self.get_devices(exclude_sit=True)
 
     def garbage_collect_namespace(self):
         """Conditionally destroy the namespace if it is empty."""
@@ -601,8 +605,13 @@ class IpAddrCommand(IpDeviceCommandBase):
                             filters=None, ip_version=None):
         """Get a list of all the devices with an IP attached in the namespace.
 
-        @param name: if it's not None, only a device with that matching name
+        :param name: if it's not None, only a device with that matching name
                      will be returned.
+        :param scope: address scope, for example, global, link, or host
+        :param to: IP address or cidr to match. If cidr then it will match
+                   any IP within the specified subnet
+        :param filters: list of any other filters supported by /sbin/ip
+        :param ip_version: 4 or 6
         """
         options = [ip_version] if ip_version else []
 

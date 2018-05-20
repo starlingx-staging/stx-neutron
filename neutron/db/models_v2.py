@@ -12,6 +12,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
+
 
 from neutron_lib.api.definitions import network as net_def
 from neutron_lib.api.definitions import port as port_def
@@ -166,6 +170,7 @@ class Subnet(standard_attr.HasStandardAttributes, model_base.BASEV2,
         'SubnetPool', lazy='joined',
         foreign_keys='Subnet.subnetpool_id',
         primaryjoin='Subnet.subnetpool_id==SubnetPool.id')
+    vlan_id = sa.Column(sa.Integer, nullable=True)
     ip_version = sa.Column(sa.Integer, nullable=False)
     cidr = sa.Column(sa.String(64), nullable=False)
     gateway_ip = sa.Column(sa.String(64))

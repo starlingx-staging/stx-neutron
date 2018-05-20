@@ -430,16 +430,14 @@ class L3SchedulerTestBaseMixin(object):
         }
         plugin.get_router.return_value = sync_router
         with mock.patch.object(scheduler, 'bind_router'),\
-                mock.patch.object(plugin,
-                                  'get_snat_bindings',
-                                  return_value=False):
+                mock.patch.object(scheduler, 'get_l3_agents_for_router',
+                                  return_value=[agent]):
             scheduler._schedule_router(
                 plugin, self.adminContext, 'foo_router_id', None)
         expected_calls = [
             mock.call.get_router(mock.ANY, 'foo_router_id'),
             mock.call.get_l3_agents_hosting_routers(
                 mock.ANY, ['foo_router_id'], admin_state_up=True),
-            mock.call.get_l3_agents(mock.ANY, active=True),
             mock.call.get_l3_agent_candidates(mock.ANY, sync_router, [agent]),
         ]
         plugin.assert_has_calls(expected_calls)
@@ -484,7 +482,7 @@ class L3SchedulerTestBaseMixin(object):
         router = self._make_router(self.fmt,
                                    tenant_id=uuidutils.generate_uuid(),
                                    name='r1')
-        with mock.patch.object(l3_agent_scheduler.LOG, 'debug') as flog:
+        with mock.patch.object(l3_agent_scheduler.LOG, 'warning') as flog:
             self._test_schedule_bind_router(self.agent1, router)
             self.assertEqual(1, flog.call_count)
             args, kwargs = flog.call_args
@@ -1274,6 +1272,7 @@ class L3DvrSchedulerTestCase(testlib_api.SqlTestCase):
 
     def _prepare_schedule_snat_tests(self):
         agent = agent_model.Agent()
+        agent.agent_type = constants.AGENT_TYPE_L3
         agent.admin_state_up = True
         agent.heartbeat_timestamp = timeutils.utcnow()
         router = {

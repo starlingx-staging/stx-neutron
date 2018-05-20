@@ -135,7 +135,11 @@ class _BackingOffContextWrapper(_ContextWrapper):
 
     @classmethod
     def get_max_timeout(cls):
-        return cls._max_timeout or _get_default_method_timeout() * 10
+        # NOTE(alegacy): removing the multiplication factor of 10 to avoid
+        # being blocked for 600 seconds while waiting for a controller swact to
+        # finish.  10 minutes is a long time to be without a working DHCP
+        # service.
+        return cls._max_timeout or _get_default_method_timeout() * 1
 
     @classmethod
     def set_max_timeout(cls, max_timeout):

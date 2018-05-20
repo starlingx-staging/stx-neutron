@@ -15,6 +15,7 @@
 # String literals representing core resources.
 AGENT = 'agent'
 FLOATING_IP = 'floatingip'
+HOST = 'host'
 NETWORK = 'network'
 NETWORKS = 'networks'
 PORT = 'port'

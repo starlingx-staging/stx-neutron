@@ -24,19 +24,24 @@ from neutron.db import models_v2
 from neutron.plugins.ml2 import models as ml2_models
 
 
-HA_ROUTER_PORTS = (const.DEVICE_OWNER_HA_REPLICATED_INT,
-                   const.DEVICE_OWNER_ROUTER_SNAT)
+HA_ROUTER_PORTS = (const.DEVICE_OWNER_HA_REPLICATED_INT,)
 
 
-def get_agent_ip_by_host(session, agent_host):
+def get_agent_ip_by_host(session, agent_host, physical_network=None):
     agent = get_agent_by_host(session, agent_host)
     if agent:
-        return get_agent_ip(agent)
+        return get_agent_ip(agent, physical_network=physical_network)
 
 
-def get_agent_ip(agent):
+def get_agent_ip(agent, physical_network=None):
     configuration = jsonutils.loads(agent.configurations)
-    return configuration.get('tunneling_ip')
+    if 'tunneling_ip' in configuration:
+        return configuration.get('tunneling_ip')
+    elif 'tunneling_ips' in configuration:
+        tunneling_ips = configuration.get('tunneling_ips')
+        return tunneling_ips.get(physical_network)
+    else:
+        return None
 
 
 def get_agent_uptime(agent):
@@ -54,6 +59,12 @@ def get_agent_l2pop_network_types(agent):
     return configuration.get('l2pop_network_types')
 
 
+def agent_supports_tunneling(agent):
+    configuration = jsonutils.loads(agent.configurations)
+    return ('tunneling_ip' in configuration or
+            'tunneling_ips' in configuration)
+
+
 def get_agent_by_host(session, agent_host):
     """Return a L2 agent on the host."""
 
@@ -61,7 +72,7 @@ def get_agent_by_host(session, agent_host):
         query = session.query(agent_model.Agent)
         query = query.filter(agent_model.Agent.host == agent_host)
     for agent in query:
-        if get_agent_ip(agent):
+        if agent_supports_tunneling(agent):
             return agent
 
 
@@ -100,7 +111,7 @@ def get_nondistributed_active_network_ports(session, network_id):
     ha_iface_ids_query = _get_ha_router_interface_ids(session, network_id)
     query = query.filter(models_v2.Port.id.notin_(ha_iface_ids_query))
     return [(bind, agent) for bind, agent in query.all()
-            if get_agent_ip(agent)]
+            if agent_supports_tunneling(agent)]
 
 
 def get_dvr_active_network_ports(session, network_id):
@@ -118,7 +129,7 @@ def get_dvr_active_network_ports(session, network_id):
                              models_v2.Port.device_owner ==
                              const.DEVICE_OWNER_DVR_INTERFACE)
     return [(bind, agent) for bind, agent in query.all()
-            if get_agent_ip(agent)]
+            if agent_supports_tunneling(agent)]
 
 
 def get_distributed_active_network_ports(session, network_id):
@@ -152,7 +163,7 @@ def get_ha_agents(session, network_id=None, router_id=None):
     agents_query = session.query(agent_model.Agent)
     agents_query = agents_query.filter(agent_model.Agent.host.in_(query))
     return [agent for agent in agents_query
-            if get_agent_ip(agent)]
+            if agent_supports_tunneling(agent)]
 
 
 def get_ha_agents_by_router_id(session, router_id):

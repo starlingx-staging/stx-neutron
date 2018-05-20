@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 import netaddr
 from neutron_lib import constants as const
@@ -323,6 +326,9 @@ class SecurityGroupInfoAPIMixin(object):
 
     def _apply_provider_rule(self, context, ports):
         for port in ports.values():
+            # DO NOT CREATE GENERATED RULES IF NO RULES CONFIGURED
+            if not port['security_group_rules']:
+                continue
             self._add_ingress_ra_rule(port)
             self._add_ingress_dhcp_rule(port)
 

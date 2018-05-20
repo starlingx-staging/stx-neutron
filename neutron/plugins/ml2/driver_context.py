@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from neutron_lib.api.definitions import portbindings
 from neutron_lib import constants
@@ -21,6 +24,7 @@ from oslo_serialization import jsonutils
 import sqlalchemy
 
 from neutron.db import segments_db
+from neutron.plugins.ml2 import db
 from neutron.plugins.ml2 import driver_api as api
 
 LOG = log.getLogger(__name__)
@@ -61,6 +65,10 @@ class MechanismDriverContext(object):
         # method call of the plugin.
         self._plugin_context = plugin_context
 
+    @property
+    def context(self):
+        return self._plugin_context
+
 
 class NetworkContext(MechanismDriverContext, api.NetworkContext):
 
@@ -94,6 +102,8 @@ class SubnetContext(MechanismDriverContext, api.SubnetContext):
         self._original_subnet = original_subnet
         self._network_context = NetworkContext(plugin, plugin_context,
                                                network) if network else None
+        self._segments = segments_db.get_subnet_segments(
+            plugin_context.session, subnet['id'])
 
     @property
     def current(self):
@@ -111,6 +121,10 @@ class SubnetContext(MechanismDriverContext, api.SubnetContext):
             self._network_context = NetworkContext(
                 self._plugin, self._plugin_context, network)
         return self._network_context
+
+    @property
+    def subnet_segments(self):
+        return self._segments
 
 
 class PortContext(MechanismDriverContext, api.PortContext):
@@ -313,3 +327,22 @@ class PortContext(MechanismDriverContext, api.PortContext):
     def release_dynamic_segment(self, segment_id):
         return self._plugin.type_manager.release_dynamic_segment(
                 self._plugin_context, segment_id)
+
+    def subnets(self):
+        return db.get_subnets_by_port(self._plugin_context.session,
+                                      self._port['id'])
+
+    def subnet_segments(self):
+        subnets = db.get_subnets_by_port(self._plugin_context.session,
+                                         self._port['id'])
+        results = []
+        for subnet in subnets:
+            segments = segments_db.get_subnet_segments(
+                self._plugin_context.session, subnet['id'])
+            for segment in segments or []:
+                results.append({
+                        'subnet': subnet,
+                        'network_type': segment[api.NETWORK_TYPE],
+                        'physical_network': segment[api.PHYSICAL_NETWORK],
+                        'segmentation_id': segment[api.SEGMENTATION_ID]})
+        return results

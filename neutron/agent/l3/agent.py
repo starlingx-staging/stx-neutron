@@ -263,6 +263,14 @@ class L3NATAgent(ha.AgentMixin,
         consumers = [[topics.NETWORK, topics.UPDATE]]
         agent_rpc.create_consumers([self], topics.AGENT, consumers)
 
+        # We set HA network port status to DOWN to let l2 agent update it
+        # to ACTIVE after wiring. This allows us to spawn keepalived only
+        # when l2 agent finished wiring the port.
+        try:
+            self.plugin_rpc.update_all_ha_network_port_statuses(self.context)
+        except Exception:
+            LOG.exception('update_all_ha_network_port_statuses failed')
+
     def _check_config_params(self):
         """Check items in configuration files.
 
@@ -330,7 +338,13 @@ class L3NATAgent(ha.AgentMixin,
             kwargs['host'] = self.host
 
         if router.get('distributed') and router.get('ha'):
-            if self.conf.agent_mode == lib_const.L3_AGENT_MODE_DVR_SNAT:
+            # if the router does not contain information about the HA interface
+            # this means that this DVR+HA router needs to host only the edge
+            # side of it, typically because it's landing on a node that needs
+            # to provision a router namespace because of a DVR service port
+            # (e.g. DHCP).
+            if (self.conf.agent_mode == lib_const.L3_AGENT_MODE_DVR_SNAT
+                    and router.get(lib_const.HA_INTERFACE_KEY) is not None):
                 kwargs['state_change_callback'] = self.enqueue_state_change
                 return dvr_edge_ha_router.DvrEdgeHaRouter(*args, **kwargs)
 
@@ -608,10 +622,6 @@ class L3NATAgent(ha.AgentMixin,
                          lib_const.L3_AGENT_MODE_DVR_SNAT)
         try:
             router_ids = self.plugin_rpc.get_router_ids(context)
-            # We set HA network port status to DOWN to let l2 agent update it
-            # to ACTIVE after wiring. This allows us to spawn keepalived only
-            # when l2 agent finished wiring the port.
-            self.plugin_rpc.update_all_ha_network_port_statuses(context)
             # fetch routers by chunks to reduce the load on server and to
             # start router processing earlier
             for i in range(0, len(router_ids), self.sync_routers_chunk_size):

@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2016 Wind River Systems, Inc.
+#
 
 import abc
 import collections
@@ -19,6 +22,7 @@ import os
 import re
 import shutil
 import time
+import uuid
 
 import netaddr
 from neutron_lib.api.definitions import extra_dhcp_opt as edo_ext
@@ -40,6 +44,8 @@ from neutron.agent.linux import iptables_manager
 from neutron.cmd import runtime_checks as checks
 from neutron.common import constants as n_const
 from neutron.common import utils as common_utils
+from neutron.extensions import wrs_net
+from neutron.extensions import wrs_provider
 from neutron.ipam import utils as ipam_utils
 
 LOG = logging.getLogger(__name__)
@@ -53,6 +59,7 @@ METADATA_DEFAULT_PREFIX = 16
 METADATA_DEFAULT_IP = '169.254.169.254'
 METADATA_DEFAULT_CIDR = '%s/%d' % (METADATA_DEFAULT_IP,
                                    METADATA_DEFAULT_PREFIX)
+METADATA_DEFAULT_IFNAME = 'lo'
 METADATA_PORT = 80
 WIN2k3_STATIC_DNS = 249
 NS_PREFIX = 'qdhcp-'
@@ -121,11 +128,12 @@ class NetModel(DictModel):
 class DhcpBase(object):
 
     def __init__(self, conf, network, process_monitor,
-                 version=None, plugin=None):
+                 version=None, plugin=None, **kwargs):
         self.conf = conf
         self.network = network
         self.process_monitor = process_monitor
-        self.device_manager = DeviceManager(self.conf, plugin)
+        self.vlan_id = kwargs.get('vlan_id', n_const.NONE_VLAN_TAG)
+        self.device_manager = DeviceManager(self.conf, plugin, **kwargs)
         self.version = version
 
     @abc.abstractmethod
@@ -177,11 +185,14 @@ class DhcpLocalProcess(DhcpBase):
     PORTS = []
 
     def __init__(self, conf, network, process_monitor, version=None,
-                 plugin=None):
-        super(DhcpLocalProcess, self).__init__(conf, network, process_monitor,
-                                               version, plugin)
+                 plugin=None, **kwargs):
+        super(DhcpLocalProcess, self).__init__(conf, network,
+                                               process_monitor,
+                                               version, plugin,
+                                               **kwargs)
         self.confs_dir = self.get_confs_dir(conf)
-        self.network_conf_dir = os.path.join(self.confs_dir, network.id)
+        self.network_conf_dir = os.path.join(self.confs_dir,
+                                             self._get_process_uuid())
         fileutils.ensure_tree(self.network_conf_dir, mode=0o755)
 
     @staticmethod
@@ -200,12 +211,36 @@ class DhcpLocalProcess(DhcpBase):
         non_local_subnets = getattr(network, 'non_local_subnets', [])
         return network.subnets + non_local_subnets
 
+    def _get_process_uuid(self):
+        """
+        Returns a UUID as a string that is unique for the current process
+        based on the current network and vlan.
+        """
+        if self.vlan_id:
+            return str(uuid.uuid5(uuid.UUID(self.network.id),
+                                  str(self.vlan_id)))
+        else:
+            return self.network.id
+
+    def _get_dhcp_enabled_subnets(self):
+        """
+        Return a list of DHCP enabled subnets on the current network and
+        vlan
+        """
+        subnets = [s for s in self._get_all_subnets(self.network) if
+                   s.enable_dhcp and
+                   getattr(s, wrs_net.VLAN, 0) == self.vlan_id]
+        return sorted(subnets, key=lambda s: netaddr.IPNetwork(s.cidr))
+
     def _enable_dhcp(self):
         """check if there is a subnet within the network with dhcp enabled."""
-        for subnet in self.network.subnets:
-            if subnet.enable_dhcp:
-                return True
-        return False
+        return bool(self._get_dhcp_enabled_subnets())
+
+    def _output_network_file(self):
+        pass
+
+    def _output_vlan_file(self):
+        pass
 
     def enable(self):
         """Enables DHCP for this network by spawning a local process."""
@@ -215,12 +250,14 @@ class DhcpLocalProcess(DhcpBase):
             fileutils.ensure_tree(self.network_conf_dir, mode=0o755)
             interface_name = self.device_manager.setup(self.network)
             self.interface_name = interface_name
+            self._output_network_file()
+            self._output_vlan_file()
             self.spawn_process()
 
     def _get_process_manager(self, cmd_callback=None):
         return external_process.ProcessManager(
             conf=self.conf,
-            uuid=self.network.id,
+            uuid=self._get_process_uuid(),
             namespace=self.network.namespace,
             default_cmd_callback=cmd_callback,
             pid_file=self.get_conf_file_name('pid'),
@@ -228,11 +265,12 @@ class DhcpLocalProcess(DhcpBase):
 
     def disable(self, retain_port=False):
         """Disable DHCP for this network by killing the local process."""
-        self.process_monitor.unregister(self.network.id, DNSMASQ_SERVICE_NAME)
+        self.process_monitor.unregister(self._get_process_uuid(),
+                                        DNSMASQ_SERVICE_NAME)
         self._get_process_manager().disable()
         if not retain_port:
             self._destroy_namespace_and_port()
-        self._remove_config_files()
+            self._remove_config_files()
 
     def _destroy_namespace_and_port(self):
         try:
@@ -246,7 +284,10 @@ class DhcpLocalProcess(DhcpBase):
             LOG.debug("Namespace already deleted: %s", self.network.namespace)
             return
         try:
-            ns_ip.netns.delete(self.network.namespace)
+            # Since the namespace is shared amongst all of the VLAN tagged
+            # subnets on the network do not delete it unless no other subnets
+            # are using it
+            ns_ip.garbage_collect_namespace()
         except RuntimeError:
             LOG.warning('Failed trying to delete namespace: %s',
                         self.network.namespace)
@@ -254,6 +295,12 @@ class DhcpLocalProcess(DhcpBase):
     def _get_value_from_conf_file(self, kind, converter=None):
         """A helper function to read a value from one of the state files."""
         file_name = self.get_conf_file_name(kind)
+        return DhcpLocalProcess._read_value_from_conf_file(
+            file_name, kind, converter)
+
+    @classmethod
+    def _read_value_from_conf_file(cls, file_name, kind, converter=None):
+        """A helper function to read a value from one of the state files."""
         msg = _('Error while reading %s')
 
         try:
@@ -310,13 +357,18 @@ class Dnsmasq(DhcpLocalProcess):
     def existing_dhcp_networks(cls, conf):
         """Return a list of existing networks ids that we have configs for."""
         confs_dir = cls.get_confs_dir(conf)
-        try:
-            return [
-                c for c in os.listdir(confs_dir)
-                if uuidutils.is_uuid_like(c)
-            ]
-        except OSError:
-            return []
+        conf_uuids = [
+            c for c in os.listdir(confs_dir)
+            if uuidutils.is_uuid_like(c)
+        ]
+        networks = set()
+        for conf_uuid in conf_uuids:
+            conf_dir = os.path.join(confs_dir, conf_uuid)
+            filename = os.path.join(conf_dir, 'network')
+            network = DhcpLocalProcess._read_value_from_conf_file(
+                filename, 'network')
+            networks.add(network)
+        return networks
 
     def _build_cmdline_callback(self, pid_file):
         # We ignore local resolv.conf if dns servers are specified
@@ -336,6 +388,7 @@ class Dnsmasq(DhcpLocalProcess):
             '--dhcp-optsfile=%s' % self.get_conf_file_name('opts'),
             '--dhcp-leasefile=%s' % self.get_conf_file_name('leases'),
             '--dhcp-match=set:ipxe,175',
+            '--dhcp-authoritative',
         ]
         if self.device_manager.driver.bridged:
             cmd += [
@@ -351,7 +404,8 @@ class Dnsmasq(DhcpLocalProcess):
             ]
 
         possible_leases = 0
-        for i, subnet in enumerate(self._get_all_subnets(self.network)):
+        subnets = self._get_dhcp_enabled_subnets()
+        for i, subnet in enumerate(subnets):
             mode = None
             # if a subnet is specified to have dhcp disabled
             if not subnet.enable_dhcp:
@@ -451,7 +505,7 @@ class Dnsmasq(DhcpLocalProcess):
 
         pm.enable(reload_cfg=reload_with_HUP)
 
-        self.process_monitor.register(uuid=self.network.id,
+        self.process_monitor.register(uuid=self._get_process_uuid(),
                                       service_name=DNSMASQ_SERVICE_NAME,
                                       monitored_process=pm)
 
@@ -490,6 +544,10 @@ class Dnsmasq(DhcpLocalProcess):
         self._output_addn_hosts_file()
         self._output_opts_file()
 
+    def _namespace_created(self):
+        ip_wrapper = ip_lib.IPWrapper()
+        return ip_wrapper.netns.exists(self.network.namespace)
+
     def reload_allocations(self):
         """Rebuild the dnsmasq config and signal the dnsmasq to reload."""
 
@@ -505,6 +563,10 @@ class Dnsmasq(DhcpLocalProcess):
             LOG.debug('Agent does not have an interface on this network '
                       'anymore, skipping reload: %s', self.network.id)
             return
+        elif not self._namespace_created():
+            LOG.debug('Cannot reload allocations prior to namespace '
+                      'creation for network %s', self.network.id)
+            raise exceptions.Conflict()
 
         self._release_unused_leases()
         self._spawn_or_reload_process(reload_with_HUP=True)
@@ -565,13 +627,16 @@ class Dnsmasq(DhcpLocalProcess):
             no_opts,  # A flag indication that options shouldn't be written
         )
         """
+        subnets = self._get_dhcp_enabled_subnets()
+        subnet_ids = [s.id for s in subnets]
+
         v6_nets = dict((subnet.id, subnet) for subnet in
-                       self._get_all_subnets(self.network)
-                       if subnet.ip_version == 6)
+                       subnets if subnet.ip_version == 6)
 
         for port in self.network.ports:
             fixed_ips = self._sort_fixed_ips_for_dnsmasq(port.fixed_ips,
                                                          v6_nets)
+            fixed_ips = [ip for ip in fixed_ips if ip.subnet_id in subnet_ids]
             # Confirm whether Neutron server supports dns_name attribute in the
             # ports API
             dns_assignment = getattr(port, 'dns_assignment', None)
@@ -631,8 +696,7 @@ class Dnsmasq(DhcpLocalProcess):
         else:
             timestamp = int(time.time()) + self.conf.dhcp_lease_duration
         dhcp_enabled_subnet_ids = [s.id for s in
-                                   self._get_all_subnets(self.network)
-                                   if s.enable_dhcp]
+                                   self._get_dhcp_enabled_subnets()]
         for host_tuple in self._iter_hosts():
             port, alloc, hostname, name, no_dhcp, no_opts = host_tuple
             # don't write ip address which belongs to a dhcp disabled subnet
@@ -660,6 +724,16 @@ class Dnsmasq(DhcpLocalProcess):
             return '[%s]' % address
         return address
 
+    def _output_network_file(self):
+        """Write the network id to the conf directory for process state"""
+        network_file_path = self.get_conf_file_name('network')
+        file_utils.replace_file(network_file_path, self.network.id)
+
+    def _output_vlan_file(self):
+        """Write the vlan id to the conf directory for process state"""
+        vlan_file_path = self.get_conf_file_name('vlan')
+        file_utils.replace_file(vlan_file_path, str(self.vlan_id))
+
     def _output_hosts_file(self):
         """Writes a dnsmasq compatible dhcp hosts file.
 
@@ -681,8 +755,7 @@ class Dnsmasq(DhcpLocalProcess):
 
         LOG.debug('Building host file: %s', filename)
         dhcp_enabled_subnet_ids = [s.id for s in
-                                   self._get_all_subnets(self.network)
-                                   if s.enable_dhcp]
+                                   self._get_dhcp_enabled_subnets()]
         # NOTE(ihrachyshka): the loop should not log anything inside it, to
         # avoid potential performance drop when lots of hosts are dumped
         for host_tuple in self._iter_hosts():
@@ -868,19 +941,30 @@ class Dnsmasq(DhcpLocalProcess):
         file_utils.replace_file(name, '\n'.join(options))
         return name
 
+    def _is_same_vlan(self, a, b):
+        return bool(getattr(a, wrs_net.VLAN, 0) == getattr(b, wrs_net.VLAN, 0))
+
     def _generate_opts_per_subnet(self):
+        # Obtain the provider MTU if available
+        mtu = getattr(self.network, wrs_provider.MTU, None)
         options = []
         subnet_index_map = {}
         if self.conf.enable_isolated_metadata or self.conf.force_metadata:
             subnet_to_interface_ip = self._make_subnet_interface_ip_map()
         isolated_subnets = self.get_isolated_subnets(self.network)
-        for i, subnet in enumerate(self._get_all_subnets(self.network)):
+        subnets = self._get_dhcp_enabled_subnets()
+        for i, subnet in enumerate(subnets):
             addr_mode = getattr(subnet, 'ipv6_address_mode', None)
             segment_id = getattr(subnet, 'segment_id', None)
             if (not subnet.enable_dhcp or
                 (subnet.ip_version == 6 and
                  addr_mode == constants.IPV6_SLAAC)):
                 continue
+            # Configure the MTU option if applicable
+            if mtu and subnet.ip_version == 4:
+                options.append(
+                    self._format_option(
+                        subnet.ip_version, i, 'mtu', str(mtu)))
             if subnet.dns_nameservers:
                 options.append(
                     self._format_option(
@@ -925,6 +1009,7 @@ class Dnsmasq(DhcpLocalProcess):
                 for s in self._get_all_subnets(self.network):
                     sub_segment_id = getattr(s, 'segment_id', None)
                     if (s.ip_version == 4 and
+                            self._is_same_vlan(s, subnet) and
                             s.cidr != subnet.cidr and
                             sub_segment_id == segment_id):
                         host_routes.append("%s,0.0.0.0" % s.cidr)
@@ -1113,9 +1198,10 @@ class Dnsmasq(DhcpLocalProcess):
 
 class DeviceManager(object):
 
-    def __init__(self, conf, plugin):
+    def __init__(self, conf, plugin, **kwargs):
         self.conf = conf
         self.plugin = plugin
+        self.vlan_id = kwargs.get('vlan_id', n_const.NONE_VLAN_TAG)
         self.driver = agent_common_utils.load_interface_driver(conf)
 
     def get_interface_name(self, network, port):
@@ -1126,8 +1212,17 @@ class DeviceManager(object):
         """Return a unique DHCP device ID for this host on the network."""
         # There could be more than one dhcp server per network, so create
         # a device id that combines host and network ids
+        kwargs = {}
+        if self.vlan_id:
+            kwargs['vlan_id'] = self.vlan_id
         return common_utils.get_dhcp_agent_device_id(network.id,
-                                                     self.conf.host)
+                                                     self.conf.host,
+                                                     **kwargs)
+
+    def _get_network_subnets(self, network):
+        """Return a list of subnets on the current network and vlan"""
+        return [s for s in network.subnets if getattr(s,
+                   wrs_net.VLAN, n_const.NONE_VLAN_TAG) == self.vlan_id]
 
     def _set_default_route_ip_version(self, network, device_name, ip_version):
         device = ip_lib.IPDevice(device_name, namespace=network.namespace)
@@ -1135,7 +1230,8 @@ class DeviceManager(object):
         if gateway:
             gateway = gateway.get('gateway')
 
-        for subnet in network.subnets:
+        subnets = self._get_network_subnets(network)
+        for subnet in subnets:
             skip_subnet = (
                 subnet.ip_version != ip_version
                 or not subnet.enable_dhcp
@@ -1254,23 +1350,58 @@ class DeviceManager(object):
             port = self.plugin.update_dhcp_port(
                 port.id,
                 {'port': {'network_id': network.id,
-                          'fixed_ips': wanted_fixed_ips}})
+                          'fixed_ips': wanted_fixed_ips,
+                          'device_id': device_id}})
             if not port:
                 raise exceptions.Conflict()
 
         return port
+
+    def _setup_same_reserved_dhcp_port(self, network, device_id, dhcp_subnets):
+        """Setup the same reserved DHCP port that was previously used for this
+        same network+subnets, if there is one.
+        """
+        LOG.debug('DHCP port %(device_id)s on network %(network_id)s'
+                  ' does not yet exist. Checking for a reserved port with'
+                  ' the same subnet(s).',
+                  {'device_id': device_id, 'network_id': network.id})
+        # Compare what the subnets should be against what is already
+        # on the port.
+        dhcp_enabled_subnet_ids = set(dhcp_subnets)
+
+        for port in network.ports:
+            port_device_id = getattr(port, 'device_id', None)
+            if port_device_id != n_const.DEVICE_ID_RESERVED_DHCP_PORT:
+                continue
+            port_subnet_ids = set(ip.subnet_id for ip in port.fixed_ips)
+            if set(port_subnet_ids) != set(dhcp_enabled_subnet_ids):
+                    continue
+            try:
+                port = self.plugin.update_dhcp_port(
+                    port.id, {'port': {'network_id': network.id,
+                                       'device_id': device_id}})
+            except oslo_messaging.RemoteError as e:
+                if e.exc_type == 'DhcpPortInUse':
+                    LOG.info("Skipping DHCP port %s as it is "
+                             "already in use", port.id)
+                    continue
+                raise
+            if port:
+                return port
 
     def _setup_reserved_dhcp_port(self, network, device_id, dhcp_subnets):
         """Setup the reserved DHCP port, if there is one."""
         LOG.debug('DHCP port %(device_id)s on network %(network_id)s'
                   ' does not yet exist. Checking for a reserved port.',
                   {'device_id': device_id, 'network_id': network.id})
+        unique_ip_subnets = [dict(subnet_id=s) for s in dhcp_subnets]
         for port in network.ports:
             port_device_id = getattr(port, 'device_id', None)
             if port_device_id == n_const.DEVICE_ID_RESERVED_DHCP_PORT:
                 try:
                     port = self.plugin.update_dhcp_port(
                         port.id, {'port': {'network_id': network.id,
+                                           'fixed_ips': unique_ip_subnets,
                                            'device_id': device_id}})
                 except oslo_messaging.RemoteError as e:
                     if e.exc_type == 'DhcpPortInUse':
@@ -1309,17 +1440,19 @@ class DeviceManager(object):
         # The ID that the DHCP port will have (or already has).
         device_id = self.get_device_id(network)
 
-        # Get the set of DHCP-enabled local subnets on this network.
-        dhcp_subnets = {subnet.id: subnet for subnet in network.subnets
+        # Get the set of DHCP-enabled subnets on this network.
+        subnets = self._get_network_subnets(network)
+        dhcp_subnets = {subnet.id: subnet for subnet in subnets
                         if subnet.enable_dhcp}
 
-        # There are 3 cases: either the DHCP port already exists (but
-        # might need to be updated for a changed set of subnets); or
-        # some other code has already prepared a 'reserved' DHCP port,
-        # and we just need to adopt that; or we need to create a new
-        # DHCP port.  Try each of those in turn until we have a DHCP
-        # port.
+        # There are 4 cases: either the DHCP port already exists (but might
+        # need to be updated for a changed set of subnets); or a previous agent
+        # released a port that is now reserved and can be reused as is; or some
+        # other code has already prepared a 'reserved' DHCP port, and we just
+        # need to adopt that; or we need to create a new DHCP port.  Try each
+        # of those in turn until we have a DHCP port.
         for setup_method in (self._setup_existing_dhcp_port,
+                             self._setup_same_reserved_dhcp_port,
                              self._setup_reserved_dhcp_port,
                              self._setup_new_dhcp_port):
             dhcp_port = setup_method(network, device_id, dhcp_subnets)
@@ -1349,6 +1482,8 @@ class DeviceManager(object):
                      # we don't care about any ips on subnets irrelevant
                      # to us (e.g. auto ipv6 addresses)
                      if fixed_ip.subnet_id in dhcp_subnets]
+        if not fixed_ips and not self.driver.use_gateway_ips:
+            raise exceptions.Conflict()
 
         ips = [DictModel(item) if isinstance(item, dict) else item
                for item in fixed_ips]
@@ -1456,19 +1591,27 @@ class DeviceManager(object):
                     ip_cidrs.append('%s/%s' % (gateway, net.prefixlen))
 
         if self.conf.force_metadata or self.conf.enable_isolated_metadata:
-            ip_cidrs.append(METADATA_DEFAULT_CIDR)
+            meta_cidrs = ["%s/32" % METADATA_DEFAULT_IP]
+            self.driver.init_l3(METADATA_DEFAULT_IFNAME, meta_cidrs,
+                                namespace=network.namespace)
 
         self.driver.init_l3(interface_name, ip_cidrs,
                             namespace=network.namespace)
 
-        self._set_default_route(network, interface_name)
-        self._cleanup_stale_devices(network, port)
+        if not self.vlan_id:
+            self._set_default_route(network, interface_name)
+        # NOTE(alegacy): the stale device cleanup has been commented out
+        # because with VLAN subnets there can be more than 1 port in a
+        # namespace and this is causing the agent to delete ports that we
+        # actually need.
+        #self._cleanup_stale_devices(network, port)
 
         return interface_name
 
     def update(self, network, device_name):
         """Update device settings for the network's DHCP on this host."""
-        self._set_default_route(network, device_name)
+        if not self.vlan_id:
+            self._set_default_route(network, device_name)
 
     def unplug(self, device_name, network):
         """Unplug device settings for the network's DHCP on this host."""
@@ -1481,8 +1624,7 @@ class DeviceManager(object):
         else:
             LOG.debug('No interface exists for network %s', network.id)
 
-        self.plugin.release_dhcp_port(network.id,
-                                      self.get_device_id(network))
+        self.plugin.release_dhcp_port(network.id, self.get_device_id(network))
 
     def fill_dhcp_udp_checksums(self, namespace):
         """Ensure DHCP reply packets always have correct UDP checksums."""

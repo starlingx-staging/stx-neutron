@@ -583,6 +583,10 @@ class IpamBackendMixin(db_base_plugin_common.DbBasePluginCommon):
         query = model_query.get_collection_query(context, models_v2.Subnet)
         return query.filter(models_v2.Subnet.network_id == network_id)
 
+    def _query_subnets_count(self, context, filters=None):
+        return self._get_collection_count(context, models_v2.Subnet,
+                                          filters=filters)
+
     def _query_filter_service_subnets(self, query, service_type):
         # TODO(korzen) use SubnetServiceType OVO here
         Subnet = models_v2.Subnet

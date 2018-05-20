@@ -13,8 +13,11 @@
 from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
 from neutron_lib.callbacks import resources
+from neutron_lib.db import model_base
 from oslo_log import log as logging
 from oslo_utils import uuidutils
+import sqlalchemy as sa
+from sqlalchemy import and_
 
 from neutron.db import api as db_api
 from neutron.db.models import segment as segments_model
@@ -31,11 +34,35 @@ NETWORK_ID = segments_model.NetworkSegment.network_id.name
 
 def _make_segment_dict(obj):
     """Make a segment dictionary out of an object."""
+    #NOTE(jrichard) drop change in next rebase.
     return {'id': obj.id,
             NETWORK_TYPE: obj.network_type,
             PHYSICAL_NETWORK: obj.physical_network,
             SEGMENTATION_ID: obj.segmentation_id,
-            NETWORK_ID: obj.network_id}
+            NETWORK_ID: getattr(obj, 'network_id', None)}
+
+
+class SubnetSegment(model_base.BASEV2, model_base.HasId):
+    """Represent persistent state of a subnet segment.
+
+    A subnet segment is a portion of a neutron subnet with a
+    specific physical realization. A neutron subnet can consist of
+    one or more segments.
+    """
+
+    # TODO(alegacy): rename this similar to how the NetworkSegments table was
+    # renamed?
+    __tablename__ = 'ml2_subnet_segments'
+
+    subnet_id = sa.Column(sa.String(36),
+                          sa.ForeignKey('subnets.id', ondelete="CASCADE"),
+                          nullable=False)
+    network_type = sa.Column(sa.String(32), nullable=False)
+    physical_network = sa.Column(sa.String(64))
+    segmentation_id = sa.Column(sa.Integer)
+    is_dynamic = sa.Column(sa.Boolean, default=False, nullable=False,
+                           server_default=sa.sql.false())
+    segment_index = sa.Column(sa.Integer, nullable=False, server_default='0')
 
 
 def add_network_segment(context, network_id, segment, segment_index=0,
@@ -122,3 +149,75 @@ def delete_network_segment(context, segment_id):
     """Release a dynamic segment for the params provided if one exists."""
     with db_api.context_manager.writer.using(context):
         network_obj.NetworkSegment.delete_objects(context, id=segment_id)
+
+
+def network_segments_exist(session, network_type, physical_network,
+                           segment_range=None):
+    with session.begin(subtransactions=True):
+        query = (session.query(segments_model.NetworkSegment).
+                 filter_by(network_type=network_type,
+                           physical_network=physical_network))
+        if segment_range:
+            minimum_id = segment_range['minimum']
+            maximum_id = segment_range['maximum']
+            query = (query.filter(and_(
+                segments_model.NetworkSegment.segmentation_id >= minimum_id,
+                segments_model.NetworkSegment.segmentation_id <= maximum_id
+            )))
+        return bool(query.count() > 0)
+
+
+def add_subnet_segment(session, subnet_id, segment, segment_index=0,
+                       is_dynamic=False):
+    with session.begin(subtransactions=True):
+        record = SubnetSegment(
+            id=uuidutils.generate_uuid(),
+            subnet_id=subnet_id,
+            network_type=segment.get(NETWORK_TYPE),
+            physical_network=segment.get(PHYSICAL_NETWORK),
+            segmentation_id=segment.get(SEGMENTATION_ID),
+            segment_index=segment_index,
+            is_dynamic=is_dynamic
+        )
+        session.add(record)
+    LOG.info("Added segment %(id)s of type %(network_type)s for subnet"
+             " %(subnet_id)s",
+             {'id': record.id,
+              'network_type': record.network_type,
+              'subnet_id': record.subnet_id})
+
+
+def get_subnet_segments(session, subnet_id, filter_dynamic=False):
+    return get_subnets_segments(
+        session, [subnet_id], filter_dynamic)[subnet_id]
+
+
+def get_subnets_segments(session, subnet_ids, filter_dynamic=False):
+    if not subnet_ids:
+        return {}
+    with session.begin(subtransactions=True):
+        query = (session.query(SubnetSegment).
+                 filter(SubnetSegment.subnet_id.in_(subnet_ids)).
+                 order_by(SubnetSegment.segment_index))
+        if filter_dynamic is not None:
+            query = query.filter_by(is_dynamic=filter_dynamic)
+        records = query.all()
+        result = {subnet_id: [] for subnet_id in subnet_ids}
+        for record in records:
+            result[record.subnet_id].append(_make_segment_dict(record))
+        return result
+
+
+def subnet_segments_exist(session, network_type, physical_network,
+                          segment_range=None):
+    with session.begin(subtransactions=True):
+        query = (session.query(SubnetSegment).
+                 filter_by(network_type=network_type,
+                           physical_network=physical_network))
+        if segment_range:
+            minimum_id = segment_range['minimum']
+            maximum_id = segment_range['maximum']
+            query = (query.filter(
+                and_(SubnetSegment.segmentation_id >= minimum_id,
+                     SubnetSegment.segmentation_id <= maximum_id)))
+        return bool(query.count() > 0)

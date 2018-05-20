@@ -30,6 +30,14 @@ from neutron.db import provisioning_blocks
 from neutron.tests import base
 
 
+def _fake_is_agent_bound_to_network(plugin, context, host, network_id):
+    return True
+
+
+def _fake_is_agent_bound_to_network_false(plugin, context, host, network_id):
+    return False
+
+
 class TestDhcpRpcCallback(base.BaseTestCase):
 
     def setUp(self):
@@ -179,9 +187,25 @@ class TestDhcpRpcCallback(base.BaseTestCase):
         self.plugin.get_port.return_value = {
             'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
         self.plugin.update_port.side_effect = n_exc.PortNotFound(port_id='66')
+        self.callbacks.is_agent_bound_to_network = \
+            _fake_is_agent_bound_to_network
         self.assertIsNone(self.callbacks.update_dhcp_port(
             context='ctx', host='host', port_id='66',
             port={'port': {'network_id': 'a'}}))
+
+    def test_update_port_unbound_agent(self):
+        self.plugin.get_port.return_value = {
+            'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
+        self.plugin.update_port.side_effect = n_exc.PortNotFound(port_id='66')
+        self.callbacks.is_agent_bound_to_network = \
+            _fake_is_agent_bound_to_network_false
+        port = {'port': {'network_id': 'a'}}
+        self.assertRaises(exceptions.DhcpPortInUse,
+                          self.callbacks.update_dhcp_port,
+                          mock.Mock(),
+                          host='host',
+                          port_id='66',
+                          port=port)
 
     def test_get_network_info_return_none_on_not_found(self):
         self.plugin.get_network.side_effect = n_exc.NetworkNotFound(net_id='a')
@@ -253,17 +277,23 @@ class TestDhcpRpcCallback(base.BaseTestCase):
         self.plugin.get_port.return_value = {
             'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
         self.callbacks._port_action = _fake_port_action
+        self.callbacks.is_agent_bound_to_network = \
+            _fake_is_agent_bound_to_network
         self.callbacks.update_dhcp_port(mock.Mock(),
                                         host='foo_host',
                                         port_id='foo_port_id',
                                         port=port)
 
     def test_update_reserved_dhcp_port(self):
+        device_id = utils.get_dhcp_agent_device_id('foo_network_id',
+                                                   'foo_host')
         port = {'port': {'network_id': 'foo_network_id',
+                         'device_id': device_id,
                          'device_owner': constants.DEVICE_OWNER_DHCP,
                          'fixed_ips': [{'subnet_id': 'foo_subnet_id'}]}
                 }
         expected_port = {'port': {'network_id': 'foo_network_id',
+                                  'device_id': device_id,
                                   'device_owner': constants.DEVICE_OWNER_DHCP,
                                   portbindings.HOST_ID: 'foo_host',
                                   'fixed_ips': [{'subnet_id': 'foo_subnet_id'}]
@@ -274,10 +304,10 @@ class TestDhcpRpcCallback(base.BaseTestCase):
         def _fake_port_action(plugin, context, port, action):
             self.assertEqual(expected_port, port)
 
-        self.plugin.get_port.return_value = {
-            'device_id': utils.get_dhcp_agent_device_id('foo_network_id',
-                                                        'foo_host')}
+        self.plugin.get_port.return_value = {'device_id': device_id}
         self.callbacks._port_action = _fake_port_action
+        self.callbacks.is_agent_bound_to_network = \
+            _fake_is_agent_bound_to_network
         self.callbacks.update_dhcp_port(
             mock.Mock(), host='foo_host', port_id='foo_port_id', port=port)
 
@@ -304,6 +334,8 @@ class TestDhcpRpcCallback(base.BaseTestCase):
                          }
         self.plugin.get_port.return_value = {
             'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
+        self.callbacks.is_agent_bound_to_network = \
+            _fake_is_agent_bound_to_network
         self.callbacks.update_dhcp_port(mock.Mock(),
                                         host='foo_host',
                                         port_id='foo_port_id',

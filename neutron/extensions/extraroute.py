@@ -40,7 +40,7 @@ class RoutesExhausted(nexception.BadRequest):
 EXTENDED_ATTRIBUTES_2_0 = {
     'routers': {
         'routes': {'allow_post': False, 'allow_put': True,
-                   'validate': {'type:hostroutes': None},
+                   'validate': {'type:hostroutes2': None},
                    'convert_to': converters.convert_none_to_empty_list,
                    'is_visible': True,
                    'default': constants.ATTR_NOT_SPECIFIED},

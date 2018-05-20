@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2016 Wind River Systems, Inc.
+#
 
 """
 The module provides all database models at current HEAD.
@@ -28,16 +31,21 @@ from neutron_lib.db import model_base
 from neutron.common import utils
 from neutron.db import agentschedulers_db  # noqa
 from neutron.db.extra_dhcp_opt import models as edo_models  # noqa
+from neutron.db import hosts_db  # noqa
 from neutron.db import l3_dvrscheduler_db  # noqa
 from neutron.db import l3_gwmode_db  # noqa
 from neutron.db import models
 from neutron.db import models_v2  # noqa
 from neutron.db.port_security import models as ps_models  # noqa
+from neutron.db import portforwardings_db  # noqa
 from neutron.db.qos import models as qos_models  # noqa
+from neutron.db import qos_db  # noqa
 from neutron.db.quota import models as quota_models  # noqa
 from neutron.db import rbac_db_models  # noqa
+from neutron.db import settings_db  # noqa
 from neutron.ipam.drivers.neutrondb_ipam import db_models  # noqa
 from neutron.plugins.ml2 import models as ml2_models  # noqa
+from neutron.plugins.wrs.drivers import type_managed_vxlan  # noqa
 from neutron.services.auto_allocate import models as aa_models  # noqa
 from neutron.services.trunk import models as trunk_models  # noqa
 

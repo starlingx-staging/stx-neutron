@@ -36,7 +36,7 @@ class EnvironmentDescription(object):
     def __init__(self, network_type='vxlan', l2_pop=True, qos=False,
                  mech_drivers='openvswitch,linuxbridge',
                  service_plugins='router,trunk', arp_responder=False,
-                 agent_down_time=75):
+                 agent_down_time=75, global_mtu=1500):
         self.network_type = network_type
         self.l2_pop = l2_pop
         self.qos = qos
@@ -44,7 +44,7 @@ class EnvironmentDescription(object):
         self.mech_drivers = mech_drivers
         self.arp_responder = arp_responder
         self.agent_down_time = agent_down_time
-
+        self.global_mtu = global_mtu
         self.service_plugins = service_plugins
         if self.qos:
             self.service_plugins += ',qos'
@@ -331,7 +331,10 @@ class Environment(fixtures.Fixture):
         self.hosts = []
 
     def wait_until_env_is_up(self):
-        common_utils.wait_until_true(self._processes_are_ready)
+        common_utils.wait_until_true(
+            self._processes_are_ready,
+            timeout=180,
+            sleep=10)
 
     def _processes_are_ready(self):
         try:

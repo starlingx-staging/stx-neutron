@@ -13,6 +13,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import six
+
+from neutron_lib.api.definitions import provider_net as provider
 from neutron_lib import constants as const
 from neutron_lib import context as n_context
 from neutron_lib import exceptions
@@ -28,10 +31,40 @@ from neutron.db import api as db_api
 from neutron.db import l3_hamode_db
 from neutron.plugins.ml2.drivers.l2pop import db as l2pop_db
 from neutron.plugins.ml2.drivers.l2pop import rpc as l2pop_rpc
+from neutron import service
 
 LOG = logging.getLogger(__name__)
 
 config.register_l2_population_opts()
+
+
+l2pop_fdb_extend_funcs = {}
+
+
+def register_fdb_extend_func(name, func):
+    l2pop_fdb_extend_funcs[name] = func
+
+
+def run_fdb_extend_funcs(context, network_id, fdb_entries, source=None,
+                         exclude_host=None):
+    if any('physical_network' not in v or not v['physical_network']
+           for k, v in six.iteritems(fdb_entries)):
+        # NOTE(alegacy): unit tests may not provide this field for vxlan
+        # based networks therefore just exclude all extensions from running
+        # during the test.
+        LOG.warning("Skipping FDB extensions due to missing physical_network"
+                    " attribute in fdb_entries")
+        return fdb_entries
+    for name, func in six.iteritems(l2pop_fdb_extend_funcs):
+        if source and name == source:
+            # Avoid data loops and do not provide data from a source back to
+            # itself when it requests a full data set.  (e.g., the bgpvpn
+            # agent should not get its own data when it queries the fdb for
+            # a network).
+            continue
+        fdb_entries = func(context, network_id, fdb_entries,
+                           exclude_host=exclude_host)
+    return fdb_entries
 
 
 class L2populationMechanismDriver(api.MechanismDriver):
@@ -39,10 +72,21 @@ class L2populationMechanismDriver(api.MechanismDriver):
     def __init__(self):
         super(L2populationMechanismDriver, self).__init__()
         self.L2populationAgentNotify = l2pop_rpc.L2populationAgentNotifyAPI()
+        self.L2populationServer = None
 
     def initialize(self):
         LOG.debug("Experimental L2 population driver")
         self.rpc_ctx = n_context.get_admin_context_without_session()
+
+    def get_workers(self):
+        # NOTE(alegacy): Run this RPC handler is a thread separate from the
+        # other server RPC handlers to make sure that any long queries do
+        # not slow down other RPC requests.
+        return [service.RpcWorker([self], worker_process_count=0)]
+
+    def start_rpc_listeners(self):
+        self.L2populationServer = l2pop_rpc.L2populationServerQueryAPI(self)
+        return self.L2populationServer.start()
 
     def _get_port_fdb_entries(self, port):
         # the port might be concurrently deleted
@@ -58,13 +102,14 @@ class L2populationMechanismDriver(api.MechanismDriver):
         return True
 
     def _get_ha_port_agents_fdb(
-            self, session, network_id, router_id):
+            self, session, network_id, router_id, physical_network=None):
         other_fdb_ports = {}
         for agent in l2pop_db.get_ha_agents_by_router_id(session, router_id):
             agent_active_ports = l2pop_db.get_agent_network_active_port_count(
                 session, agent.host, network_id)
             if agent_active_ports == 0:
-                ip = l2pop_db.get_agent_ip(agent)
+                ip = l2pop_db.get_agent_ip(
+                    agent, physical_network=physical_network)
                 other_fdb_ports[ip] = [const.FLOODING_ENTRY]
 
         return other_fdb_ports
@@ -104,6 +149,12 @@ class L2populationMechanismDriver(api.MechanismDriver):
             return orig_chg_ips, port_chg_ips
 
     def _fixed_ips_changed(self, context, orig, port, diff_ips):
+        segment = context.bottom_bound_segment
+        if not segment:
+            LOG.warning(("No segment for port {} diff {}").format(
+                context.current, diff_ips))
+            return
+
         orig_ips, port_ips = diff_ips
 
         if (port['device_owner'] == const.DEVICE_OWNER_DVR_INTERFACE):
@@ -114,8 +165,10 @@ class L2populationMechanismDriver(api.MechanismDriver):
         if not agent_host:
             return
 
-        agent_ip = l2pop_db.get_agent_ip_by_host(db_api.get_reader_session(),
-                                                 agent_host)
+        agent_ip = l2pop_db.get_agent_ip_by_host(
+            db_api.get_reader_session(),
+            agent_host,
+            physical_network=segment.get('physical_network'))
 
         orig_mac_ip = [l2pop_rpc.PortInfo(mac_address=port['mac_address'],
                                           ip_address=ip)
@@ -194,6 +247,12 @@ class L2populationMechanismDriver(api.MechanismDriver):
                       "to any segment", {'port': port_id, 'agent': agent})
             return False
 
+        if not agent:
+            LOG.debug("Port %(port)s updated by agent %(agent)s which does "
+                      "not support tunneling",
+                      {'port': port_id, 'agent': agent})
+            return False
+
         network_types = l2pop_db.get_agent_l2pop_network_types(agent)
         if network_types is None:
             network_types = l2pop_db.get_agent_tunnel_types(agent)
@@ -202,11 +261,19 @@ class L2populationMechanismDriver(api.MechanismDriver):
 
         return True
 
-    def _create_agent_fdb(self, session, agent, segment, network_id):
+    def _create_agent_fdb(self, context, agent, segment, network_id,
+                          source=None):
+        exclude_host = agent.host if agent else None
+        session = context.session
         agent_fdb_entries = {network_id:
                              {'segment_id': segment['segmentation_id'],
                               'network_type': segment['network_type'],
+                              'audit': True,
                               'ports': {}}}
+        physical_network = segment.get('physical_network')
+        if physical_network:
+            agent_fdb_entries[network_id]['physical_network'] = (
+                physical_network)
         tunnel_network_ports = (
             l2pop_db.get_distributed_active_network_ports(session, network_id))
         fdb_network_ports = (
@@ -215,21 +282,29 @@ class L2populationMechanismDriver(api.MechanismDriver):
         ports = agent_fdb_entries[network_id]['ports']
         ports.update(self._get_tunnels(
             fdb_network_ports + tunnel_network_ports,
-            agent.host))
+            exclude_host=exclude_host,
+            physical_network=physical_network))
         for agent_ip, fdbs in ports.items():
             for binding, agent in fdb_network_ports:
-                if l2pop_db.get_agent_ip(agent) == agent_ip:
+                ip = l2pop_db.get_agent_ip(
+                    agent, physical_network=segment.get('physical_network'))
+                if ip == agent_ip:
                     fdbs.extend(self._get_port_fdb_entries(binding.port))
 
-        return agent_fdb_entries
+        return run_fdb_extend_funcs(context, network_id,
+                                    agent_fdb_entries,
+                                    source=source,
+                                    exclude_host=exclude_host)
 
-    def _get_tunnels(self, tunnel_network_ports, exclude_host):
+    def _get_tunnels(self, tunnel_network_ports, exclude_host=None,
+                     physical_network=None):
         agents = {}
         for __, agent in tunnel_network_ports:
-            if agent.host == exclude_host:
+            if exclude_host is not None and agent.host == exclude_host:
                 continue
 
-            ip = l2pop_db.get_agent_ip(agent)
+            ip = l2pop_db.get_agent_ip(
+                agent, physical_network=physical_network)
             if not ip:
                 LOG.debug("Unable to retrieve the agent ip, check "
                           "the agent %s configuration.", agent.host)
@@ -273,10 +348,11 @@ class L2populationMechanismDriver(api.MechanismDriver):
         agent_active_ports = l2pop_db.get_agent_network_active_port_count(
             session, agent_host, network_id)
 
-        agent_ip = l2pop_db.get_agent_ip(agent)
         segment = context.bottom_bound_segment
         if not self._validate_segment(segment, port['id'], agent):
             return
+        agent_ip = l2pop_db.get_agent_ip(
+            agent, physical_network=segment.get('physical_network'))
         other_fdb_entries = self._get_fdb_entries_template(
             segment, agent_ip, network_id)
         other_fdb_ports = other_fdb_entries[network_id]['ports']
@@ -285,7 +361,7 @@ class L2populationMechanismDriver(api.MechanismDriver):
                                        cfg.CONF.l2pop.agent_boot_time):
             # First port activated on current agent in this network,
             # we have to provide it with the whole list of fdb entries
-            agent_fdb_entries = self._create_agent_fdb(session,
+            agent_fdb_entries = self._create_agent_fdb(context.context,
                                                        agent,
                                                        segment,
                                                        network_id)
@@ -325,7 +401,8 @@ class L2populationMechanismDriver(api.MechanismDriver):
         if not self._validate_segment(segment, port['id'], agent):
             return
 
-        agent_ip = l2pop_db.get_agent_ip(agent)
+        agent_ip = l2pop_db.get_agent_ip(
+            agent, physical_network=segment.get('physical_network'))
         other_fdb_entries = self._get_fdb_entries_template(
             segment, agent_ip, port['network_id'])
         if agent_active_ports == 0:
@@ -345,8 +422,31 @@ class L2populationMechanismDriver(api.MechanismDriver):
 
     @classmethod
     def _get_fdb_entries_template(cls, segment, agent_ip, network_id):
-        return {
-            network_id:
-                {'segment_id': segment['segmentation_id'],
-                 'network_type': segment['network_type'],
-                 'ports': {agent_ip: []}}}
+        template = {network_id:
+                    {'segment_id': segment['segmentation_id'],
+                     'network_type': segment['network_type'],
+                     'ports': {agent_ip: []}}}
+        physical_network = segment.get('physical_network')
+        if physical_network:
+            template[network_id]['physical_network'] = physical_network
+        return template
+
+    def _get_fdb_entries(self, context, plugin, network_id, host,
+                         source=None):
+        network = plugin.get_network(context, network_id)
+        segment = {
+            'network_type': network[provider.NETWORK_TYPE],
+            'physical_network': network[provider.PHYSICAL_NETWORK],
+            'segmentation_id': network[provider.SEGMENTATION_ID]}
+        return self._create_agent_fdb(
+            context, host, segment, network_id, source=source)
+
+    def get_fdb_entries(self, context, network_ids, host=None,
+                        source=None):
+        fdb_entries = {}
+        plugin = directory.get_plugin()
+        for network_id in network_ids:
+            entries = self._get_fdb_entries(
+                context, plugin, network_id, host, source=source)
+            fdb_entries.update(entries)
+        return fdb_entries

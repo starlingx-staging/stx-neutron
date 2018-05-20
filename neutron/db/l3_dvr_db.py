@@ -83,7 +83,8 @@ class DVRResourceOperationHandler(object):
         self.l3plugin.set_extra_attr_value(context, router_db, 'distributed',
                                            dist)
 
-    def _validate_router_migration(self, context, router_db, router_res):
+    def _validate_router_migration(self, context, router_db, router_res,
+                                   old_router=None):
         """Allow transition only when admin_state_up=False"""
         original_distributed_state = router_db.extra_attributes.distributed
         requested_distributed_state = router_res.get('distributed', None)
@@ -93,7 +94,11 @@ class DVRResourceOperationHandler(object):
             requested_distributed_state != original_distributed_state)
         if not distributed_changed:
             return False
-        if router_db.admin_state_up:
+        if old_router:
+            admin_state_up = old_router.get('admin_state_up')
+        else:
+            admin_state_up = router_db.admin_state_up
+        if admin_state_up:
             msg = _("Cannot change the 'distributed' attribute of active "
                     "routers. Please set router admin_state_up to False "
                     "prior to upgrade")
@@ -117,7 +122,8 @@ class DVRResourceOperationHandler(object):
                                       router_id, router, router_db, old_router,
                                       **kwargs):
         """Event handler for router update migration to distributed."""
-        if not self._validate_router_migration(context, router_db, router):
+        if not self._validate_router_migration(context, router_db, router,
+                                               old_router=old_router):
             return
 
         migrating_to_distributed = (
@@ -834,6 +840,8 @@ class _DVRAgentInterfaceMixin(object):
         if not fips:
             return
         fip = fips[0]
+        if not fip or not fip.get('router_id'):
+            return
         network_id = fip.get('floating_network_id')
         agent_gw_port = self.create_fip_agent_gw_port_if_not_exists(
             context.elevated(), network_id, host)
@@ -842,6 +850,8 @@ class _DVRAgentInterfaceMixin(object):
                   {'gw': agent_gw_port,
                    'dest_host': host})
 
+    @n_utils.synchronized('create_fip_agent_gw_port_if_not_exists',
+                          external=True)
     def create_fip_agent_gw_port_if_not_exists(
         self, context, network_id, host):
         """Function to return the FIP Agent GW port.

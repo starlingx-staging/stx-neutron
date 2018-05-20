@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from neutron_lib.api.definitions import portbindings
 from neutron_lib.db import model_base
@@ -51,6 +54,9 @@ class PortBinding(model_base.BASEV2):
     status = sa.Column(sa.String(16), nullable=False,
                        default=constants.PORT_BINDING_STATUS_ACTIVE,
                        server_default=constants.PORT_BINDING_STATUS_ACTIVE)
+    vif_model = sa.Column(sa.String(255), nullable=True)
+    mtu = sa.Column(sa.Integer, nullable=True)
+    mac_filtering = sa.Column(sa.Boolean, default=False, nullable=True)
 
     # Add a relationship to the Port model in order to instruct SQLAlchemy to
     # eagerly load port bindings
@@ -112,6 +118,9 @@ class DistributedPortBinding(model_base.BASEV2):
     vif_type = sa.Column(sa.String(64), nullable=False)
     vif_details = sa.Column(sa.String(4095), nullable=False, default='',
                             server_default='')
+    vif_model = sa.Column(sa.String(255), nullable=True)
+    mtu = sa.Column(sa.Integer, nullable=True)
+    mac_filtering = sa.Column(sa.Boolean, default=False, nullable=True)
     vnic_type = sa.Column(sa.String(64), nullable=False,
                           default=portbindings.VNIC_NORMAL,
                           server_default=portbindings.VNIC_NORMAL)

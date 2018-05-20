@@ -35,6 +35,7 @@ from neutron.db import _utils as db_utils
 from neutron.db import api as db_api
 from neutron.db import common_db_mixin
 from neutron.db import models_v2
+from neutron.extensions import wrs_net
 from neutron.objects import ports as port_obj
 from neutron.objects import subnet as subnet_obj
 from neutron.objects import subnetpool as subnetpool_obj
@@ -148,6 +149,7 @@ class DbBasePluginCommon(common_db_mixin.CommonDbMixin):
                'host_routes': [{'destination': route['destination'],
                                 'nexthop': route['nexthop']}
                                for route in subnet['routes']],
+               wrs_net.VLAN: subnet['vlan_id'],
                }
         # The shared attribute for a subnet is the same as its parent network
         res['shared'] = self._is_network_shared(context, subnet.rbac_entries)
@@ -299,7 +301,8 @@ class DbBasePluginCommon(common_db_mixin.CommonDbMixin):
                 'subnetpool_id': subnetpool_id,
                 'enable_dhcp': subnet['enable_dhcp'],
                 'gateway_ip': gateway_ip,
-                'description': subnet.get('description')}
+                'description': subnet.get('description'),
+                'vlan_id': subnet[wrs_net.VLAN]}
         if subnet['ip_version'] == 6 and subnet['enable_dhcp']:
             if validators.is_attr_set(subnet['ipv6_ra_mode']):
                 args['ipv6_ra_mode'] = subnet['ipv6_ra_mode']

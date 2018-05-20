@@ -38,7 +38,8 @@ class ServerSideRpcBackend(object):
     # agent-based driver that may integrate with the trunk service
     # plugin, e.g. linux bridge or ovs.
     @registry.receives(trunk_consts.TRUNK,
-                       [events.AFTER_CREATE, events.AFTER_DELETE])
+                       [events.AFTER_CREATE, events.AFTER_DELETE,
+                        events.AFTER_UPDATE])
     @registry.receives(trunk_consts.SUBPORTS,
                        [events.AFTER_CREATE, events.AFTER_DELETE])
     def process_event(self, resource, event, trunk_plugin, payload):
@@ -57,6 +58,7 @@ class ServerSideRpcBackend(object):
             method = {
                 events.AFTER_CREATE: self._stub.trunk_created,
                 events.AFTER_DELETE: self._stub.trunk_deleted,
+                events.AFTER_UPDATE: self._stub.trunk_updated,
             }
         LOG.debug("Emitting event %s for resource %s", event, resource)
         method[event](context, payload)

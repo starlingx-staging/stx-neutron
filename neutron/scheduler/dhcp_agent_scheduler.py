@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 
 import collections
@@ -37,6 +40,15 @@ LOG = logging.getLogger(__name__)
 
 class AutoScheduler(object):
 
+    def get_dhcp_subnets_for_host(self, plugin, context, host, fields):
+        """
+        This is the superclass version of this method.  It treats all networks
+        as equal and capable of being on any host specified in the parameter
+        list.  Subclasses can override this and constrain the list of networks
+        that can be considered for a given host.
+        """
+        return plugin.get_subnets(context, fields=fields)
+
     def auto_schedule_networks(self, plugin, context, host):
         """Schedule non-hosted networks to the DHCP agent on the specified
            host.
@@ -46,7 +58,8 @@ class AutoScheduler(object):
         bindings_to_add = []
         with context.session.begin(subtransactions=True):
             fields = ['network_id', 'enable_dhcp', 'segment_id']
-            subnets = plugin.get_subnets(context, fields=fields)
+            subnets = self.get_dhcp_subnets_for_host(
+                plugin, context, host, fields=fields)
             net_ids = {}
             net_segment_ids = collections.defaultdict(set)
             for s in subnets:
@@ -109,8 +122,9 @@ class ChanceScheduler(base_scheduler.BaseChanceScheduler, AutoScheduler):
 
 class WeightScheduler(base_scheduler.BaseWeightScheduler, AutoScheduler):
 
-    def __init__(self):
-        super(WeightScheduler, self).__init__(DhcpFilter())
+    def __init__(self, dhcp_filter=None):
+        dhcp_filter = dhcp_filter or DhcpFilter()
+        super(WeightScheduler, self).__init__(dhcp_filter)
 
 
 class AZAwareWeightScheduler(WeightScheduler):
@@ -193,10 +207,10 @@ class DhcpFilter(base_resource_filter.BaseResourceFilter):
                 # it's totally ok, someone just did our job!
                 bound_agents.remove(agent)
                 LOG.info('Agent %s already present', agent_id)
-            LOG.debug('Network %(network_id)s is scheduled to be '
-                      'hosted by DHCP agent %(agent_id)s',
-                      {'network_id': network_id,
-                       'agent_id': agent_id})
+            LOG.warning('Network %(network_id)s is scheduled to be '
+                        'hosted by DHCP agent %(agent_id)s',
+                        {'network_id': network_id,
+                         'agent_id': agent_id})
         super(DhcpFilter, self).bind(context, bound_agents, network_id)
 
     def filter_agents(self, plugin, context, network):

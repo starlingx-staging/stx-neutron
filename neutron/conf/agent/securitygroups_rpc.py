@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 #
+# Copyright (c) 2013-2014,2017 Wind River Systems, Inc.
+#
 
 
 from oslo_config import cfg
@@ -36,7 +38,16 @@ security_group_opts = [
         default=True,
         help=_('Use ipset to speed-up the iptables based security groups. '
                'Enabling ipset support requires that ipset is installed on L2 '
-               'agent node.'))
+               'agent node.')),
+    cfg.BoolOpt(
+        'ensure_default_security_group',
+        default=True,
+        help=_("Enable/Disable association of default security group "
+               "on port during port creation")),
+    cfg.IntOpt(
+        'notify_interval',
+        default=0,
+        help=_('Throttled firewall rule update notification interval')),
 ]
 
 

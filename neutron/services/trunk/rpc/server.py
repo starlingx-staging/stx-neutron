@@ -182,6 +182,11 @@ class TrunkStub(object):
         self._resource_rpc.push(context, [trunk], events.DELETED)
 
     @log_helpers.log_method_call
+    def trunk_updated(self, context, trunk):
+        """Tell the agent about a trunk being updated."""
+        self._resource_rpc.push(context, [trunk], events.UPDATED)
+
+    @log_helpers.log_method_call
     def subports_added(self, context, subports):
         """Tell the agent about new subports to add."""
         self._resource_rpc.push(context, subports, events.CREATED)

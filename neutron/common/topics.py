@@ -12,6 +12,9 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Copyright (c) 2013-2014,2016 Wind River Systems, Inc.
+#
 
 NETWORK = 'network'
 SUBNET = 'subnet'
@@ -20,6 +23,9 @@ SECURITY_GROUP = 'security_group'
 L2POPULATION = 'l2population'
 DVR = 'dvr'
 RESOURCES = 'resources'
+HOST = 'host'
+QOS = 'qos'
+PNET_CONNECTIVITY = 'pnet_connectivity'
 
 CREATE = 'create'
 DELETE = 'delete'

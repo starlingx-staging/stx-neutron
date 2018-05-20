@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2015 Wind River Systems, Inc.
+#
 
 import abc
 import collections
@@ -74,7 +77,16 @@ class L3Scheduler(object):
 
         return [r for r in routers if r['id'] not in ids_to_discard]
 
-    def auto_schedule_routers(self, plugin, context, host, router_ids=None):
+    def get_l3_agents_for_router(self, plugin, context, router_id):
+        """Return the list of agents that can host the given router."""
+        return plugin.get_l3_agents(context, active=True)
+
+    def can_l3_agent_host_router(self, plugin, context, agent_id, router_id):
+        """Return true if the agent specified can host the router."""
+        return True
+
+    def auto_schedule_routers(self, plugin, context, host, router_ids=None,
+                              exclude_distributed=True):
         """Schedule under-scheduled routers to L3 Agents.
 
         An under-scheduled router is a router that is either completely
@@ -141,7 +153,8 @@ class L3Scheduler(object):
                            'agent_id': current_l3_agents[0]['id']})
                 return []
 
-            active_l3_agents = plugin.get_l3_agents(context, active=True)
+            active_l3_agents = self.get_l3_agents_for_router(
+                plugin, context, sync_router['id'])
             if not active_l3_agents:
                 LOG.warning('No active L3 agents')
                 return []
@@ -218,11 +231,11 @@ class L3Scheduler(object):
                 context, l3_agent_id=agent_id,
                 router_id=router_id, binding_index=binding_index)
             binding.create()
-            LOG.debug('Router %(router_id)s is scheduled to L3 agent '
-                      '%(agent_id)s with binding_index %(binding_index)d',
-                      {'router_id': router_id,
-                       'agent_id': agent_id,
-                       'binding_index': binding_index})
+            LOG.warning('Router %(router_id)s is scheduled to L3 agent '
+                        '%(agent_id)s with binding_index %(binding_index)d',
+                        {'router_id': router_id,
+                         'agent_id': agent_id,
+                         'binding_index': binding_index})
             return binding
         except db_exc.DBReferenceError:
             LOG.debug('Router %s has already been removed '

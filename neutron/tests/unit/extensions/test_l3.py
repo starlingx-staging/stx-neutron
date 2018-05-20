@@ -868,7 +868,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
     def test_router_update_gateway_add_multiple_prefixes_ipv6(self):
         with self.network() as n:
             with self.subnet(network=n) as s1, \
-                self.subnet(network=n, ip_version=6, cidr='2001:db8::/32') \
+                self.subnet(network=n, ip_version=6, cidr='2001:db8::/64') \
                 as s2, (self.router()) as r:
                 self._set_net_external(n['network']['id'])
                 res1 = self._add_external_gateway_to_router(
@@ -909,7 +909,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
                 # ensure the router disappearing doesn't interfere with subnet
                 # creation
                 self._create_subnet(self.fmt, net_id=n['network']['id'],
-                                    ip_version=6, cidr='2001:db8::/32',
+                                    ip_version=6, cidr='2001:db8::/64',
                                     expected_res_status=(exc.HTTPCreated.code))
 
     def test_router_update_gateway_upon_subnet_create_ipv6(self):
@@ -923,7 +923,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
                 fip1 = (res1['router']['external_gateway_info']
                         ['external_fixed_ips'][0])
                 sres = self._create_subnet(self.fmt, net_id=n['network']['id'],
-                                         ip_version=6, cidr='2001:db8::/32',
+                                         ip_version=6, cidr='2001:db8::/64',
                                          expected_res_status=(
                                              exc.HTTPCreated.code))
                 s2 = self.deserialize(self.fmt, sres)
@@ -2479,6 +2479,8 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
                                            floating_network_id=fip_network_id,
                                            last_known_router_id=None,
                                            floating_ip_id=fip_id,
+                                           last_fixed_port_id=None,
+                                           status='ACTIVE',
                                            router_id=router_id)
 
     def test_floatingip_disassociate_notification(self):
@@ -2507,6 +2509,8 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
                                            floating_ip_address=fip_addr,
                                            floating_network_id=fip_network_id,
                                            last_known_router_id=router_id,
+                                           last_fixed_port_id=port_id,
+                                           status=mock.ANY,
                                            floating_ip_id=fip_id,
                                            router_id=None)
 
@@ -3121,7 +3125,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
         self.assertEqual(router_req['router']['id'], result['id'])
 
     def test_create_floatingip_ipv6_only_network_returns_400(self):
-        with self.subnet(cidr="2001:db8::/48", ip_version=6) as public_sub:
+        with self.subnet(cidr="2001:db8::/64", ip_version=6) as public_sub:
             self._set_net_external(public_sub['subnet']['network_id'])
             res = self._create_floatingip(
                 self.fmt,
@@ -3130,7 +3134,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
 
     def test_create_floatingip_ipv6_and_ipv4_network_creates_ipv4(self):
         with self.network() as n,\
-                self.subnet(cidr="2001:db8::/48", ip_version=6, network=n),\
+                self.subnet(cidr="2001:db8::/64", ip_version=6, network=n),\
                 self.subnet(cidr="192.168.1.0/24", ip_version=4, network=n):
             self._set_net_external(n['network']['id'])
             fip = self._make_floatingip(self.fmt, n['network']['id'])
@@ -3141,7 +3145,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
     def test_create_floatingip_with_assoc_to_ipv6_subnet(self):
         with self.subnet() as public_sub:
             self._set_net_external(public_sub['subnet']['network_id'])
-            with self.subnet(cidr="2001:db8::/48",
+            with self.subnet(cidr="2001:db8::/64",
                              ip_version=6) as private_sub:
                 with self.port(subnet=private_sub) as private_port:
                     res = self._create_floatingip(

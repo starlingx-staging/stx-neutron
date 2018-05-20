@@ -34,11 +34,14 @@ from neutron.db import l3_dvrscheduler_db
 from neutron.db import l3_gwmode_db
 from neutron.db import l3_hamode_db
 from neutron.db import l3_hascheduler_db
+from neutron.db import l3_host_db
 from neutron.db.models import l3 as l3_models
+from neutron.db import portforwardings_db
 from neutron.extensions import l3
 from neutron.quota import resource_registry
 from neutron import service
 from neutron.services.l3_router.service_providers import driver_controller
+from neutron.services.l3_router.service_providers import l2pop
 
 
 LOG = logging.getLogger(__name__)
@@ -55,7 +58,10 @@ def disable_dvr_extension_by_config(aliases):
 class L3RouterPlugin(service_base.ServicePluginBase,
                      common_db_mixin.CommonDbMixin,
                      extraroute_db.ExtraRoute_db_mixin,
+                     l3_host_db.L3HostSchedulerDbMixin,
+                     portforwardings_db.PortForwardingDbMixin,
                      l3_hamode_db.L3_HA_NAT_db_mixin,
+                     l2pop.L3RouterL2PopMixin,
                      l3_gwmode_db.L3_NAT_db_mixin,
                      l3_dvr_ha_scheduler_db.L3_DVR_HA_scheduler_db_mixin,
                      dns_db.DNSDbMixin):
@@ -72,7 +78,9 @@ class L3RouterPlugin(service_base.ServicePluginBase,
     _supported_extension_aliases = ["dvr", "router", "ext-gw-mode",
                                     "extraroute", "l3_agent_scheduler",
                                     "l3-ha", "router_availability_zone",
-                                    "l3-flavors"]
+                                    "portforwarding"]
+    # NOTE(alegacy): removed l3-flavors because it requires "router" and
+    # "flavors" but "flavors" is not part of the default set.
 
     __native_pagination_support = True
     __native_sorting_support = True

@@ -87,6 +87,10 @@ def get_tables():
         'default_security_group',
         'ha_router_networks',
         'quotausages',
+        'providernet_ranges',
+        'settings',
+        'wrs_qoses',
+        'portforwardingrules',
     ]
 
     return tables

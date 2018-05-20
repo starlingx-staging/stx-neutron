@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from neutron_lib.api.definitions import portbindings
 from neutron_lib.api.definitions import provider_net as provider
@@ -30,6 +33,8 @@ from neutron.db import segments_db
 from neutron.extensions import external_net
 from neutron.extensions import multiprovidernet as mpnet
 from neutron.extensions import vlantransparent
+from neutron.extensions import wrs_net
+from neutron.extensions import wrs_provider
 from neutron.plugins.ml2.common import exceptions as ml2_exc
 from neutron.plugins.ml2 import driver_api as api
 from neutron.plugins.ml2 import models
@@ -70,6 +75,9 @@ class TypeManager(stevedore.named.NamedExtensionManager):
                 self.drivers[network_type] = ext
         LOG.info("Registered types: %s", self.drivers.keys())
 
+    def network_type_supported(self, network_type):
+        return bool(network_type in self.drivers)
+
     def _check_tenant_network_types(self, types):
         self.tenant_network_types = []
         for network_type in types:
@@ -87,7 +95,7 @@ class TypeManager(stevedore.named.NamedExtensionManager):
                       "Service terminated!", ext_network_type)
             raise SystemExit(1)
 
-    def _process_provider_segment(self, segment):
+    def _process_provider_segment(self, context, segment):
         (network_type, physical_network,
          segmentation_id) = (self._get_attribute(segment, attr)
                              for attr in provider.ATTRIBUTES)
@@ -96,13 +104,13 @@ class TypeManager(stevedore.named.NamedExtensionManager):
             segment = {ml2_api.NETWORK_TYPE: network_type,
                        ml2_api.PHYSICAL_NETWORK: physical_network,
                        ml2_api.SEGMENTATION_ID: segmentation_id}
-            self.validate_provider_segment(segment)
+            self.validate_provider_segment(segment, context)
             return segment
 
         msg = _("network_type required")
         raise exc.InvalidInput(error_message=msg)
 
-    def _process_provider_create(self, network):
+    def _process_provider_create(self, context, network):
         if any(validators.is_attr_set(network.get(attr))
                for attr in provider.ATTRIBUTES):
             # Verify that multiprovider and provider attributes are not set
@@ -110,9 +118,9 @@ class TypeManager(stevedore.named.NamedExtensionManager):
             if validators.is_attr_set(network.get(mpnet.SEGMENTS)):
                 raise mpnet.SegmentsSetInConjunctionWithProviders()
             segment = self._get_provider_segment(network)
-            return [self._process_provider_segment(segment)]
+            return [self._process_provider_segment(context, segment)]
         elif validators.is_attr_set(network.get(mpnet.SEGMENTS)):
-            segments = [self._process_provider_segment(s)
+            segments = [self._process_provider_segment(context, s)
                         for s in network[mpnet.SEGMENTS]]
             mpnet.check_duplicate_segments(segments, self.is_partial_segment)
             return segments
@@ -179,6 +187,32 @@ class TypeManager(stevedore.named.NamedExtensionManager):
             network[provider.SEGMENTATION_ID] = segment[
                 ml2_api.SEGMENTATION_ID]
 
+    def extend_subnets_dict_provider(self, context, subnets):
+        ids = [subnet['id'] for subnet in subnets]
+        session = context.session
+        subnet_segments = segments_db.get_subnets_segments(session, ids)
+        for subnet in subnets:
+            segments = subnet_segments[subnet['id']]
+            self._extend_subnet_dict_provider(subnet, segments)
+
+    def _extend_subnet_dict_provider(self, subnet, segments):
+        if not segments:
+            LOG.error("Subnet %s has no segments", id)
+            for attr in wrs_provider.ATTRIBUTES:
+                subnet[attr] = None
+        elif len(segments) > 1:
+            subnet[mpnet.SEGMENTS] = [
+                {wrs_provider.NETWORK_TYPE: segment[api.NETWORK_TYPE],
+                 wrs_provider.PHYSICAL_NETWORK: segment[api.PHYSICAL_NETWORK],
+                 wrs_provider.SEGMENTATION_ID: segment[api.SEGMENTATION_ID]}
+                for segment in segments]
+        else:
+            segment = segments[0]
+            subnet[wrs_provider.NETWORK_TYPE] = segment[api.NETWORK_TYPE]
+            subnet[wrs_provider.PHYSICAL_NETWORK] = \
+                segment[api.PHYSICAL_NETWORK]
+            subnet[wrs_provider.SEGMENTATION_ID] = segment[api.SEGMENTATION_ID]
+
     def initialize(self):
         for network_type, driver in self.drivers.items():
             LOG.info("Initializing driver for type '%s'", network_type)
@@ -191,21 +225,25 @@ class TypeManager(stevedore.named.NamedExtensionManager):
 
     def create_network_segments(self, context, network, tenant_id):
         """Call type drivers to create network segments."""
-        segments = self._process_provider_create(network)
+        segments = self._process_provider_create(context, network)
+        filters = {'tenant_id': tenant_id}
+
+        if self._get_attribute(network, 'vlan_transparent'):
+            filters['vlan_transparent'] = True
         with db_api.context_manager.writer.using(context):
             network_id = network['id']
             if segments:
                 for segment_index, segment in enumerate(segments):
                     segment = self.reserve_provider_segment(
-                        context, segment)
+                        context, segment, **filters)
                     self._add_network_segment(context, network_id, segment,
                                               segment_index)
             elif (cfg.CONF.ml2.external_network_type and
                   self._get_attribute(network, external_net.EXTERNAL)):
-                segment = self._allocate_ext_net_segment(context)
+                segment = self._allocate_ext_net_segment(context, **filters)
                 self._add_network_segment(context, network_id, segment)
             else:
-                segment = self._allocate_tenant_net_segment(context)
+                segment = self._allocate_tenant_net_segment(context, **filters)
                 self._add_network_segment(context, network_id, segment)
 
     def reserve_network_segment(self, context, segment_data):
@@ -226,7 +264,77 @@ class TypeManager(stevedore.named.NamedExtensionManager):
 
         # Reserve segment in type driver
         with db_api.context_manager.writer.using(context):
+            # TODO(alegacy): tenant_id filters
             return self.reserve_provider_segment(context, segment)
+
+    def _process_subnet_provider_create(self, context, subnet):
+        if validators.is_attr_set(subnet.get(mpnet.SEGMENTS)):
+            raise wrs_provider.MultiSubnetProviderSegmentsNotSupported()
+        if any(validators.is_attr_set(subnet.get(attr))
+               for attr in wrs_provider.ATTRIBUTES):
+            segment = {
+                api.NETWORK_TYPE: subnet[wrs_provider.NETWORK_TYPE],
+                api.PHYSICAL_NETWORK: subnet[wrs_provider.PHYSICAL_NETWORK],
+                api.SEGMENTATION_ID: subnet[wrs_provider.SEGMENTATION_ID]}
+            return segment
+        return {}
+
+    def _check_requested_subnet_providernet(self, segment, requested_segment):
+        physical_network = requested_segment.get(api.PHYSICAL_NETWORK)
+        if (physical_network and
+            (physical_network != segment[api.PHYSICAL_NETWORK])):
+            raise wrs_provider.ProviderNetMustBeSameForSubnetAndNetwork()
+
+    def create_subnet_segments(self, context, subnet, peer_subnets, tenant_id):
+        """Call type drivers to create subnet segments."""
+        requested_segment = self._process_subnet_provider_create(
+            context, subnet)
+        network_id = subnet['network_id']
+        vlan_id = subnet[wrs_net.VLAN]
+        session = context.session
+        if vlan_id:
+            if len(peer_subnets) > 0:
+                vlan_subnet_id = peer_subnets[0]['id']
+                vlan_segments = segments_db.get_subnet_segments(session,
+                                                                vlan_subnet_id)
+            else:
+                vlan_segments = []
+
+            if len(vlan_segments) > 0:
+                # There is at least one existing subnet on this vlan,
+                # therefore use the same network provider segments for
+                # additional subnets
+                for segment_index, segment in enumerate(vlan_segments):
+                    segments_db.add_subnet_segment(session, subnet['id'],
+                                                   segment, segment_index)
+            else:
+                # Allocate a new segmentation id from the parent
+                # network's provider network.  This has to be the same in
+                # order to guarantee that the provider network of the
+                # subnet is also hosted on the same compute nodes as the
+                # parent network.  It is also likely to be more
+                # convenient for the operator to have all of the
+                # network's subnets on the same provider network.
+                segments = segments_db.get_network_segments(
+                    context, network_id)
+                for segment_index, segment in enumerate(segments):
+                    self._check_requested_subnet_providernet(
+                        segment, requested_segment)
+                    segment[api.SEGMENTATION_ID] = (
+                        requested_segment.get(api.SEGMENTATION_ID, None))
+                    filters = {'tenant_id': tenant_id}
+                    segment = self.reserve_provider_segment(
+                        context, segment, **filters)
+                    segments_db.add_subnet_segment(session, subnet['id'],
+                                                   segment, segment_index)
+        else:
+            # subnet has no vlan, use the primary network attachment (see
+            # note above about co-locating the subnet and network on the
+            # same provider network).
+            segments = segments_db.get_network_segments(context, network_id)
+            for segment_index, segment in enumerate(segments):
+                segments_db.add_subnet_segment(session, subnet['id'], segment,
+                                               segment_index)
 
     def is_partial_segment(self, segment):
         network_type = segment[ml2_api.NETWORK_TYPE]
@@ -237,42 +345,43 @@ class TypeManager(stevedore.named.NamedExtensionManager):
             msg = _("network_type value '%s' not supported") % network_type
             raise exc.InvalidInput(error_message=msg)
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         network_type = segment[ml2_api.NETWORK_TYPE]
         driver = self.drivers.get(network_type)
         if driver:
-            driver.obj.validate_provider_segment(segment)
+            driver.obj.validate_provider_segment(segment, context)
         else:
             msg = _("network_type value '%s' not supported") % network_type
             raise exc.InvalidInput(error_message=msg)
 
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, context, segment, **filters):
         network_type = segment.get(ml2_api.NETWORK_TYPE)
         driver = self.drivers.get(network_type)
         if isinstance(driver.obj, api.TypeDriver):
             return driver.obj.reserve_provider_segment(context.session,
-                                                       segment)
+                                                       segment, **filters)
         else:
             return driver.obj.reserve_provider_segment(context,
-                                                       segment)
+                                                       segment, **filters)
 
-    def _allocate_segment(self, context, network_type):
+    def _allocate_segment(self, context, network_type, **filters):
         driver = self.drivers.get(network_type)
         if isinstance(driver.obj, api.TypeDriver):
-            return driver.obj.allocate_tenant_segment(context.session)
+            return driver.obj.allocate_tenant_segment(context.session,
+                                                      **filters)
         else:
-            return driver.obj.allocate_tenant_segment(context)
+            return driver.obj.allocate_tenant_segment(context, **filters)
 
-    def _allocate_tenant_net_segment(self, context):
+    def _allocate_tenant_net_segment(self, context, **filters):
         for network_type in self.tenant_network_types:
-            segment = self._allocate_segment(context, network_type)
+            segment = self._allocate_segment(context, network_type, **filters)
             if segment:
                 return segment
         raise exc.NoNetworkAvailable()
 
-    def _allocate_ext_net_segment(self, context):
+    def _allocate_ext_net_segment(self, context, **filters):
         network_type = cfg.CONF.ml2.external_network_type
-        segment = self._allocate_segment(context, network_type)
+        segment = self._allocate_segment(context, network_type, **filters)
         if segment:
             return segment
         raise exc.NoNetworkAvailable()
@@ -295,6 +404,19 @@ class TypeManager(stevedore.named.NamedExtensionManager):
         else:
             LOG.error("Failed to release segment '%s' because "
                       "network type is not supported.", segment)
+
+    def release_subnet_segments(self, session, subnet_id):
+        segments = segments_db.get_subnet_segments(session, subnet_id,
+                                                   filter_dynamic=None)
+
+        for segment in segments:
+            network_type = segment.get(api.NETWORK_TYPE)
+            driver = self.drivers.get(network_type)
+            if driver:
+                driver.obj.release_segment(session, segment)
+            else:
+                LOG.error("Failed to release segment '%s' because "
+                          "network type is not supported.", segment)
 
     def allocate_dynamic_segment(self, context, network_id, segment):
         """Allocate a dynamic segment using a partial or full segment dict."""
@@ -332,6 +454,20 @@ class TypeManager(stevedore.named.NamedExtensionManager):
                           "network type is not supported.", segment)
         else:
             LOG.debug("No segment found with id %(segment_id)s", segment_id)
+
+    def update_provider_allocations(self, context, network_type):
+        driver = self.drivers.get(network_type)
+        driver.obj.update_provider_allocations(context)
+
+    def network_segments_exist(self, context, network_type, physical_network,
+                          segment_range=None):
+        return segments_db.network_segments_exist(
+            context.session, network_type, physical_network, segment_range)
+
+    def subnet_segments_exist(self, context, network_type, physical_network,
+                          segment_range=None):
+        return segments_db.subnet_segments_exist(
+            context.session, network_type, physical_network, segment_range)
 
 
 class MechanismManager(stevedore.named.NamedExtensionManager):
@@ -423,7 +559,14 @@ class MechanismManager(stevedore.named.NamedExtensionManager):
         errors = []
         for driver in self.ordered_mech_drivers:
             try:
-                getattr(driver.obj, method_name)(context)
+                if hasattr(driver.obj, method_name):
+                    getattr(driver.obj, method_name)(context)
+            except (ml2_exc.MechanismDriverAuditSuccess,
+                    ml2_exc.MechanismDriverAuditFailure):
+                with excutils.save_and_reraise_exception():
+                    LOG.info("Mechanism Driver Audit '%(name)s' in "
+                             "%(method)s",
+                             {'name': driver.name, 'method': method_name})
             except Exception as e:
                 if raise_db_retriable and db_api.is_retriable(e):
                     with excutils.save_and_reraise_exception():
@@ -457,7 +600,12 @@ class MechanismManager(stevedore.named.NamedExtensionManager):
         to the caller, triggering a rollback. There is no guarantee
         that all mechanism drivers are called in this case.
         """
-        self._check_vlan_transparency(context)
+        # FIXME(alegacy) this does not work when unit tests add dummy mech
+        # drivers for logging or tests and they have not properly overridden
+        # their check_vlan_transparency() method.  It also doesn't make sense
+        # that all mech drivers have to support vlan transparency for it to be
+        # allowed.
+        # self._check_vlan_transparency(context)
         self._call_on_drivers("create_network_precommit", context,
                               raise_db_retriable=True)
 
@@ -863,6 +1011,19 @@ class MechanismManager(stevedore.named.NamedExtensionManager):
         for driver in self.ordered_mech_drivers:
             workers += driver.obj.get_workers()
         return workers
+
+    def audit(self, context):
+        """Audit all mechanism drivers for proper operation.
+
+        :raises: neutron.plugins.ml2.common.MechanismDriverAuditFailure
+        if any mechanism driver auditing call fails.
+
+        Called within the database transaction. If a mechanism driver
+        raises an exception, then a MechanismDriverAuditFailure is propogated
+        to the caller, triggering a rollback. There is no guarantee
+        that all mechanism drivers are called in this case.
+        """
+        self._call_on_drivers("audit", context)
 
 
 class ExtensionManager(stevedore.named.NamedExtensionManager):

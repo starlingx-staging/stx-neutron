@@ -42,6 +42,7 @@ class TunnelTypeTestMixin(object):
 
     def setUp(self):
         super(TunnelTypeTestMixin, self).setUp()
+        self.plugin = mock.Mock()
         self.driver = self.DRIVER_CLASS()
         self.driver.tunnel_ranges = TUNNEL_RANGES
         self.driver.sync_allocations()

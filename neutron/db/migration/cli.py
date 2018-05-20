@@ -40,9 +40,13 @@ EXPAND_HEAD_FILENAME = 'EXPAND_HEAD'
 
 CURRENT_RELEASE = migration.PIKE
 RELEASES = (
+    migration.WRS_KILO_SHIPPED,
+    migration.WRS_KILO_UPGRADE,
     migration.LIBERTY,
     migration.MITAKA,
+    migration.WRS_MITAKA,
     migration.NEWTON,
+    migration.WRS_NEWTON,
     migration.OCATA,
     migration.PIKE,
 )

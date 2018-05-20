@@ -13,14 +13,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import netaddr
+
 from neutron_lib.api import converters as lib_converters
 from neutron_lib.api.definitions import network as net_def
 from neutron_lib.api.definitions import port as port_def
 from neutron_lib.api.definitions import subnet as subnet_def
 from neutron_lib.api.definitions import subnetpool as subnetpool_def
+from neutron_lib.api import validators as lib_validators
 from neutron_lib import constants
 from neutron_lib.db import constants as db_const
 
+from neutron._i18n import _
 
 # Defining a constant to avoid repeating string literal in several modules
 SHARED = 'shared'
@@ -183,7 +187,7 @@ RESOURCE_ATTRIBUTE_MAP = {
                         'convert_to':
                             lib_converters.convert_none_to_empty_list,
                         'default': constants.ATTR_NOT_SPECIFIED,
-                        'validate': {'type:hostroutes': None},
+                        'validate': {'type:hostroutes2': None},
                         'is_visible': True},
         'tenant_id': {'allow_post': True, 'allow_put': False,
                       'validate': {
@@ -288,3 +292,35 @@ def get_collection_info(collection):
     :param collection: Collection or plural name of the resource
     """
     return RESOURCE_ATTRIBUTE_MAP.get(collection)
+
+
+def _validate_subnet2(data):
+    msg = None
+    try:
+        net = netaddr.IPNetwork(lib_validators.validate_no_whitespace(data))
+        if '/' not in data or (net.network != net.ip):
+            msg = _("'%(data)s' isn't a recognized IP subnet cidr,"
+                    " '%(cidr)s' is recommended") % {"data": data,
+                                                     "cidr": net.cidr}
+        else:
+            return
+    except Exception:
+        msg = _("'%s' is not a valid IP subnet") % data
+    return msg
+
+
+# TODO(alegacy): Supersede the neutron-lib version because it does not
+# properly validate subnets that have non-zero values in the host portion of
+# the address.  Move to neutron_lib when we eventually can no longer avoid
+# patching that package.
+def validate_hostroutes2(data, valid_values=None):
+    msg = lib_validators.validate_hostroutes(data, valid_values=valid_values)
+    if not msg:
+        for hostroute in data:
+            msg = _validate_subnet2(hostroute['destination'])
+            if msg:
+                break
+    return msg
+
+
+lib_validators.add_validator('type:hostroutes2', validate_hostroutes2)

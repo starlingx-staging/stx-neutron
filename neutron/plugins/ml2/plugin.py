@@ -12,6 +12,16 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2016 Wind River Systems, Inc.
+#
+
+from ast import literal_eval
+import copy
+import re
+
+from sqlalchemy import and_
+from sqlalchemy import func
 
 from eventlet import greenthread
 from neutron_lib.api.definitions import extra_dhcp_opt as edo_ext
@@ -26,16 +36,19 @@ from neutron_lib.callbacks import exceptions
 from neutron_lib.callbacks import registry
 from neutron_lib.callbacks import resources
 from neutron_lib import constants as const
+from neutron_lib import context as n_ctx
 from neutron_lib import exceptions as exc
 from neutron_lib.exceptions import port_security as psec_exc
 from neutron_lib.plugins import constants as plugin_constants
 from neutron_lib.plugins import directory
 from neutron_lib.plugins.ml2 import api
+from neutron_lib.utils import net as net_utils
 from oslo_config import cfg
 from oslo_db import exception as os_db_exception
 from oslo_log import helpers as log_helpers
 from oslo_log import log
 from oslo_serialization import jsonutils
+from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import uuidutils
@@ -45,9 +58,13 @@ from sqlalchemy.orm import exc as sa_exc
 from neutron._i18n import _
 from neutron.agent import securitygroups_rpc as sg_rpc
 from neutron.api.rpc.agentnotifiers import dhcp_rpc_agent_api
+from neutron.api.rpc.agentnotifiers import host_rpc_agent_api
+from neutron.api.rpc.agentnotifiers import pnet_connectivity_rpc_agent_api
 from neutron.api.rpc.handlers import dhcp_rpc
 from neutron.api.rpc.handlers import dvr_rpc
 from neutron.api.rpc.handlers import metadata_rpc
+from neutron.api.rpc.handlers import pnet_connectivity_rpc
+from neutron.api.rpc.handlers import qos_rpc
 from neutron.api.rpc.handlers import resources_rpc
 from neutron.api.rpc.handlers import securitygroups_rpc
 from neutron.common import constants as n_const
@@ -66,19 +83,28 @@ from neutron.db import db_base_plugin_v2
 from neutron.db import dvr_mac_db
 from neutron.db import external_net_db
 from neutron.db import extradhcpopt_db
+from neutron.db import hosts_db
 from neutron.db.models import securitygroup as sg_models
 from neutron.db import models_v2
+from neutron.db import portforwardings_db
+from neutron.db import providernet_db
 from neutron.db import provisioning_blocks
+from neutron.db import qos_db
 from neutron.db.quota import driver  # noqa
 from neutron.db import securitygroups_rpc_base as sg_db_rpc
 from neutron.db import segments_db
+from neutron.db import settings_db  # noqa
 from neutron.db import subnet_service_type_db_models as service_type_db
 from neutron.db import vlantransparent_db
 from neutron.extensions import allowedaddresspairs as addr_pair
 from neutron.extensions import availability_zone as az_ext
+from neutron.extensions import l3
 from neutron.extensions import netmtu_writable as mtu_ext
 from neutron.extensions import providernet as provider
 from neutron.extensions import vlantransparent
+from neutron.extensions import wrs_binding
+from neutron.extensions import wrs_net
+from neutron.extensions import wrs_provider
 from neutron.plugins.common import utils as p_utils
 from neutron.plugins.ml2.common import exceptions as ml2_exc
 from neutron.plugins.ml2 import config  # noqa
@@ -92,6 +118,7 @@ from neutron.plugins.ml2 import rpc
 from neutron.quota import resource_registry
 from neutron.services.qos import qos_consts
 from neutron.services.segments import plugin as segments_plugin
+from neutron import setting  # noqa
 
 LOG = log.getLogger(__name__)
 
@@ -122,7 +149,10 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 vlantransparent_db.Vlantransparent_db_mixin,
                 extradhcpopt_db.ExtraDhcpOptMixin,
                 address_scope_db.AddressScopeDbMixin,
-                service_type_db.SubnetServiceTypeMixin):
+                service_type_db.SubnetServiceTypeMixin,
+                hosts_db.HostSchedulerDbMixin,
+                providernet_db.ProviderNetDbMixin,
+                qos_db.QoSDbMixin):
 
     """Implement the Neutron L2 abstractions using modules.
 
@@ -152,7 +182,9 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                     "availability_zone",
                                     "network_availability_zone",
                                     "default-subnetpools",
-                                    "subnet-service-types"]
+                                    "subnet-service-types",
+                                    "host", "wrs-provider", "wrs-tenant",
+                                    "wrs-binding", "wrs-tm", "wrs-net"]
 
     @property
     def supported_extension_aliases(self):
@@ -181,6 +213,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         security_group=sg_models.SecurityGroup,
         security_group_rule=sg_models.SecurityGroupRule)
     def __init__(self):
+        self._ensure_neutron_state_path()
         # First load drivers, then initialize DB, then initialize drivers
         self.type_manager = managers.TypeManager()
         self.extension_manager = managers.ExtensionManager()
@@ -192,9 +225,20 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         self._setup_dhcp()
         self._start_rpc_notifiers()
         self.add_agent_status_check_worker(self.agent_health_check)
+        self.add_agent_status_check_worker(self.audit_agent_state)
         self.add_workers(self.mechanism_manager.get_workers())
+        self._start_mechanism_driver_audit()
+        if cfg.CONF.pnet_connectivity.pnet_audit_enabled:
+            self._start_pnet_connectivity_audit()
+            self.start_pnet_notify_listener()
         self._verify_service_plugins_requirements()
         LOG.info("Modular L2 Plugin initialization complete")
+
+    def _ensure_neutron_state_path(self):
+        """Ensure Neutron State path exists as the ML2 Plugin requires it."""
+        state_path = \
+            cfg.CONF.state_path
+        utils.ensure_dir(state_path)
 
     def _setup_rpc(self):
         """Initialize components to support agent communication."""
@@ -205,13 +249,56 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             dhcp_rpc.DhcpRpcCallback(),
             agents_db.AgentExtRpcCallback(),
             metadata_rpc.MetadataRpcCallback(),
-            resources_rpc.ResourcesPullRpcCallback()
+            resources_rpc.ResourcesPullRpcCallback(),
+            qos_rpc.QoSServerRpcCallback(),
+            self.pnet_connectivity_rpc_callback,
         ]
+
+    def _start_mechanism_driver_audit(self):
+        # Schedule tests to run at agent audit interval
+        audit_interval = cfg.CONF.periodic_interval
+        if audit_interval:
+            self.mech_audit_scheduler = \
+                loopingcall.FixedIntervalLoopingCall(
+                    self.audit_mechanism_driver)
+            self.mech_audit_scheduler.start(interval=audit_interval)
+
+    def _start_pnet_connectivity_audit(self):
+        # Schedule tests to be run ever audit interval
+        audit_interval = \
+            cfg.CONF.pnet_connectivity.pnet_audit_interval
+        # Initial delay to reduce stress during dead-office recovery
+        initial_delay = \
+            cfg.CONF.pnet_connectivity.pnet_audit_startup_delay
+        if audit_interval:
+            self.connectivity_audit_scheduler = \
+                loopingcall.FixedIntervalLoopingCall(
+                    self.schedule_providernet_connectivity_tests)
+            self.connectivity_audit_scheduler.start(
+                interval=audit_interval,
+                initial_delay=initial_delay)
+
+        # Run any test that is currently scheduled, whether by scheduler, or
+        # by other events such as adding a new segmentation range, or when
+        # a node becomes available.
+        self.connectivity_audit = loopingcall.FixedIntervalLoopingCall(
+                self.run_providernet_connectivity_tests
+        )
+        self.connectivity_audit.start(interval=1, initial_delay=initial_delay)
 
     def _setup_dhcp(self):
         """Initialize components to support DHCP."""
         self.network_scheduler = importutils.import_object(
             cfg.CONF.network_scheduler_driver
+        )
+        self.setting_driver = importutils.import_object(
+            cfg.CONF.SETTINGS.setting_driver
+        )
+        self.host_driver = importutils.import_object(
+            cfg.CONF.host_driver
+        )
+        self.fm_driver = importutils.import_object(
+            cfg.CONF.fm_driver
         )
         self.add_periodic_dhcp_agent_status_check()
 
@@ -260,9 +347,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         """Initialize RPC notifiers for agents."""
         self.ovo_notifier = ovo_rpc.OVOServerRpcInterface()
         self.notifier = rpc.AgentNotifierApi(topics.AGENT)
+        self.pnet_connectivity_rpc_callback = \
+            pnet_connectivity_rpc.PnetConnectivityCallback(self)
         self.agent_notifiers[const.AGENT_TYPE_DHCP] = (
             dhcp_rpc_agent_api.DhcpAgentNotifyAPI()
         )
+        self.host_notifier = host_rpc_agent_api.HostAgentNotifyAPI()
+        self.pnet_connectivity_notifier = \
+            pnet_connectivity_rpc_agent_api.PnetConnectivityAgentNotifyAPI()
 
     @log_helpers.log_method_call
     def start_rpc_listeners(self):
@@ -294,13 +386,56 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 if self.type_manager.network_matches_filters(network, filters)
                 ]
 
+    def audit_mechanism_driver(self):
+        context = n_ctx.get_admin_context()
+        mech_context = driver_context.MechanismDriverContext(self, context)
+        hostname = net_utils.get_hostname()
+        try:
+            self.mechanism_manager.audit(mech_context)
+        except ml2_exc.MechanismDriverAuditFailure as e:
+            # the Audit failure message is in the form of a tuple, isolate
+            # the driver and the failure reason.
+            driver_name, reason = literal_eval(e.msg)
+            LOG.error("{}: audit failed: {}".format(driver_name, reason))
+            # clear pending ML2 alarm for this driver as a different audit
+            # failure may be seen this time. This saves us from caching
+            # the last audit failure.
+            self.fm_driver.report_ml2_driver_fault(
+                hostname, driver_name, reason)
+        except ml2_exc.MechanismDriverAuditSuccess as e:
+            # the Audit success message only contains the driver
+            driver_name = e.msg
+            LOG.info("{}: audit passed".format(driver_name))
+            self.fm_driver.clear_ml2_driver_fault(hostname, driver_name)
+        except Exception as e:
+            # Catch all exceptions to avoid terminating the greenthread
+            LOG.exception("Unexpected exception in mechanism "
+                          "driver audit, {}".format(e))
+
+    def schedule_providernet_connectivity_tests(self):
+        context = n_ctx.get_admin_context()
+        self._schedule_sequential_providernet_audits(context)
+
+    def is_bgp_enabled(self):
+        if not hasattr(self, 'bgp_enabled'):
+            self.bgp_enabled = bool(directory.get_plugin(alias='bgp'))
+        return self.bgp_enabled
+
+    def run_providernet_connectivity_tests(self):
+        context = n_ctx.get_admin_context()
+        self._run_providernet_connectivity_tests(context)
+
     def _check_mac_update_allowed(self, orig_port, port, binding):
         unplugged_types = (portbindings.VIF_TYPE_BINDING_FAILED,
                            portbindings.VIF_TYPE_UNBOUND)
+        allowed_models = (wrs_binding.VIF_MODEL_PCI_PASSTHROUGH,)
+
         new_mac = port.get('mac_address')
         mac_change = (new_mac is not None and
                       orig_port['mac_address'] != new_mac)
         if (mac_change and binding.vif_type not in unplugged_types):
+            if (mac_change and binding.vif_model in allowed_models):
+                return mac_change
             raise exc.PortBound(port_id=orig_port['id'],
                                 vif_type=binding.vif_type,
                                 old_mac=orig_port['mac_address'],
@@ -330,6 +465,24 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             binding.vnic_type = vnic_type
             changes = True
 
+        vif_model = attrs and attrs.get(wrs_binding.VIF_MODEL)
+        if (validators.is_attr_set(vif_model) and
+            binding.vif_model != vif_model):
+            binding.vif_model = vif_model
+            changes = True
+
+        mtu = attrs and attrs.get(wrs_binding.MTU)
+        if (validators.is_attr_set(mtu) and
+            binding.mtu != mtu):
+            binding.mtu = mtu
+            changes = True
+
+        mac_filtering = attrs and attrs.get(wrs_binding.MAC_FILTERING)
+        if (validators.is_attr_set(mac_filtering) and
+            binding.mac_filtering != mac_filtering):
+            binding.mac_filtering = mac_filtering
+            changes = True
+
         # treat None as clear of profile.
         profile = None
         if attrs and portbindings.PROFILE in attrs:
@@ -346,7 +499,11 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         # Unbind the port if needed.
         if changes:
             binding.vif_type = portbindings.VIF_TYPE_UNBOUND
-            binding.vif_details = ''
+            if binding.vif_model == wrs_binding.VIF_MODEL_VIRTIO:
+                binding.vif_details = self._get_vhost_vif_details(binding)
+            else:
+                binding.vif_details = ''
+
             db.clear_binding_levels(plugin_context, port_id, original_host)
             mech_context._clear_binding_levels()
             port['status'] = const.PORT_STATUS_DOWN
@@ -434,12 +591,20 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         # transaction.
         port = orig_context.current
         orig_binding = orig_context._binding
+
+        vif_details = ''
+        if orig_binding.vif_model == wrs_binding.VIF_MODEL_VIRTIO:
+            vif_details = self._get_vhost_vif_details(orig_binding)
+
         new_binding = models.PortBinding(
             host=orig_binding.host,
             vnic_type=orig_binding.vnic_type,
             profile=orig_binding.profile,
             vif_type=portbindings.VIF_TYPE_UNBOUND,
-            vif_details=''
+            vif_details=vif_details,
+            vif_model=orig_binding.vif_model,
+            mtu=orig_binding.mtu,
+            mac_filtering=orig_binding.mac_filtering
         )
         self._update_port_dict_binding(port, new_binding)
         new_context = driver_context.PortContext(
@@ -561,6 +726,23 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 # Call the mechanism driver precommit methods, commit
                 # the results, and call the postcommit methods.
                 self.mechanism_manager.update_port_precommit(cur_context)
+            else:
+                # NOTE(alegacy): To avoid leaving ports stuck in a DOWN state
+                # we need to try and populate the PortContext with the
+                # current binding levels so that the caller can issue a
+                # proper RPC notification.  See the following bug report for
+                # more information:
+                #     https://bugs.launchpad.net/neutron/+bug/1755810
+                #
+                LOG.warning("concurrent port binding failure on {}".format(
+                    port_id))
+                levels = db.get_binding_levels(plugin_context, port_id,
+                                               cur_binding.host)
+                for level in levels:
+                    cur_context._push_binding_level(level)
+                cur_context._binding = driver_context.InstanceSnapshot(
+                    cur_binding)
+
         if commit:
             # Continue, using the port state as of the transaction that
             # just finished, whether that transaction committed new
@@ -593,6 +775,9 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             port[portbindings.HOST_ID] = binding.host
             port[portbindings.VIF_TYPE] = binding.vif_type
             port[portbindings.VIF_DETAILS] = self._get_vif_details(binding)
+        port[wrs_binding.VIF_MODEL] = binding.vif_model
+        port[wrs_binding.MTU] = binding.mtu
+        port[wrs_binding.MAC_FILTERING] = binding.mac_filtering
 
     def _get_vif_details(self, binding):
         if binding.vif_details:
@@ -604,6 +789,22 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                           {'value': binding.vif_details,
                            'port': binding.port_id})
         return {}
+
+    def _get_vhost_vif_details(self, binding):
+        '''Get vhostuser vif details'''
+
+        # Certain vifs may have been marked as being vhost disabled.
+        # ie. they may have been migrated from a vhost-disabled node
+        # to a vhost-enabled node.
+        # If this is the case, return the vhost enabled flag so that
+        # newly bound nodes can retain this information and prevent
+        # an incompatible vhostuser model from being plugged into the switch.
+        details = self._get_vif_details(binding)
+        vhost_enabled = details.get(wrs_binding.VHOST_USER_ENABLED, True)
+        if not vhost_enabled:
+            return jsonutils.dumps({wrs_binding.VHOST_USER_ENABLED: False})
+        else:
+            return ''
 
     def _get_profile(self, binding):
         if binding.profile:
@@ -648,6 +849,32 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         session = plugin._object_session_or_new_session(subnetdb)
         plugin.extension_manager.extend_subnet_dict(session, subnetdb, result)
 
+    # Register dict extend functions for networks
+    @staticmethod
+    @resource_extend.extends([net_def.COLLECTION_NAME])
+    def _extend_network_dict_qos(network_res, network_db):
+        plugin = directory.get_plugin()
+        if not isinstance(plugin, qos_db.QoSDbMixin):
+            return
+        plugin.extend_network_dict_qos(network_res, network_db)
+
+    # Register dict extend functions for ports
+    @staticmethod
+    @resource_extend.extends([port_def.COLLECTION_NAME])
+    def _extend_port_dict_qos(port_res, port_db):
+        plugin = directory.get_plugin()
+        if not isinstance(plugin, qos_db.QoSDbMixin):
+            return
+        plugin.extend_port_dict_qos(port_res, port_db)
+
+    # Register dict extend functions for routers
+    @staticmethod
+    @resource_extend.extends([l3.ROUTERS])
+    def _extend_router_dict_portforwarding(router_res, router_db):
+        router_res['portforwardings'] = (
+            portforwardings_db.PortForwardingDbMixin._make_extra_portfwd_list(
+                router_db['portforwarding_list']))
+
     @staticmethod
     def _object_session_or_new_session(sql_obj):
         session = sqlalchemy.inspect(sql_obj).session
@@ -669,6 +896,27 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                   segment[api.NETWORK_TYPE],
                                   segment[api.SEGMENTATION_ID],
                                   segment[api.PHYSICAL_NETWORK])
+
+    def wrs_update_subnet(self, subnet):
+        subnet = copy.deepcopy(subnet)
+        if wrs_net.VLAN in subnet:
+            subnet["vlan_id"] = subnet[wrs_net.VLAN]
+        return subnet
+
+    def _notify_subnet_created(self, mech_context):
+        subnet = mech_context.current
+        subnet = self.wrs_update_subnet(subnet)
+        # currently a subnet only supports one bound segment
+        segment = mech_context.subnet_segments[0]
+        self.notifier.subnet_create(mech_context.context, subnet,
+                                    segment[api.NETWORK_TYPE],
+                                    segment[api.SEGMENTATION_ID],
+                                    segment[api.PHYSICAL_NETWORK])
+
+    def _notify_subnet_deleted(self, mech_context):
+        subnet = mech_context.current
+        subnet = self.wrs_update_subnet(subnet)
+        self.notifier.subnet_delete(mech_context.context, subnet)
 
     def _delete_objects(self, context, resource, objects):
         delete_op = getattr(self, 'delete_%s' % resource)
@@ -803,6 +1051,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 result)
 
             self._process_l3_create(context, result, net_data)
+            self._process_qos_network_update(context, result, net_data)
             self.type_manager.extend_network_dict_provider(context, result)
 
             # Update the transparent vlan if configured
@@ -829,6 +1078,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
 
     @utils.transaction_guard
     @db_api.retry_if_session_inactive()
+    @utils.synchronized('segment-allocation', external=True)
     def create_network(self, context, network):
         self._before_create_network(context, network)
         result, mech_context = self._create_network_db(context, network)
@@ -869,6 +1119,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             self.extension_manager.process_update_network(context, net_data,
                                                           updated_network)
             self._process_l3_update(context, updated_network, net_data)
+            self._process_qos_network_update(context, updated_network,
+                                             net_data)
 
             # ToDO(QoS): This would change once EngineFacade moves out
             db_network = self._get_network(context, id)
@@ -1016,8 +1268,23 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         # TODO(kevinbenton): BEFORE notification should be added here
         pass
 
+    def _get_other_subnets_on_vlan(self, context, subnet):
+        """Find all other subnets that share the same network_id and vlan_id.
+        """
+        network_id = subnet['network_id']
+        if not validators.is_attr_set(subnet.get(wrs_net.VLAN)):
+            vlan_id = n_const.NONE_VLAN_TAG
+        else:
+            vlan_id = subnet[wrs_net.VLAN]
+        filters = dict(network_id=[network_id], vlan_id=[vlan_id])
+        return self.get_subnets(context, filters=filters)
+
     def _create_subnet_db(self, context, subnet):
+        subnet_data = subnet[subnet_def.RESOURCE_NAME]
+        tenant_id = subnet_data['tenant_id']
         with db_api.context_manager.writer.using(context):
+            peer_subnets = self._get_other_subnets_on_vlan(context,
+                                                           subnet_data)
             result, net_db, ipam_sub = self._create_subnet_precommit(
                 context, subnet)
 
@@ -1029,6 +1296,13 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
 
             self.extension_manager.process_create_subnet(
                 context, subnet[subnet_def.RESOURCE_NAME], result)
+
+            # NOTE(jrichard) drop these changes next rebase
+            subnet_data['id'] = result['id']
+            self.type_manager.create_subnet_segments(context, subnet_data,
+                                                     peer_subnets, tenant_id)
+            self.type_manager.extend_subnets_dict_provider(context, [result])
+
             network = self._make_network_dict(net_db, context=context)
             self.type_manager.extend_network_dict_provider(context, network)
             mech_context = driver_context.SubnetContext(self, context,
@@ -1058,6 +1332,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 LOG.error("mechanism_manager.create_subnet_postcommit "
                           "failed, deleting subnet '%s'", result['id'])
                 self.delete_subnet(context, result['id'])
+        self._notify_subnet_created(mech_context)
         return result
 
     @utils.transaction_guard
@@ -1075,6 +1350,9 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 context, id, subnet)
             self.extension_manager.process_update_subnet(
                 context, subnet[subnet_def.RESOURCE_NAME], updated_subnet)
+            # NOTE(jrichard) drop this change next rebase
+            self.type_manager.extend_subnets_dict_provider(context,
+                                                           [updated_subnet])
             updated_subnet = self.get_subnet(context, id)
             mech_context = driver_context.SubnetContext(
                 self, context, updated_subnet, network=None,
@@ -1089,6 +1367,25 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         # either undo/retry the operation or delete the resource.
         self.mechanism_manager.update_subnet_postcommit(mech_context)
         return updated_subnet
+
+    def get_subnet(self, context, id, fields=None):
+        session = context.session
+        with session.begin(subtransactions=True):
+            result = super(Ml2Plugin, self).get_subnet(context, id, None)
+            self.type_manager.extend_subnets_dict_provider(context, [result])
+
+        return self._fields(result, fields)
+
+    def get_subnets(self, context, filters=None, fields=None,
+                    sorts=None, limit=None, marker=None, page_reverse=False):
+        session = context.session
+        with session.begin(subtransactions=True):
+            nets = super(Ml2Plugin,
+                         self).get_subnets(context, filters, None, sorts,
+                                           limit, marker, page_reverse)
+            self.type_manager.extend_subnets_dict_provider(context, nets)
+
+        return [self._fields(net, fields) for net in nets]
 
     @utils.transaction_guard
     def delete_subnet(self, context, id):
@@ -1109,6 +1406,17 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         setattr(context, '_mech_context', mech_context)
         self.mechanism_manager.delete_subnet_precommit(mech_context)
 
+        vlan_id = subnet.get(wrs_net.VLAN)
+        if vlan_id:
+            network_id = subnet.get("network_id")
+            filters = dict(network_id=[network_id], vlan_id=[vlan_id])
+            subnets = self.get_subnets(context, filters=filters)
+            if len(subnets) == 1:
+                # If this is the last subnet in this vlan then release the
+                # segment that is associated to this subnet.
+                self.type_manager.release_subnet_segments(
+                    context.session, subnet['id'])
+
     @registry.receives(resources.SUBNET, [events.AFTER_DELETE])
     def _subnet_delete_after_delete_handler(self, rtype, event, trigger,
                                             context, subnet, **kwargs):
@@ -1120,6 +1428,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             # delete the subnet.  Ideally we'd notify the caller of
             # the fact that an error occurred.
             LOG.error("mechanism_manager.delete_subnet_postcommit failed")
+        self._notify_subnet_deleted(context._mech_context)
 
     # TODO(yalei) - will be simplified after security group and address pair be
     # converted to ext driver too.
@@ -1137,7 +1446,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             attrs[addr_pair.ADDRESS_PAIRS] = []
 
         if port_security:
-            self._ensure_default_security_group_on_port(context, port)
+            if cfg.CONF.SECURITYGROUP.ensure_default_security_group:
+                self._ensure_default_security_group_on_port(context, port)
         elif self._check_update_has_security_groups(port):
             raise psec_exc.PortSecurityAndIPRequiredForSecurityGroups()
 
@@ -1157,10 +1467,41 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 context, port['id'], resources.PORT,
                 provisioning_blocks.DHCP_ENTITY)
 
+    def _set_port_mtu(self, context, port, network, attrs):
+        # The port inherits the MTU value of its network
+        attrs[wrs_binding.MTU] = network.get(api.MTU)
+
+    def _set_port_mac_filtering(self, context, port, attrs):
+        if port.get(psec.PORTSECURITY) is None:
+            # The port inherits the MAC filtering value of its project/tenant
+            mac_filtering = self.setting_driver.get_tenant_setting(
+                context, setting.ENGINE.settings,
+                port['tenant_id'], setting.MAC_FILTERING)
+            attrs[wrs_binding.MAC_FILTERING] = mac_filtering
+        else:
+            # if port does not have fixed ips, set MAC filtering to false and
+            # update the database for portsecuritybindings
+            if port.get('fixed_ips') is None:
+                port[psec.PORTSECURITY] = False
+                attrs[psec.PORTSECURITY] = False
+                self.extension_manager.process_update_port(context, attrs,
+                                                           port)
+                attrs[wrs_binding.MAC_FILTERING] = False
+            else:
+                # MAC filtering of the port is overridden by
+                # port_security_enabled
+                attrs[wrs_binding.MAC_FILTERING] = port[psec.PORTSECURITY]
+
     def _before_create_port(self, context, port):
         attrs = port[port_def.RESOURCE_NAME]
         if not attrs.get('status'):
-            attrs['status'] = const.PORT_STATUS_DOWN
+            vif_model = attrs.get(wrs_binding.VIF_MODEL)
+            if vif_model == wrs_binding.VIF_MODEL_PCI_PASSTHROUGH:
+                # PCI passthrough devices are not managed by neutron, therefore
+                # set status to UNKNOWN since they will never be set to ACTIVE
+                attrs['status'] = const.PORT_STATUS_UNKNOWN
+            else:
+                attrs['status'] = const.PORT_STATUS_DOWN
 
         registry.notify(resources.PORT, events.BEFORE_CREATE, self,
                         context=context, port=attrs)
@@ -1180,12 +1521,16 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             # sgids must be got after portsec checked with security group
             sgids = self._get_security_groups_on_port(context, port)
             self._process_port_create_security_group(context, result, sgids)
+            self._process_qos_port_update(context, result, port['port'])
             network = self.get_network(context, result['network_id'])
             binding = db.add_port_binding(context, result['id'])
             mech_context = driver_context.PortContext(self, context, result,
                                                       network, binding, None)
-            self._process_port_binding(mech_context, attrs)
+            # Set default values for derived attributes
+            self._set_port_mtu(context, result, network, attrs)
+            self._set_port_mac_filtering(context, result, attrs)
 
+            self._process_port_binding(mech_context, attrs)
             result[addr_pair.ADDRESS_PAIRS] = (
                 self._process_create_allowed_address_pairs(
                     context, result,
@@ -1197,6 +1542,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 resources.PORT, events.PRECOMMIT_CREATE, self, **kwargs)
             self.mechanism_manager.create_port_precommit(mech_context)
             self._setup_dhcp_agent_provisioning_component(context, result)
+            # TODO(alegacy): this refresh is needed because otherwise the
+            # allowed_address_pairs attribute of the DB object will not be
+            # automatically updated if anything causes the DB object to be
+            # re-read before this point. This is needed because the VLAN code
+            # is re-reading the port object and causing the
+            # allowed_address_pairs to be returned as an empty list.
+            context.session.add(port_db)
+            context.session.refresh(port_db)
 
         resource_extend.apply_funcs('ports', result, port_db)
         return result, mech_context
@@ -1308,6 +1661,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             if (psec.PORTSECURITY in attrs) and (
                         original_port[psec.PORTSECURITY] !=
                         updated_port[psec.PORTSECURITY]):
+                self._set_port_mac_filtering(context, updated_port, attrs)
                 need_port_update_notify = True
             # TODO(QoS): Move out to the extension framework somehow.
             # Follow https://review.openstack.org/#/c/169223 for a solution.
@@ -1323,6 +1677,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                                       updated_port))
             need_port_update_notify |= self.update_security_group_on_port(
                 context, id, port, original_port, updated_port)
+            need_port_update_notify |= self._process_qos_port_update(
+                context, updated_port, port['port'])
             network = self.get_network(context, original_port['network_id'])
             need_port_update_notify |= self._update_extra_dhcp_opts_on_port(
                 context, id, port, updated_port)
@@ -1877,6 +2233,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             return
 
         network_id = segment.get('network_id')
+        validate_mtu = True
 
         if event == events.PRECOMMIT_CREATE:
             updated_segment = self.type_manager.reserve_network_segment(
@@ -1886,11 +2243,13 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             segment[api.SEGMENTATION_ID] = updated_segment[api.SEGMENTATION_ID]
         elif event == events.PRECOMMIT_DELETE:
             self.type_manager.release_network_segment(context, segment)
+            validate_mtu = False
 
         # change in segments could affect resulting network mtu, so let's
         # recalculate it
         network_db = self._get_network(context, network_id)
-        network_db.mtu = self._get_network_mtu(network_db)
+        network_db.mtu = self._get_network_mtu(network_db,
+                                               validate=validate_mtu)
         network_db.save(session=context.session)
 
         try:
@@ -1914,3 +2273,388 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             self.mechanism_manager.update_network_precommit(mech_context)
         elif event == events.AFTER_CREATE or event == events.AFTER_DELETE:
             self.mechanism_manager.update_network_postcommit(mech_context)
+
+    def _update_providernet_allocations(self, context, providernet):
+        self.type_manager.update_provider_allocations(context,
+                                                      providernet['type'])
+
+    def _is_providernet_referenced(self, context, providernet,
+                                   segment_range=None):
+        return (self.type_manager.network_segments_exist(
+            context, providernet['type'], providernet['name'],
+            segment_range) or
+                self.type_manager.subnet_segments_exist(
+            context, providernet['type'], providernet['name'],
+            segment_range))
+
+    def _is_providernet_type_supported(self, network_type):
+        if not self.type_manager.network_type_supported(network_type):
+            raise wrs_provider.ProviderNetTypeNotSupported(type=network_type)
+
+    def _check_providernet_mtu(self, context, id, data):
+        """
+        Determines if the MTU can be changed to a new value.  If the
+        providernet has not yet been associated to any compute node data
+        interfaces then the change is automatically allowed; otherwise the MTU
+        of the compute node interfaces must be large enough to support the new
+        value.
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            try:
+                min_mtu = (session.query(func.min(hosts_db.HostInterface.mtu)).
+                           select_from(hosts_db.HostInterface).
+                           join(hosts_db.HostInterfaceProviderNetBinding,
+                                (hosts_db.HostInterfaceProviderNetBinding.
+                                 interface_id == hosts_db.HostInterface.id)).
+                           filter(hosts_db.HostInterface.network_type ==
+                                  hosts_db.DATA_NETWORK).
+                           filter(hosts_db.HostInterfaceProviderNetBinding.
+                                  providernet_id == id).
+                           one()[0])
+            except sa_exc.NoResultFound:
+                # Not yet associated to any compute nodes; allow
+                return
+        if not min_mtu:
+            # Not yet associated to any compute nodes; allow
+            return
+        new_mtu = data['mtu']
+        required_mtu = self.get_providernet_required_mtu(context, id, new_mtu)
+        if required_mtu > min_mtu:
+            raise wrs_provider.ProviderNetMtuExceedsInterfaceMtu(
+                type=data['type'], value=data['mtu'],
+                required=required_mtu, minimum=min_mtu)
+
+    def update_providernet(self, context, id, providernet):
+        """
+        Run semantic checks prior to updates
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            existing = self.get_providernet_by_id(context, id)
+            updated = providernet.get('providernet')
+            existing.update(updated)
+            self._check_providernet_mtu(context, id, existing)
+            return super(Ml2Plugin, self).update_providernet(
+                context, id, providernet)
+
+    def create_providernet(self, context, providernet):
+        """
+        Update segmentation id allocations on provider network creation.
+        """
+        session = context.session
+        self._is_providernet_type_supported(providernet['providernet']['type'])
+        with session.begin(subtransactions=True):
+            providernet = super(Ml2Plugin, self).create_providernet(
+                context, providernet)
+            # Setup an empty list of ranges so that type drivers such as
+            # 'flat' get an opportunity to update their internal mappings
+            providernet['ranges'] = []
+            self._update_providernet_allocations(context, providernet)
+            return providernet
+
+    def delete_providernet(self, context, id):
+        """
+        Run semantic checks and update segmentation id allocations on
+        provider network deletion
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            providernet = self.get_providernet_by_id(context, id)
+
+            if self._is_providernet_referenced(context, providernet):
+                name = providernet.get('name')
+                raise wrs_provider.ProviderNetReferencedByTenant(name=name)
+            if self.get_providernet_hosts(context, id):
+                name = providernet.get('name')
+                raise wrs_provider.ProviderNetReferencedByComputeNode(
+                    name=name)
+
+            super(Ml2Plugin, self).delete_providernet(context, id)
+
+            # clear all ranges for the provider network being deleted
+            # which are deleted through cascade so that the allocations
+            # can be updated to reflect the removal of the entry
+            providernet['ranges'] = None
+            self._update_providernet_allocations(context, providernet)
+
+    def _check_for_range_overlaps(self, context,
+                                  providernet, range_data,
+                                  providernets):
+        """
+        Given a providernet and one of its ranges, check all ranges from all
+        provider networks supplied in the providernets list.  If a conflict is
+        found the DB object for the conflicting range is returned; otherwise
+        None is returned.
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            query = (
+                session.query(providernet_db.ProviderNetRange).
+                join(providernet_db.ProviderNet,
+                     providernet_db.ProviderNet.id ==
+                     providernet_db.ProviderNetRange.providernet_id).
+                filter(providernet_db.ProviderNet.id != providernet['id']).
+                filter(providernet_db.ProviderNet.type ==
+                       providernet['type']).
+                filter(and_((range_data['minimum'] <=
+                             providernet_db.ProviderNetRange.maximum),
+                            (range_data['maximum'] >=
+                             providernet_db.ProviderNetRange.minimum))))
+            if len(providernets) > 0:
+                query = (query.filter(providernet_db.ProviderNet.id.
+                                      in_(providernets)))
+            try:
+                return query.first()
+            except sa_exc.NoResultFound:
+                return None
+
+    def _validate_range_update_for_overlaps(self, context, providernet,
+                                            range_data):
+        """
+        Checks for segmentation id range overlaps against all other provider
+        networks of the same type that share a data interface on any compute
+        node.
+        """
+        # Query the list of interfaces that have a binding with this
+        # providernet instance.
+        session = context.session
+        interfaces = (session.query(hosts_db.HostInterfaceProviderNetBinding.
+                                    interface_id).
+                      filter(hosts_db.HostInterfaceProviderNetBinding.
+                             providernet_id == providernet['id']))
+        if interfaces.count() == 0:
+            return
+        # Query the other providernet instances that are related to the same
+        # interfaces and have the same type
+        providernets = (
+            session.query(providernet_db.ProviderNet).
+            select_from(providernet_db.ProviderNetRange).
+            join(providernet_db.ProviderNet,
+                 providernet_db.ProviderNet.id ==
+                 providernet_db.ProviderNetRange.providernet_id).
+            join(hosts_db.HostInterfaceProviderNetBinding,
+                 and_(hosts_db.HostInterfaceProviderNetBinding.
+                      providernet_id == providernet_db.ProviderNet.id,
+                      providernet_db.ProviderNet.type ==
+                      providernet['type'])).
+            filter(hosts_db.HostInterfaceProviderNetBinding.
+                   interface_id.in_(interfaces)).
+            group_by(providernet_db.ProviderNet.id))
+        if providernets.count() == 0:
+            return
+        providernet_ids = [p.id for p in providernets.all()]
+        conflict = self._check_for_range_overlaps(
+            context, providernet, range_data, providernet_ids)
+        if conflict:
+            raise wrs_provider.ProviderNetRangeOverlaps(id=conflict['id'])
+        return
+
+    def create_providernet_range(self, context, providernet_range):
+        """
+        Update segmentation id allocations on range creation.
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            providernet_range = (
+                super(Ml2Plugin, self).create_providernet_range(
+                    context, providernet_range))
+            providernet = self.get_providernet_by_id(
+                context, providernet_range['providernet_id'])
+            self._update_providernet_allocations(context, providernet)
+            return providernet_range
+
+    def _validate_range_update_for_orphans(self, context, existing, updates):
+        """
+        Determine if the new range will exclude any values that were
+        previously in the range.  If so throw an exception.
+        """
+        providernet_id = existing['providernet_id']
+        providernet = self.get_providernet_by_id(context, providernet_id)
+        old_min = existing['minimum']
+        new_min = updates['minimum']
+        old_max = existing['maximum']
+        new_max = updates['maximum']
+        ranges = []
+        if (new_min > old_max) or (new_max < old_min):
+            # The entire old range needs to be checked since the new range
+            # has no overlap
+            ranges = [existing]
+        elif (new_min <= old_min and new_max >= old_max):
+            # Nothing needs to be checked since the new range completely
+            # overlaps the old range
+            return
+        else:
+            # Calculate the difference between the two sets to find out which
+            # id values will no longer be part of the range
+            if new_min > old_min:
+                ranges.append({'minimum': old_min,
+                               'maximum': new_min - 1})
+            if new_max < old_max:
+                ranges.append({'minimum': new_max + 1,
+                               'maximum': old_max})
+        for r in ranges:
+            if self._is_providernet_referenced(context, providernet, r):
+                name = existing.get('name')
+                raise wrs_provider.ProviderNetRangeReferencedByTenant(
+                    name=name)
+
+    def _validate_range_update_for_reserved(self, context, providernet,
+                                            range_data):
+        """
+        Checks for segmentation id range overlaps against all reserved vlan
+        values on any interface for which the providernet is associated.
+        """
+        if providernet['type'] != n_const.PROVIDERNET_VLAN:
+            return
+        # Query all interfaces that have an association to this provider
+        # network.
+        session = context.session
+        query = (session.query(hosts_db.HostInterface).
+                 join(hosts_db.HostInterfaceProviderNetBinding,
+                      (hosts_db.HostInterfaceProviderNetBinding.
+                       interface_id == hosts_db.HostInterface.id)).
+                 filter(hosts_db.HostInterfaceProviderNetBinding.
+                        providernet_id == providernet['id']))
+        # Check each returned interface to determine if it has any reserved
+        # vlan values that conflict with this provider network range.
+        for entry in [x for x in query.all() if x['vlans']]:
+            vlans = re.sub(',,+', ',', entry['vlans'])
+            vlans = vlans.split(',')
+            if any(range_data['minimum'] <= int(x) <= range_data['maximum']
+                   for x in vlans):
+                raise wrs_provider.ProviderNetRangeReferencedBySystemVlans(
+                    host=entry['host_id'], interface=entry['id'])
+
+    def _validate_providernet_range(self, context, providernet, updates):
+        super(Ml2Plugin, self)._validate_providernet_range(
+            context, providernet, updates)
+        if 'id' in updates:
+            # This is an update rather than a create
+            existing = self.get_providernet_range_by_id(context, updates['id'])
+            self._validate_range_update_for_orphans(context, existing, updates)
+        self._validate_range_update_for_overlaps(context, providernet, updates)
+        self._validate_range_update_for_reserved(context, providernet, updates)
+
+    def update_providernet_range(self, context, id, providernet_range):
+        """
+        Update segmentation id allocations on range updates.
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            providernet_range = (
+                super(Ml2Plugin, self).update_providernet_range(
+                    context, id, providernet_range))
+            providernet = self.get_providernet_by_id(
+                context, providernet_range['providernet_id'])
+            self._update_providernet_allocations(context, providernet)
+            return providernet_range
+
+    def delete_providernet_range(self, context, id):
+        """
+        Update segmentation id allocations on range deletion.
+        """
+        session = context.session
+        with session.begin(subtransactions=True):
+            providernet_range = self.get_providernet_range_by_id(context, id)
+            providernet = self.get_providernet_by_id(
+                context, providernet_range['providernet_id'])
+            segments = {'minimum': providernet_range['minimum'],
+                        'maximum': providernet_range['maximum']}
+            if self._is_providernet_referenced(context, providernet, segments):
+                name = providernet_range.get('name')
+                raise wrs_provider.ProviderNetRangeReferencedByTenant(
+                    name=name)
+            super(Ml2Plugin, self).delete_providernet_range(context, id)
+            self._update_providernet_allocations(context, providernet)
+
+    def _validate_providernets_compatibility(self, context, interface):
+        """
+        Validate that the list of provider networks associated to this
+        interface are all compatible with each other.   Also validate that the
+        provider networks are compatible with the interface type.
+        """
+        providernets = interface['providernet_ids']
+        if len(providernets) == 0:
+            # Nothing to check
+            return
+        types = set()
+        for providernet_id in providernets:
+            providernet = self._get_providernet_by_id(context, providernet_id)
+            types.add(providernet['type'])
+            for r in providernet['ranges']:
+                # Check each range against all other ranges for the other
+                # provider networks on this same interface.
+                conflict = self._check_for_range_overlaps(
+                    context, providernet, r, providernets)
+                if conflict:
+                    raise wrs_provider.ProviderNetExistingRangeOverlaps(
+                        first=r['id'], second=conflict['id'])
+        incompatible_types = [n_const.PROVIDERNET_FLAT,
+                              n_const.PROVIDERNET_VXLAN]
+        if all(x in types for x in incompatible_types):
+            raise wrs_provider.ProviderNetTypesIncompatible(
+                types=','.join(list(incompatible_types)))
+        if interface['network_type'] in [hosts_db.PCI_PASSTHROUGH]:
+            incompatible_types = [n_const.PROVIDERNET_VXLAN]
+            if all(x in types for x in incompatible_types):
+                raise wrs_provider.ProviderNetTypesIncompatibleWithPthru(
+                    types=','.join(list(incompatible_types)))
+
+    def _validate_providernets_system_vlans(self, context, interface):
+        """
+        Validate that the list of system vlans assigned to the interface does
+        not conflict with any provider network range associated with the
+        interface.
+        """
+        vlan_ids = interface['vlan_ids']
+        if not vlan_ids:
+            # Nothing to check
+            return
+        providernets = interface['providernet_ids']
+        session = context.session
+        with session.begin(subtransactions=True):
+            query = (session.query(providernet_db.ProviderNetRange).
+                     join(providernet_db.ProviderNet,
+                          (providernet_db.ProviderNet.id ==
+                           providernet_db.ProviderNetRange.providernet_id)).
+                     filter(providernet_db.ProviderNet.type ==
+                            n_const.PROVIDERNET_VLAN).
+                     filter(providernet_db.ProviderNetRange.providernet_id.
+                            in_(providernets)))
+            for r in query.all():
+                matches = any(r['minimum'] <= x <= r['maximum']
+                              for x in vlan_ids)
+                if matches:
+                    raise wrs_provider. \
+                        ProviderNetRangeConflictsWithSystemVlans(
+                            providernet=r['providernet_id'],
+                            providernet_range=r['id'],
+                            vlan_ids=','.join([str(x) for x in vlan_ids]))
+
+    def _validate_mtu_compatibility(self, context, interface):
+        """
+        Validate that the interface MTU is large enough to support the
+        provider networks that are assigned to it.
+        """
+        mtu = int(interface['mtu'])
+        providernets = interface['providernet_ids']
+        for providernet_id in providernets:
+            required_mtu = self.get_providernet_required_mtu(
+                context, providernet_id)
+            if required_mtu > mtu:
+                raise wrs_provider.ProviderNetRequiresInterfaceMtu(
+                    providernet=providernet_id, mtu=required_mtu)
+
+    def _validate_interface(self, context, body):
+        """
+        Override the bind interface validation to perform semantic checks that
+        are beyond the scope of only the host module.
+        """
+        # The super class will do syntax and basic semantic checking on the
+        # input parameters.
+        super(Ml2Plugin, self)._validate_interface(context, body)
+        interface = body['interface']
+        self._validate_providernets_compatibility(context, interface)
+        self._validate_providernets_system_vlans(context, interface)
+        self._validate_mtu_compatibility(context, interface)

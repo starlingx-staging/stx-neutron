@@ -13,6 +13,9 @@ test_files=$(find ${test_path} -iname 'test_*.py')
 ignore_regexes=(
     # The following test is required for oslo.versionedobjects
     "^objects/test_objects.py$"
+    # The following vendor plugins are not required to confrm to the
+    # structural requirements.
+    "^plugins/wrs.*$"
     # The following open source plugin tests are not actually unit
     # tests and are ignored pending their relocation to the functional
     # test tree.

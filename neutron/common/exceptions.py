@@ -12,6 +12,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2015 Wind River Systems, Inc.
+#
+
 
 from neutron_lib import exceptions as e
 
@@ -103,6 +107,12 @@ class DNSNameServersExhausted(e.BadRequest):
                 "The number of DNS nameservers exceeds the limit %(quota)s.")
 
 
+class SegmentationIdInUse(e.InUse):
+    message = _("Unable to create the network. "
+                "The segment %(id)s on physical network "
+                "%(physical_network)s is in use.")
+
+
 class FlatNetworkInUse(e.InUse):
     message = _("Unable to create the flat network. "
                 "Physical network %(physical_network)s is in use.")
@@ -117,6 +127,23 @@ class TenantNetworksDisabled(e.ServiceUnavailable):
 class NoNetworkFoundInMaximumAllowedAttempts(e.ServiceUnavailable):
     message = _("Unable to create the network. "
                 "No available network found in maximum allowed attempts.")
+
+
+class NetworkNotPredefined(e.BadRequest):
+    message = _("Unable to create the network. "
+                "The %(type)s %(id)s on physical network "
+                "%(physical_network)s is not predefined as "
+                "a provider network.")
+
+    def __init__(self, **kwargs):
+        # Identify the id nature, is it a vlan or vxlan
+        if 'vxlan_vni' in kwargs:
+            kwargs['id'] = kwargs['vxlan_vni']
+            kwargs['type'] = 'vxlan_vni'
+        else:
+            kwargs['id'] = kwargs['vlan_id']
+            kwargs['type'] = 'vlan_id'
+        super(NetworkNotPredefined, self).__init__(**kwargs)
 
 
 class MalformedRequestBody(e.BadRequest):
@@ -170,6 +197,14 @@ class QuotaMissingTenant(e.BadRequest):
 class InvalidQuotaValue(e.Conflict):
     message = _("Change would make usage less than 0 for the following "
                 "resources: %(unders)s.")
+
+
+class SettingNameUnknown(e.NotFound):
+    message = _("Unknown tenant setting %(unknown)s.")
+
+
+class SettingMissingTenant(e.BadRequest):
+    message = _("Tenant-id was missing from Setting request")
 
 
 class InvalidSharedSetting(e.Conflict):

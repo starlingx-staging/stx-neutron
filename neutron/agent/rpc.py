@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 from datetime import datetime
 import itertools
@@ -113,6 +116,24 @@ class PluginApi(object):
         cctxt = self.client.prepare()
         return cctxt.call(context, 'get_device_details', device=device,
                           agent_id=agent_id, host=host)
+
+    def get_host_details(self, context, host, agent_id):
+        cctxt = self.client.prepare()
+        return cctxt.call(context,
+                          'get_host_details',
+                          host=host,
+                          agent_id=agent_id)
+
+    def get_provider_details(self, context, host, agent_id,
+                             network_type, physical_network, segmentation_id):
+        cctxt = self.client.prepare()
+        return cctxt.call(context,
+                          'get_provider_details',
+                          host=host,
+                          agent_id=agent_id,
+                          network_type=network_type,
+                          physical_network=physical_network,
+                          segmentation_id=segmentation_id)
 
     def get_devices_details_list(self, context, devices, agent_id, host=None):
         cctxt = self.client.prepare(version='1.3')

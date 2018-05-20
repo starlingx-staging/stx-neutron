@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 import abc
 
@@ -61,10 +64,11 @@ class _TypeDriverBase(object):
         """
 
     @abc.abstractmethod
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         """Validate attributes of a provider network segment.
 
         :param segment: segment dictionary using keys defined above
+        :param context: optional request context
         :raises: neutron_lib.exceptions.InvalidInput if invalid
 
         Called outside transaction context to validate the provider
@@ -77,6 +81,19 @@ class _TypeDriverBase(object):
 
         The network_type attribute is present in segment, but
         need not be validated.
+        """
+        pass
+
+    @abc.abstractmethod
+    def update_provider_allocations(self, context):
+        """Update provider network segment allocations.
+
+        :param context: current request context
+
+        Called inside transaction context on session to release update
+        provider network's type-specific resource allocations. Runtime
+        errors are not expected, but raising an exception will result
+        in rollback of the transaction.
         """
         pass
 
@@ -117,11 +134,13 @@ class TypeDriver(_TypeDriverBase):
     """
 
     @abc.abstractmethod
-    def reserve_provider_segment(self, session, segment):
+    def reserve_provider_segment(self, session, segment, **filters):
         """Reserve resource associated with a provider network segment.
 
         :param session: database session
         :param segment: segment dictionary
+        :param filters: additional arguments used to select a suitable provider
+        network
         :returns: segment dictionary
 
         Called inside transaction context on session to reserve the
@@ -132,10 +151,12 @@ class TypeDriver(_TypeDriverBase):
         pass
 
     @abc.abstractmethod
-    def allocate_tenant_segment(self, session):
+    def allocate_tenant_segment(self, session, **filters):
         """Allocate resource for a new tenant network segment.
 
         :param session: database session
+        :param filters: additional arguments used to select a suitable provider
+        network
         :returns: segment dictionary using keys defined above
 
         Called inside transaction context on session to allocate a new
@@ -187,7 +208,7 @@ class ML2TypeDriver(_TypeDriverBase):
     """
 
     @abc.abstractmethod
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, context, segment, **filters):
         """Reserve resource associated with a provider network segment.
 
         :param context: instance of neutron context with DB session

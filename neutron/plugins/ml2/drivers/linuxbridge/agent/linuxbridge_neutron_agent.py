@@ -52,6 +52,8 @@ from neutron.plugins.ml2.drivers.linuxbridge.agent.common \
     import constants as lconst
 from neutron.plugins.ml2.drivers.linuxbridge.agent.common \
     import utils as lb_utils
+from neutron.plugins.ml2.drivers.linuxbridge.agent import \
+    linuxbridge_agent_extension_api as agent_extension_api
 from neutron.plugins.ml2.drivers.linuxbridge.agent \
     import linuxbridge_capabilities
 
@@ -63,6 +65,13 @@ BRIDGE_NAME_PREFIX = "brq"
 MAX_VLAN_POSTFIX_LEN = 5
 VXLAN_INTERFACE_PREFIX = "vxlan-"
 
+IPTABLES_DRIVERS = [
+    'iptables',
+    'iptables_hybrid',
+    'neutron.agent.linux.iptables_firewall.IptablesFirewallDriver',
+    'neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver'
+]
+
 
 class LinuxBridgeManager(amb.CommonAgentManagerBase):
     def __init__(self, bridge_mappings, interface_mappings):
@@ -72,6 +81,7 @@ class LinuxBridgeManager(amb.CommonAgentManagerBase):
         self.validate_interface_mappings()
         self.validate_bridge_mappings()
         self.ip = ip_lib.IPWrapper()
+        self.agent_api = None
         # VXLAN related parameters:
         self.local_ip = cfg.CONF.VXLAN.local_ip
         self.vxlan_mode = lconst.VXLAN_NONE
@@ -358,7 +368,8 @@ class LinuxBridgeManager(amb.CommonAgentManagerBase):
             for ip in ips:
                 # If bridge ip address already exists, then don't add
                 # otherwise will report error
-                if not dst_device.addr.list(to=ip['cidr']):
+                to = utils.cidr_to_ip(ip['cidr'])
+                if not dst_device.addr.list(to=to):
                     dst_device.addr.add(cidr=ip['cidr'])
 
         if gateway:
@@ -792,6 +803,21 @@ class LinuxBridgeManager(amb.CommonAgentManagerBase):
 
     def get_rpc_callbacks(self, context, agent, sg_agent):
         return LinuxBridgeRpcCallbacks(context, agent, sg_agent)
+
+    def get_agent_api(self, **kwargs):
+        if self.agent_api:
+            return self.agent_api
+        sg_agent = kwargs.get("sg_agent")
+        iptables_manager = self._get_iptables_manager(sg_agent)
+        self.agent_api = agent_extension_api.LinuxbridgeAgentExtensionAPI(
+            iptables_manager)
+        return self.agent_api
+
+    def _get_iptables_manager(self, sg_agent):
+        if not sg_agent:
+            return None
+        if cfg.CONF.SECURITYGROUP.firewall_driver in IPTABLES_DRIVERS:
+            return sg_agent.firewall.iptables
 
     def get_rpc_consumers(self):
         consumers = [[topics.PORT, topics.UPDATE],

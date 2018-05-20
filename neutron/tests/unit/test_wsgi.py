@@ -202,7 +202,7 @@ class TestWSGIServer(base.BaseTestCase):
         eventlet_mock.wsgi.server.assert_called_once_with(
             'socket',
             'app',
-            max_size=server.num_threads,
+            custom_pool=mock.ANY,
             log=mock.ANY,
             keepalive=CONF.wsgi_keep_alive,
             log_format=CONF.wsgi_log_format,

@@ -61,6 +61,10 @@ class Plugin(db.SegmentDbMixin, segment.SegmentPluginBase):
 
     def __init__(self):
         self.nova_updater = NovaSegmentNotifier()
+        # TODO(alegacy): this was inserted here to allow unit tests to pass
+        # because the CallbackManager is overridden at the start of each test
+        # and the subscriptions are lost.
+        db.subscribe()
 
     @staticmethod
     @resource_extend.extends([net_def.COLLECTION_NAME])

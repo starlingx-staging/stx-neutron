@@ -669,7 +669,7 @@ class OVSBridge(BaseOVS):
         self._set_egress_bw_limit_for_port(
             port_name, 0, 0)
 
-    def _find_qos(self, port_name):
+    def find_qos(self, port_name):
         qos = self.ovsdb.db_find(
             'QoS',
             ('external_ids', '=', {'id': port_name}),
@@ -677,7 +677,7 @@ class OVSBridge(BaseOVS):
         if qos:
             return qos[0]
 
-    def _find_queue(self, port_name, queue_type):
+    def find_queue(self, port_name, queue_type):
         queues = self.ovsdb.db_find(
             'Queue',
             ('external_ids', '=', {'id': port_name,
@@ -702,29 +702,36 @@ class OVSBridge(BaseOVS):
         return queue_uuid
 
     def _update_bw_limit_profile(self, txn, port_name, qos_uuid,
-                                 queue_uuid, queue_type):
+                                 queue_uuid, queue_type, qos_other_config):
         queues = {queue_type: queue_uuid}
         if qos_uuid:
             txn.add(self.ovsdb.db_set(
                 'QoS', qos_uuid, ('queues', queues)))
+            txn.add(self.ovsdb.db_set(
+                'QoS', qos_uuid, ('other_config', qos_other_config)))
         else:
             external_ids = {'id': port_name}
             qos_uuid = txn.add(
                 self.ovsdb.db_create(
-                    'QoS', external_ids=external_ids, type='linux-htb',
-                    queues=queues))
+                    'QoS', external_ids=external_ids,
+                    type='linux-htb',
+                    queues=queues,
+                    other_config=qos_other_config))
         return qos_uuid
 
     def update_ingress_bw_limit_for_port(self, port_name, max_kbps,
                                          max_burst_kbps):
         max_bw_in_bits = str(max_kbps * 1000)
         max_burst_in_bits = str(max_burst_kbps * 1000)
+        qos_other_config = {
+            'max-rate': max_bw_in_bits
+        }
         queue_other_config = {
             'max-rate': max_bw_in_bits,
             'burst': max_burst_in_bits,
         }
-        qos = self._find_qos(port_name)
-        queue = self._find_queue(port_name, QOS_DEFAULT_QUEUE)
+        qos = self.find_qos(port_name)
+        queue = self.find_queue(port_name, QOS_DEFAULT_QUEUE)
         qos_uuid = qos['_uuid'] if qos else None
         queue_uuid = queue['_uuid'] if queue else None
         with self.ovsdb.transaction(check_error=True) as txn:
@@ -734,7 +741,8 @@ class OVSBridge(BaseOVS):
             )
 
             qos_uuid = self._update_bw_limit_profile(
-                txn, port_name, qos_uuid, queue_uuid, QOS_DEFAULT_QUEUE
+                txn, port_name, qos_uuid, queue_uuid, QOS_DEFAULT_QUEUE,
+                qos_other_config
             )
 
             txn.add(self.ovsdb.db_set(
@@ -742,28 +750,44 @@ class OVSBridge(BaseOVS):
 
     def get_ingress_bw_limit_for_port(self, port_name):
         max_kbps = None
+        qos_max_kbps = None
+        queue_max_kbps = None
         max_burst_kbit = None
-        res = self._find_queue(port_name, QOS_DEFAULT_QUEUE)
-        if res:
-            other_config = res['other_config']
+
+        qos_res = self.find_qos(port_name)
+        if qos_res:
+            other_config = qos_res['other_config']
             max_bw_in_bits = other_config.get('max-rate')
             if max_bw_in_bits is not None:
-                max_kbps = int(max_bw_in_bits) / 1000
+                qos_max_kbps = int(max_bw_in_bits) / 1000
+
+        queue_res = self.find_queue(port_name, QOS_DEFAULT_QUEUE)
+        if queue_res:
+            other_config = queue_res['other_config']
+            max_bw_in_bits = other_config.get('max-rate')
+            if max_bw_in_bits is not None:
+                queue_max_kbps = int(max_bw_in_bits) / 1000
             max_burst_in_bits = other_config.get('burst')
             if max_burst_in_bits is not None:
                 max_burst_kbit = int(max_burst_in_bits) / 1000
+
+        if qos_max_kbps == queue_max_kbps:
+            max_kbps = qos_max_kbps
+        else:
+            LOG.warning("qos max-rate %(qos_max_kbps)s is not equal to "
+                        "queue max-rate %(queue_max_kbps)s",
+                        {'qos_max_kbps': qos_max_kbps,
+                         'queue_max_kbps': queue_max_kbps})
+
         return max_kbps, max_burst_kbit
 
     def delete_ingress_bw_limit_for_port(self, port_name):
-        if not self.port_exists(port_name):
-            return
-        self._delete_ingress_bw_limit_for_port(port_name)
-
-    def _delete_ingress_bw_limit_for_port(self, port_name):
-        qos = self._find_qos(port_name)
-        queue = self._find_queue(port_name, QOS_DEFAULT_QUEUE)
+        qos = self.find_qos(port_name)
+        queue = self.find_queue(port_name, QOS_DEFAULT_QUEUE)
+        does_port_exist = self.port_exists(port_name)
         with self.ovsdb.transaction(check_error=True) as txn:
-            txn.add(self.ovsdb.db_clear("Port", port_name, 'qos'))
+            if does_port_exist:
+                txn.add(self.ovsdb.db_clear("Port", port_name, 'qos'))
             if qos:
                 txn.add(self.ovsdb.db_destroy('QoS', qos['_uuid']))
             if queue:

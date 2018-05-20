@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2016 Wind River Systems, Inc.
+#
 
 import functools
 
@@ -55,6 +58,7 @@ from neutron.db import rbac_db_models as rbac_db
 from neutron.db import standardattrdescription_db as stattr_db
 from neutron.extensions import ip_allocation as ipa
 from neutron.extensions import l3
+from neutron.extensions import wrs_net
 from neutron import ipam
 from neutron.ipam import exceptions as ipam_exc
 from neutron.ipam import subnet_alloc
@@ -142,6 +146,9 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
     __native_bulk_support = True
     __native_pagination_support = True
     __native_sorting_support = True
+
+    def has_native_datastore(self):
+        return True
 
     def __new__(cls, *args, **kwargs):
         model_query.register_hook(
@@ -457,6 +464,11 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
                 network = self._make_network_dict(network_db, context=context)
                 registry.notify(resources.NETWORK, events.PRECOMMIT_DELETE,
                                 self, context=context, network_id=id)
+                # We expire network_db here because precommit deletion
+                # might have left the relationship stale, for example,
+                # if we deleted a segment.
+                context.session.expire(network_db)
+                network_db = self._get_network(context, id)
                 context.session.delete(network_db)
         registry.notify(resources.NETWORK, events.AFTER_DELETE,
                         self, context=context, network=network)
@@ -544,6 +556,12 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
                 (ip_ver == 6 and subnet_prefixlen > 126)):
                 raise exc.InvalidInput(error_message=error_message)
 
+            if (ip_ver == 6 and subnet_prefixlen != 64):
+                error_message = _("The prefix length of IPv6 subnet address "
+                                  "is required to be /64 "
+                                  "when DHCP service is enabled.")
+                raise exc.InvalidInput(error_message=error_message)
+
             net = netaddr.IPNetwork(s['cidr'])
             if net.is_multicast():
                 error_message = _("Multicast IP subnet is not supported "
@@ -603,6 +621,12 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
             # check if the routes are all valid
             for rt in s['host_routes']:
                 self._validate_host_route(rt, ip_ver)
+
+        if validators.is_attr_set(s.get(wrs_net.VLAN)):
+            if cur_subnet:
+                if cur_subnet[wrs_net.VLAN] != s.get(wrs_net.VLAN):
+                    error_message = _("VLAN of a subnet can not be modified")
+                    raise exc.InvalidInput(error_message=error_message)
 
         if ip_ver == 4:
             if validators.is_attr_set(s.get('ipv6_ra_mode')):
@@ -682,6 +706,7 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
             self._update_router_gw_ports(context,
                                          network,
                                          result)
+        updated_ports = []
         # If this subnet supports auto-addressing, then update any
         # internal ports on the network with addresses for this subnet.
         if ipv6_utils.is_auto_address_subnet(result):
@@ -761,6 +786,8 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
             # turn the CIDR into a proper subnet
             net = netaddr.IPNetwork(s['cidr'])
             subnet['subnet']['cidr'] = '%s/%s' % (net.network, net.prefixlen)
+
+        subnet['subnet'][wrs_net.VLAN] = n_const.NONE_VLAN_TAG
 
         subnetpool_id = self._get_subnetpool_id(context, s)
         if not subnetpool_id and not has_cidr:
@@ -933,8 +960,23 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
     @db_api.context_manager.reader
     def _subnet_get_user_allocation(self, context, subnet_id):
         """Check if there are any user ports on subnet and return first."""
-        return port_obj.IPAllocation.get_alloc_by_subnet_id(
-            context, subnet_id, AUTO_DELETE_PORT_OWNERS)
+        # need to join with ports table as IPAllocation's port
+        # is not joined eagerly and thus producing query which yields
+        # incorrect results
+        # NOTE(alegacy): at this point an assumption is made that there are no
+        # router ports therefore they only exclude the auto delete ports (e.g.,
+        # DHCP) and assume that everything else is a compute port.  For our
+        # purpose we do not want to block the delete if any of those compute
+        # ports has any vlan IP allocations (i.e., we let those get auto
+        # deleted).
+        return (context.session.query(models_v2.IPAllocation).
+                filter_by(subnet_id=subnet_id).
+                join(models_v2.Port).
+                join(models_v2.Subnet).
+                filter(and_(~models_v2.Port.device_owner.
+                            in_(AUTO_DELETE_PORT_OWNERS),
+                            models_v2.Subnet.vlan_id == 0)).
+                first())
 
     @db_api.context_manager.reader
     def _subnet_check_ip_allocations_internal_router_ports(self, context,

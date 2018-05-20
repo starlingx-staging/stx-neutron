@@ -17,6 +17,9 @@ from neutron_lib.api.definitions import portbindings
 from neutron_lib.api import extensions
 
 
+VIF_TYPE_AVS = 'avs'
+
+
 class Portbindings(extensions.APIExtensionDescriptor):
     """Extension class supporting port bindings.
 
@@ -25,5 +28,4 @@ class Portbindings(extensions.APIExtensionDescriptor):
 
     With admin rights one will be able to update and read the values.
     """
-
     api_definition = portbindings

@@ -12,6 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+#
+# Copyright (c) 2013-2014 Wind River Systems, Inc.
+#
 
 import random
 
@@ -71,6 +74,27 @@ class SegmentTypeDriver(BaseTypeDriver):
             return arg.session, db_api.context_manager.writer.using(arg)
         return arg, arg.session.begin(subtransactions=True)
 
+    def enforce_segment_precedence(self, session, tenant_id, query):
+        """A subclass may override this method to control the order in which
+        unallocated segments are considered.
+        """
+        return query
+
+    def allow_dynamic_allocation(self):
+        """A subclass may override this method to prevent network creation
+        when the segment is not a member of the providernet. By default,
+        it permits dynamic allocation.
+        """
+        return True
+
+    def build_segment_query(self, session, **filters):
+        # Only uses filters that correspond to columns defined by this model.
+        # Subclasses may use/support additional filters
+        columns = set(dict(self.model.__table__.columns))
+        model_filters = dict((k, filters[k])
+                             for k in columns & set(filters.keys()))
+        return session.query(self.model).filter_by(**model_filters)
+
     def allocate_fully_specified_segment(self, context, **raw_segment):
         """Allocate segment fully specified by raw_segment.
 
@@ -78,10 +102,9 @@ class SegmentTypeDriver(BaseTypeDriver):
         If segment does not exists, then try to create it and return db object
         If allocation/creation failed, then return None
         """
-
         network_type = self.get_type()
         session, ctx_manager = self._get_session(context)
-
+        raw_segment = dict((k, raw_segment[k]) for k in self.primary_keys)
         try:
             with ctx_manager:
                 alloc = (
@@ -114,13 +137,17 @@ class SegmentTypeDriver(BaseTypeDriver):
                                   {"type": network_type,
                                    "segment": raw_segment})
 
-                # Segment to create or already allocated
-                LOG.debug("%(type)s segment %(segment)s create started",
-                          {"type": network_type, "segment": raw_segment})
-                alloc = self.model(allocated=True, **raw_segment)
-                alloc.save(session)
-                LOG.debug("%(type)s segment %(segment)s create done",
-                          {"type": network_type, "segment": raw_segment})
+                if self.allow_dynamic_allocation():
+                    # Segment to create or already allocated
+                    LOG.debug("%(type)s segment %(segment)s create started",
+                              {"type": network_type, "segment": raw_segment})
+                    alloc = self.model(allocated=True, **raw_segment)
+                    alloc.save(session)
+                    LOG.debug("%(type)s segment %(segment)s create done",
+                              {"type": network_type, "segment": raw_segment})
+                else:
+                    # Segment not member of this network
+                    raise exc.NetworkNotPredefined(**raw_segment)
 
         except db_exc.DBDuplicateEntry:
             # Segment already allocated (insert failure)
@@ -129,6 +156,9 @@ class SegmentTypeDriver(BaseTypeDriver):
                       {"type": network_type, "segment": raw_segment})
 
         return alloc
+
+    def select_allocation(self, allocations):
+        return random.choice(allocations)
 
     def allocate_partially_specified_segment(self, context, **filters):
         """Allocate model segment from pool partially specified by filters.
@@ -139,8 +169,8 @@ class SegmentTypeDriver(BaseTypeDriver):
         network_type = self.get_type()
         session, ctx_manager = self._get_session(context)
         with ctx_manager:
-            select = (session.query(self.model).
-                      filter_by(allocated=False, **filters))
+            filters['allocated'] = False
+            select = self.build_segment_query(session, **filters)
 
             # Selected segment can be allocated before update by someone else,
             allocs = select.limit(IDPOOL_SELECT_SIZE).all()
@@ -149,7 +179,7 @@ class SegmentTypeDriver(BaseTypeDriver):
                 # No resource available
                 return
 
-            alloc = random.choice(allocs)
+            alloc = self.select_allocation(allocs)
             raw_segment = dict((k, alloc[k]) for k in self.primary_keys)
             LOG.debug("%(type)s segment allocate from pool "
                       "started with %(segment)s ",

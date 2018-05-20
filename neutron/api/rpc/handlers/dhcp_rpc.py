@@ -80,6 +80,11 @@ class DhcpRpcCallback(object):
         """Retrieve and return a list of the active networks."""
         host = kwargs.get('host')
         plugin = directory.get_plugin()
+        if utils.is_extension_supported(plugin, n_const.HOST_EXT_ALIAS):
+            if not plugin.is_host_available(context, host):
+                LOG.debug("host {} disabled; not returning any "
+                          "networks to agent".format(host))
+                return []
         if utils.is_extension_supported(
             plugin, constants.DHCP_AGENT_SCHEDULER_EXT_ALIAS):
             if cfg.CONF.network_auto_schedule:
@@ -270,6 +275,12 @@ class DhcpRpcCallback(object):
         plugin = directory.get_plugin()
         return self._port_action(plugin, context, port, 'create_port')
 
+    def is_agent_bound_to_network(self, plugin, context, host, network_id):
+        """Check whether an agent(host) is bound to a network."""
+        agents = plugin.get_dhcp_agents_hosting_networks(
+            context, [network_id], hosts=[host])
+        return bool(len(agents) != 0)
+
     @oslo_messaging.expected_exceptions(exceptions.IpAddressGenerationFailure)
     @db_api.retry_db_errors
     def update_dhcp_port(self, context, **kwargs):
@@ -282,10 +293,21 @@ class DhcpRpcCallback(object):
         try:
             old_port = plugin.get_port(context, port['id'])
             if (old_port['device_id'] != n_const.DEVICE_ID_RESERVED_DHCP_PORT
-                and old_port['device_id'] !=
-                utils.get_dhcp_agent_device_id(port['port']['network_id'],
-                                               host)):
+                and old_port['device_id'] != port['port']['device_id']):
                 raise n_exc.DhcpPortInUse(port_id=port['id'])
+            else:
+                network_id = port['port']['network_id']
+                if not self.is_agent_bound_to_network(plugin, context,
+                                                      host, network_id):
+                    # NOTE(alegacy): avoid race condition of agent updating
+                    # port after ownership has already been removed and given
+                    # to another agent.
+                    LOG.warning("Host %(host)s tried to update port "
+                                "%(port_id)s on network %(network_id)s "
+                                "but agent is not bound to that network.",
+                                {'host': host, 'port_id': port['id'],
+                                 'network_id': network_id})
+                    raise n_exc.DhcpPortInUse(port_id=port['id'])
             LOG.debug('Update dhcp port %(port)s '
                       'from %(host)s.',
                       {'port': port,

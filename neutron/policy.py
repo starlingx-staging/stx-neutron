@@ -275,6 +275,12 @@ class OwnerCheck(policy.Check):
                     policy="%s:%s" % (self.kind, self.match),
                     reason=err_reason)
 
+            if target[parent_foreign_key] is None:
+                # The API user is trying to clear an attribute back to None
+                # therefore there is no point in doing a policy check on "None"
+                # as no resource will be found and an exception will be thrown.
+                return True
+
             target[self.target_field] = self._extract(
                 parent_res, target[parent_foreign_key], parent_field)
 

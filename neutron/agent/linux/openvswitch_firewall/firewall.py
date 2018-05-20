@@ -217,14 +217,15 @@ class ConjIdMap(object):
         # If there is any freed ID, use one.
         if self.id_free:
             return self.id_free.popleft()
-        # Allocate new one.  It must be an even number.
-        self.max_id += 2
+        # Allocate new one. It must be divisible by 8. (See the next function.)
+        self.max_id += 8
         return self.max_id
 
     def get_conj_id(self, sg_id, remote_sg_id, direction, ethertype):
         """Return a conjunction ID specified by the arguments.
-        Allocate one if necessary.  The returned ID is always an even
-        number, allowing the caller to use 2 IDs for each combination.
+        Allocate one if necessary.  The returned ID is divisible by 8,
+        as there are 4 priority levels (see rules.flow_priority_offset)
+        and 2 conjunction IDs are needed per priority.
         """
         if direction not in [firewall.EGRESS_DIRECTION,
                              firewall.INGRESS_DIRECTION]:
@@ -316,7 +317,8 @@ class ConjIPFlowManager(object):
                 addr_to_conj)
             self.flow_state[vlan_tag][(direction, ethertype)] = addr_to_conj
 
-    def add(self, vlan_tag, sg_id, remote_sg_id, direction, ethertype):
+    def add(self, vlan_tag, sg_id, remote_sg_id, direction, ethertype,
+            priority_offset):
         """Get conj_id specified by the arguments
         and notify the manager that
         (remote_sg_id, direction, ethertype, conj_id) flows need to be
@@ -326,7 +328,7 @@ class ConjIPFlowManager(object):
 
         """
         conj_id = self.conj_id_map.get_conj_id(
-            sg_id, remote_sg_id, direction, ethertype)
+            sg_id, remote_sg_id, direction, ethertype) + priority_offset * 2
 
         if (direction, ethertype) not in self.conj_ids[vlan_tag]:
             self.conj_ids[vlan_tag][(direction, ethertype)] = (
@@ -502,7 +504,13 @@ class OVSFirewallDriver(firewall.FirewallDriver):
             self.prepare_port_filter(port)
             return
         old_of_port = self.get_ofport(port)
-        of_port = self.get_or_create_ofport(port)
+        try:
+            of_port = self.get_or_create_ofport(port)
+        except exceptions.OVSFWPortNotFound as not_found_error:
+            LOG.info("port %(port_id)s does not exist in ovsdb: %(err)s.",
+                     {'port_id': port['device'],
+                      'err': not_found_error})
+            return
         # TODO(jlibosva): Handle firewall blink
         self.delete_all_port_flows(old_of_port)
         self.initialize_port_flows(of_port)
@@ -979,24 +987,49 @@ class OVSFirewallDriver(firewall.FirewallDriver):
 
         The remaining part is done by ConjIPFlowManager.
         """
+        port_rules = collections.defaultdict(list)
         for sec_group_id, rule in (
                 self._create_remote_rules_generator_for_port(port)):
             direction = rule['direction']
             ethertype = rule['ethertype']
+            protocol = rule.get('protocol')
+            priority_offset = rules.flow_priority_offset(rule)
 
             conj_id = self.conj_ip_manager.add(port.vlan_tag, sec_group_id,
                                                rule['remote_group_id'],
-                                               direction, ethertype)
+                                               direction, ethertype,
+                                               priority_offset)
 
-            flows = rules.create_flows_from_rule_and_port(rule, port)
-            for flow in rules.substitute_conjunction_actions(
-                    flows, 2, [conj_id]):
-                self._add_flow(**flow)
+            rule1 = rule.copy()
+            del rule1['remote_group_id']
+            port_rules_key = (direction, ethertype, protocol)
+            port_rules[port_rules_key].append((rule1, conj_id))
+
+        for (direction, ethertype, protocol), rule_conj_list in (
+                port_rules.items()):
+            all_conj_ids = set()
+            for rule, conj_id in rule_conj_list:
+                all_conj_ids.add(conj_id)
+
+            if protocol in [lib_const.PROTO_NUM_SCTP,
+                            lib_const.PROTO_NUM_TCP,
+                            lib_const.PROTO_NUM_UDP]:
+                rule_conj_list = rules.merge_port_ranges(rule_conj_list)
+            else:
+                rule_conj_list = rules.merge_common_rules(rule_conj_list)
+
+            for rule, conj_ids in rule_conj_list:
+                flows = rules.create_flows_from_rule_and_port(
+                    rule, port, conjunction=True)
+                for flow in rules.substitute_conjunction_actions(
+                        flows, 2, conj_ids):
+                    self._add_flow(**flow)
 
             # Install actions=accept flows.
-            for flow in rules.create_conj_flows(
-                    port, conj_id, direction, ethertype):
-                self._add_flow(**flow)
+            for conj_id in all_conj_ids:
+                for flow in rules.create_conj_flows(
+                        port, conj_id, direction, ethertype):
+                    self._add_flow(**flow)
 
     def add_flows_from_rules(self, port):
         self._initialize_tracked_ingress(port)
@@ -1004,6 +1037,9 @@ class OVSFirewallDriver(firewall.FirewallDriver):
         LOG.debug('Creating flow rules for port %s that is port %d in OVS',
                   port.id, port.ofport)
         for rule in self._create_rules_generator_for_port(port):
+            # NOTE(toshii): A better version of merge_common_rules and
+            # its friend should be applied here in order to avoid
+            # overlapping flows.
             flows = rules.create_flows_from_rule_and_port(rule, port)
             LOG.debug("RULGEN: Rules generated for flow %s are %s",
                       rule, flows)
