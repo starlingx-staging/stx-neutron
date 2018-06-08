@@ -30,8 +30,8 @@ from neutron.plugins.wrs.drivers import type_generic
 LOG = logging.getLogger(__name__)
 
 
-class ManagedFlatTypeDriver(type_flat.FlatTypeDriver,
-                            type_generic.GenericProvidernetTypeDriverMixin):
+class ManagedFlatTypeDriver(type_generic.GenericProvidernetTypeDriverMixin,
+                            type_flat.FlatTypeDriver):
 
     def __init__(self):
         super(ManagedFlatTypeDriver, self).__init__()

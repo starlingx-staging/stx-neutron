@@ -32,7 +32,7 @@ from neutron.common import exceptions as n_exc
 from neutron.db import api as db_api
 from neutron.db import providernet_db as pnet_db
 from neutron.plugins.ml2 import driver_api as api
-from neutron.plugins.ml2.drivers import helpers
+
 
 LOG = logging.getLogger(__name__)
 
@@ -81,8 +81,7 @@ class GenericProvidernetTypeDriverMixin(object):
             return False
 
 
-class GenericRangeTypeDriver(helpers.SegmentTypeDriver,
-                             GenericProvidernetTypeDriverMixin):
+class GenericRangeTypeDriverMixin(GenericProvidernetTypeDriverMixin):
     """
     Manages allocation state for any segmentation id range based type
     drivers.  Only appropriate for WRS based classes that support the concept
@@ -95,10 +94,6 @@ class GenericRangeTypeDriver(helpers.SegmentTypeDriver,
         self.segmentation_key
 
     """
-
-    def __init__(self, model):
-        super(GenericRangeTypeDriver, self).__init__(model)
-
     @abc.abstractmethod
     def get_segmentation_key(self):
         """
