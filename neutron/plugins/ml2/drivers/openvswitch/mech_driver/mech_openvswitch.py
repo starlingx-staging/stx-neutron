@@ -23,6 +23,7 @@ from oslo_config import cfg
 from oslo_log import log
 
 from neutron.agent import securitygroups_rpc
+from neutron.conf.plugins.ml2.drivers import ovs_conf
 from neutron.plugins.common import constants as p_constants
 from neutron.plugins.ml2.drivers import mech_agent
 from neutron.plugins.ml2.drivers.openvswitch.agent.common \
@@ -33,6 +34,9 @@ LOG = log.getLogger(__name__)
 
 IPTABLES_FW_DRIVER_FULL = ("neutron.agent.linux.iptables_firewall."
                            "OVSHybridIptablesFirewallDriver")
+
+
+ovs_conf.register_ovs_vhost_opts(cfg.CONF)
 
 
 class OpenvswitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
@@ -96,7 +100,8 @@ class OpenvswitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
                 in [a_const.OVS_DPDK_VHOST_USER,
                     a_const.OVS_DPDK_VHOST_USER_CLIENT]) and
             agent['configurations'].get('datapath_type') ==
-            a_const.OVS_DATAPATH_NETDEV):
+            a_const.OVS_DATAPATH_NETDEV and
+            cfg.CONF.vhost.vhost_user_enabled):
             return portbindings.VIF_TYPE_VHOST_USER
         return self.vif_type
 

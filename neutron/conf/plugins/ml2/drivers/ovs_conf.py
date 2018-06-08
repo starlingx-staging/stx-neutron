@@ -145,6 +145,16 @@ agent_opts = [
 ]
 
 
+vhost_opts = [
+    cfg.BoolOpt('vhost_user_enabled', default=True,
+               help=_('Enable vhost-user backed virtio devices'))
+]
+
+
 def register_ovs_agent_opts(cfg=cfg.CONF):
     cfg.register_opts(ovs_opts, "OVS")
     cfg.register_opts(agent_opts, "AGENT")
+
+
+def register_ovs_vhost_opts(cfg=cfg.CONF):
+    cfg.register_opts(vhost_opts, "vhost")
