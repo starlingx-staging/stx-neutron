@@ -23,8 +23,10 @@ import sqlalchemy as sa
 from sqlalchemy import sql
 
 from neutron.common import constants as q_const
+from neutron.objects.plugins.ml2 import vxlanallocation as vxlan_obj
 from neutron.plugins.common import constants as p_const
 from neutron.plugins.common import utils
+from neutron.plugins.ml2.drivers import type_tunnel
 from neutron.plugins.wrs.drivers import type_generic
 
 LOG = logging.getLogger(__name__)
@@ -47,7 +49,8 @@ class ManagedVxlanAllocation(model_base.BASEV2):
                           server_default=sql.false())
 
 
-class ManagedVxlanTypeDriver(type_generic.GenericRangeTypeDriver):
+class ManagedVxlanTypeDriver(type_generic.GenericRangeTypeDriverMixin,
+                             type_tunnel.EndpointTunnelTypeDriver):
     """
     This class is a refinement of the default VXLAN type driver.
 
@@ -61,7 +64,8 @@ class ManagedVxlanTypeDriver(type_generic.GenericRangeTypeDriver):
     """
 
     def __init__(self):
-        super(ManagedVxlanTypeDriver, self).__init__(ManagedVxlanAllocation)
+        super(ManagedVxlanTypeDriver, self).__init__(
+            ManagedVxlanAllocation, vxlan_obj.VxlanEndpoint)
         self.model_key = ManagedVxlanAllocation.vxlan_vni
         self.segmentation_key = "vxlan_vni"
 
@@ -86,3 +90,14 @@ class ManagedVxlanTypeDriver(type_generic.GenericRangeTypeDriver):
     def initialize(self):
         self._sync_allocations()
         LOG.info(("ML2 ManagedVxlanTypeDriver initialization complete"))
+
+    def get_endpoints(self):
+        """Get every vxlan endpoints from database."""
+        vxlan_endpoints = self._get_endpoints()
+        return [{'ip_address': vxlan_endpoint.ip_address,
+                 'udp_port': vxlan_endpoint.udp_port,
+                 'host': vxlan_endpoint.host}
+                for vxlan_endpoint in vxlan_endpoints]
+
+    def add_endpoint(self, ip, host, udp_port=p_const.VXLAN_UDP_PORT):
+        return self._add_endpoint(ip, host, udp_port=udp_port)

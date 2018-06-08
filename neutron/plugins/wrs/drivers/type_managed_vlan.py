@@ -25,12 +25,14 @@ from neutron.plugins.common import utils
 
 from neutron.db.models.plugins.ml2 import vlanallocation as vlan_alloc_model
 from neutron.objects.plugins.ml2 import vlanallocation as vlanalloc
+from neutron.plugins.ml2.drivers import helpers
 from neutron.plugins.wrs.drivers import type_generic
 
 LOG = logging.getLogger(__name__)
 
 
-class ManagedVlanTypeDriver(type_generic.GenericRangeTypeDriver):
+class ManagedVlanTypeDriver(type_generic.GenericRangeTypeDriverMixin,
+                            helpers.SegmentTypeDriver):
     """The class is a refinement of the default VLAN type driver.
 
     Its purpose is to allocate VLAN segments based on the enhanced provider
