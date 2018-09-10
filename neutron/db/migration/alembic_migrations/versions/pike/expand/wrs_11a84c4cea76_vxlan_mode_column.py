@@ -36,4 +36,5 @@ def upgrade():
                   sa.Column('mode', sa.String(8), nullable=False,
                             default=n_const.PROVIDERNET_VXLAN_DYNAMIC,
                             server_default=n_const.PROVIDERNET_VXLAN_DYNAMIC))
-    op.alter_column('providernet_range_vxlans', 'group', nullable=True)
+    op.alter_column('providernet_range_vxlans', 'group',
+                    existing_type=sa.String(length=64), nullable=True)

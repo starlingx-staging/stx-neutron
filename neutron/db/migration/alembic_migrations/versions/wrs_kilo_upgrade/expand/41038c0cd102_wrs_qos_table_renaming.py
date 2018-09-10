@@ -24,6 +24,7 @@ Create Date: 2016-05-27 00:00:01.000000
 """
 
 from alembic import op
+import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
@@ -39,6 +40,7 @@ down_revision = 'wrs_kilo_shipped'
 # will collide on the table name and the upgrade will stop.
 
 def upgrade():
+    context = op.get_context()
     op.execute(
         'ALTER TABLE qoses RENAME TO wrs_qoses')
     op.execute(
@@ -47,7 +49,13 @@ def upgrade():
         'ALTER TABLE networkqosmappings RENAME TO wrs_network_qos_mappings')
     op.execute(
         'ALTER TABLE portqosmappings RENAME TO wrs_port_qos_mappings')
-    op.execute(
-        'ALTER TYPE qos_types RENAME TO wrs_qos_types')
+    if context.bind.dialect.name == 'postgresql':
+        op.execute('ALTER TYPE qos_types RENAME TO wrs_qos_types')
+    else:
+        # rename the enum qos_types to wrs_qos_types
+        op.alter_column('qos_policies', 'type',
+                  _type=sa.Enum('dscp', 'ratelimit', 'scheduler',
+                                name='wrs_qos_types'),
+                  existing_nullable=True)
     op.create_index(
         'ix_wrs_qoses_tenant_id', 'wrs_qoses', ['tenant_id'], unique=False)
