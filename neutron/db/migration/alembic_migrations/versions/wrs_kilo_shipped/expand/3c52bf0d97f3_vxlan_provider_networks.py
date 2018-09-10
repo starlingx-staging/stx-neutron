@@ -37,7 +37,7 @@ def upgrade():
         sa.Column('vxlan_vni',
                   sa.Integer(), autoincrement=False, nullable=False),
         sa.Column('allocated',
-                  sa.Boolean(), server_default='false', nullable=False),
+                  sa.Boolean(), server_default=sa.sql.false(), nullable=False),
         sa.PrimaryKeyConstraint('physical_network', 'vxlan_vni')
     )
     op.create_table(

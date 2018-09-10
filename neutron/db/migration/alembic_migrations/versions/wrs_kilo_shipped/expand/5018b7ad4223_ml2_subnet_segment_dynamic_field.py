@@ -36,7 +36,7 @@ def upgrade():
     op.add_column(
         'ml2_subnet_segments',
         sa.Column('is_dynamic',
-                  sa.Boolean(), server_default='false', nullable=False))
+                  sa.Boolean(), server_default=sa.sql.false(), nullable=False))
     op.add_column(
         'ml2_subnet_segments',
         sa.Column('segment_index', sa.Integer(), nullable=False,
