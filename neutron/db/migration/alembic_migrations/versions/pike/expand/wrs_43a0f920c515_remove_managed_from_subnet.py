@@ -31,9 +31,19 @@ from alembic import op
 
 
 def upgrade():
-    cmd = ("DELETE FROM subnets WHERE id IN"
+    # The following SQL syntax is not supported by mysql < 10.3.1
+    # cmd = ("DELETE FROM subnets WHERE id IN"
+    #        " (SELECT s.id FROM subnets AS s LEFT OUTER JOIN ipallocations"
+    #        " AS ia ON ia.subnet_id = s.id WHERE s.managed = false"
+    #        " GROUP BY s.id,ia.ip_address HAVING COUNT(ia.ip_address) = 0);")
+    cmd = ("CREATE TEMPORARY TABLE TEMP_SUBNETS"
            " (SELECT s.id FROM subnets AS s LEFT OUTER JOIN ipallocations"
            " AS ia ON ia.subnet_id = s.id WHERE s.managed = false"
            " GROUP BY s.id,ia.ip_address HAVING COUNT(ia.ip_address) = 0);")
+    op.execute(cmd)
+    cmd = ("DELETE FROM subnets WHERE id IN"
+           " (SELECT id FROM TEMP_SUBNETS);")
+    op.execute(cmd)
+    cmd = ("DROP TEMPORARY TABLE TEMP_SUBNETS;")
     op.execute(cmd)
     op.drop_column('subnets', 'managed')
