@@ -28,22 +28,29 @@ revision = 'wrs_43a0f920c515'
 down_revision = 'wrs_11a84c4cea76'
 
 from alembic import op
+import sqlalchemy as sa
 
 
 def upgrade():
-    # The following SQL syntax is not supported by mysql < 10.3.1
-    # cmd = ("DELETE FROM subnets WHERE id IN"
-    #        " (SELECT s.id FROM subnets AS s LEFT OUTER JOIN ipallocations"
-    #        " AS ia ON ia.subnet_id = s.id WHERE s.managed = false"
-    #        " GROUP BY s.id,ia.ip_address HAVING COUNT(ia.ip_address) = 0);")
-    cmd = ("CREATE TEMPORARY TABLE TEMP_SUBNETS"
-           " (SELECT s.id FROM subnets AS s LEFT OUTER JOIN ipallocations"
-           " AS ia ON ia.subnet_id = s.id WHERE s.managed = false"
-           " GROUP BY s.id,ia.ip_address HAVING COUNT(ia.ip_address) = 0);")
+    context = op.get_context()
+    if context.bind.dialect.name == 'postgresql':
+        # The following SQL syntax is not supported by mysql < 10.3.1
+        cmd = ("DELETE FROM subnets WHERE id IN"
+               " (SELECT s.id FROM subnets AS s LEFT OUTER JOIN ipallocations"
+               " AS ia ON ia.subnet_id = s.id WHERE s.managed = false"
+               " GROUP BY s.id,ia.ip_address HAVING COUNT(ia.ip_address) = 0);")
+    else:
+        cmd = ("CREATE TEMPORARY TABLE TEMP_SUBNETS"
+               " (SELECT s.id FROM subnets AS s LEFT OUTER JOIN ipallocations"
+               " AS ia ON ia.subnet_id = s.id WHERE s.managed = false"
+               " GROUP BY s.id,ia.ip_address HAVING COUNT(ia.ip_address) = 0);")
     op.execute(cmd)
-    cmd = ("DELETE FROM subnets WHERE id IN"
-           " (SELECT id FROM TEMP_SUBNETS);")
-    op.execute(cmd)
-    cmd = ("DROP TEMPORARY TABLE TEMP_SUBNETS;")
-    op.execute(cmd)
-    op.drop_column('subnets', 'managed')
+    if context.bind.dialect.name == 'postgresql':
+        op.drop_column('subnets', 'managed')
+    else:
+        cmd = ("DELETE FROM subnets WHERE id IN"
+               " (SELECT id FROM TEMP_SUBNETS);")
+        op.execute(cmd)
+        cmd = ("DROP TEMPORARY TABLE TEMP_SUBNETS;")
+        op.execute(cmd)
+        op.drop_column('subnets', 'managed')
