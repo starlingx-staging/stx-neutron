@@ -42,7 +42,6 @@ from neutron.db.qos import models as qos_models  # noqa
 from neutron.db import qos_db  # noqa
 from neutron.db.quota import models as quota_models  # noqa
 from neutron.db import rbac_db_models  # noqa
-from neutron.db import settings_db  # noqa
 from neutron.ipam.drivers.neutrondb_ipam import db_models  # noqa
 from neutron.plugins.ml2 import models as ml2_models  # noqa
 from neutron.plugins.wrs.drivers import type_managed_vxlan  # noqa

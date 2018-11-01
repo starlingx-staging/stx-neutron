@@ -56,7 +56,6 @@ class PortBinding(model_base.BASEV2):
                        server_default=constants.PORT_BINDING_STATUS_ACTIVE)
     vif_model = sa.Column(sa.String(255), nullable=True)
     mtu = sa.Column(sa.Integer, nullable=True)
-    mac_filtering = sa.Column(sa.Boolean, default=False, nullable=True)
 
     # Add a relationship to the Port model in order to instruct SQLAlchemy to
     # eagerly load port bindings
@@ -120,7 +119,6 @@ class DistributedPortBinding(model_base.BASEV2):
                             server_default='')
     vif_model = sa.Column(sa.String(255), nullable=True)
     mtu = sa.Column(sa.Integer, nullable=True)
-    mac_filtering = sa.Column(sa.Boolean, default=False, nullable=True)
     vnic_type = sa.Column(sa.String(64), nullable=False,
                           default=portbindings.VNIC_NORMAL,
                           server_default=portbindings.VNIC_NORMAL)

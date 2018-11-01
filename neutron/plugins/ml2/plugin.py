@@ -93,7 +93,6 @@ from neutron.db import qos_db
 from neutron.db.quota import driver  # noqa
 from neutron.db import securitygroups_rpc_base as sg_db_rpc
 from neutron.db import segments_db
-from neutron.db import settings_db  # noqa
 from neutron.db import subnet_service_type_db_models as service_type_db
 from neutron.db import vlantransparent_db
 from neutron.extensions import allowedaddresspairs as addr_pair
@@ -118,7 +117,6 @@ from neutron.plugins.ml2 import rpc
 from neutron.quota import resource_registry
 from neutron.services.qos import qos_consts
 from neutron.services.segments import plugin as segments_plugin
-from neutron import setting  # noqa
 
 LOG = log.getLogger(__name__)
 
@@ -183,7 +181,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                     "network_availability_zone",
                                     "default-subnetpools",
                                     "subnet-service-types",
-                                    "host", "wrs-provider", "wrs-tenant",
+                                    "host", "wrs-provider",
                                     "wrs-binding", "wrs-tm", "wrs-net"]
 
     @property
@@ -290,9 +288,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         """Initialize components to support DHCP."""
         self.network_scheduler = importutils.import_object(
             cfg.CONF.network_scheduler_driver
-        )
-        self.setting_driver = importutils.import_object(
-            cfg.CONF.SETTINGS.setting_driver
         )
         self.host_driver = importutils.import_object(
             cfg.CONF.host_driver
@@ -477,12 +472,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             binding.mtu = mtu
             changes = True
 
-        mac_filtering = attrs and attrs.get(wrs_binding.MAC_FILTERING)
-        if (validators.is_attr_set(mac_filtering) and
-            binding.mac_filtering != mac_filtering):
-            binding.mac_filtering = mac_filtering
-            changes = True
-
         # treat None as clear of profile.
         profile = None
         if attrs and portbindings.PROFILE in attrs:
@@ -604,7 +593,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             vif_details=vif_details,
             vif_model=orig_binding.vif_model,
             mtu=orig_binding.mtu,
-            mac_filtering=orig_binding.mac_filtering
         )
         self._update_port_dict_binding(port, new_binding)
         new_context = driver_context.PortContext(
@@ -777,7 +765,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             port[portbindings.VIF_DETAILS] = self._get_vif_details(binding)
         port[wrs_binding.VIF_MODEL] = binding.vif_model
         port[wrs_binding.MTU] = binding.mtu
-        port[wrs_binding.MAC_FILTERING] = binding.mac_filtering
 
     def _get_vif_details(self, binding):
         if binding.vif_details:
@@ -1471,27 +1458,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         # The port inherits the MTU value of its network
         attrs[wrs_binding.MTU] = network.get(api.MTU)
 
-    def _set_port_mac_filtering(self, context, port, attrs):
-        if port.get(psec.PORTSECURITY) is None:
-            # The port inherits the MAC filtering value of its project/tenant
-            mac_filtering = self.setting_driver.get_tenant_setting(
-                context, setting.ENGINE.settings,
-                port['tenant_id'], setting.MAC_FILTERING)
-            attrs[wrs_binding.MAC_FILTERING] = mac_filtering
-        else:
-            # if port does not have fixed ips, set MAC filtering to false and
-            # update the database for portsecuritybindings
-            if port.get('fixed_ips') is None:
-                port[psec.PORTSECURITY] = False
-                attrs[psec.PORTSECURITY] = False
-                self.extension_manager.process_update_port(context, attrs,
-                                                           port)
-                attrs[wrs_binding.MAC_FILTERING] = False
-            else:
-                # MAC filtering of the port is overridden by
-                # port_security_enabled
-                attrs[wrs_binding.MAC_FILTERING] = port[psec.PORTSECURITY]
-
     def _before_create_port(self, context, port):
         attrs = port[port_def.RESOURCE_NAME]
         if not attrs.get('status'):
@@ -1528,7 +1494,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                                       network, binding, None)
             # Set default values for derived attributes
             self._set_port_mtu(context, result, network, attrs)
-            self._set_port_mac_filtering(context, result, attrs)
 
             self._process_port_binding(mech_context, attrs)
             result[addr_pair.ADDRESS_PAIRS] = (
@@ -1661,7 +1626,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             if (psec.PORTSECURITY in attrs) and (
                         original_port[psec.PORTSECURITY] !=
                         updated_port[psec.PORTSECURITY]):
-                self._set_port_mac_filtering(context, updated_port, attrs)
                 need_port_update_notify = True
             # TODO(QoS): Move out to the extension framework somehow.
             # Follow https://review.openstack.org/#/c/169223 for a solution.

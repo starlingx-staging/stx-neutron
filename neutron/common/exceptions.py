@@ -199,14 +199,6 @@ class InvalidQuotaValue(e.Conflict):
                 "resources: %(unders)s.")
 
 
-class SettingNameUnknown(e.NotFound):
-    message = _("Unknown tenant setting %(unknown)s.")
-
-
-class SettingMissingTenant(e.BadRequest):
-    message = _("Tenant-id was missing from Setting request")
-
-
 class InvalidSharedSetting(e.Conflict):
     message = _("Unable to reconfigure sharing settings for network "
                 "%(network)s. Multiple tenants are using it.")
