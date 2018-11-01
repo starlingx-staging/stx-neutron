@@ -26,7 +26,6 @@ from neutron.common import exceptions as n_exc
 from neutron.db import api as db
 from neutron.db.models.plugins.ml2 import vlanallocation as vlan_alloc_model
 from neutron.db import qos_db  # noqa
-from neutron.db import settings_db  # noqa
 from neutron.plugins.ml2 import driver_api as api
 from neutron.plugins.wrs.drivers import type_managed_vlan
 from neutron.tests.unit.db import test_db_base_plugin_v2

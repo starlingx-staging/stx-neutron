@@ -109,7 +109,6 @@
     "create_port:allowed_address_pairs": "rule:admin_or_network_owner",
     "get_port": "rule:context_is_advsvc or rule:admin_owner_or_network_owner",
     "create_port:wrs-binding:mtu": "rule:admin_only",
-    "create_port:wrs-binding:mac_filtering": "rule:admin_only",
     "create_port:wrs-tm:qos": "rule:admin_or_qos_owner",
     "get_port:queue_id": "rule:admin_only",
     "get_port:binding:vif_type": "rule:admin_only",
@@ -128,7 +127,6 @@
     "update_port:data_plane_status": "rule:admin_or_data_plane_int",
     "delete_port": "rule:context_is_advsvc or rule:admin_owner_or_network_owner",
     "update_port:wrs-binding:mtu": "rule:admin_only",
-    "update_port:wrs-binding:mac_filtering": "rule:admin_only",
     "update_port:wrs-tm:qos": "rule:admin_or_qos_owner",
 
     "get_router:ha": "rule:admin_only",

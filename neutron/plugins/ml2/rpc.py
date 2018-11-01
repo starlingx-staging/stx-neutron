@@ -207,7 +207,7 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
                  'fixed_ips': port['fixed_ips'],
                  'device_owner': port['device_owner'],
                  'allowed_address_pairs': port['allowed_address_pairs'],
-                 'port_security_enabled': port.get(psec.PORTSECURITY, False),
+                 'port_security_enabled': port.get(psec.PORTSECURITY, True),
                  'qos_policy_id': port.get(qos_consts.QOS_POLICY_ID),
                  'network_qos_policy_id': network_qos_policy_id,
                  'profile': port[portbindings.PROFILE],

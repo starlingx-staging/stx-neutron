@@ -37,11 +37,6 @@ VIF_MODEL_DEFAULT = 'default'
 VIF_MODEL_VIRTIO = 'virtio'
 VIF_MODEL_PCI_PASSTHROUGH = 'pci-passthrough'
 
-# The mac_filtering attribute describes whether the MAC filtering was enabled
-# as an attribute of the project that this port is owned by.
-# wrs-binding:mac_filtering
-MAC_FILTERING = '%sbinding:mac_filtering' % n_const.WRS_FIELD_PREFIX
-
 VIF_TYPE_AVS = 'avs'
 
 # - vhostuser_enabled: Boolean value used to determine whether vhostuser can
@@ -55,10 +50,6 @@ EXTENDED_ATTRIBUTES_2_0 = {
                     'enforce_policy': True,
                     'is_visible': True},
         MTU: {'allow_post': False, 'allow_put': False,
-              'default': constants.ATTR_NOT_SPECIFIED,
-              'enforce_policy': True,
-              'is_visible': True},
-        MAC_FILTERING: {'allow_post': False, 'allow_put': False,
               'default': constants.ATTR_NOT_SPECIFIED,
               'enforce_policy': True,
               'is_visible': True},

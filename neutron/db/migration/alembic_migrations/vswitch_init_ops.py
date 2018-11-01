@@ -86,21 +86,9 @@ def upgrade():
                                 ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('providernet_id', 'host_id'))
 
-    op.create_table(
-        'settings',
-        sa.Column('id', sa.String(length=36), nullable=False),
-        sa.Column('tenant_id', sa.String(length=255), nullable=True),
-        sa.Column('name', sa.String(length=255), nullable=True),
-        sa.Column('value', sa.String(length=255), nullable=True),
-        sa.PrimaryKeyConstraint('id'))
-
     op.add_column(
         'ml2_port_bindings',
         sa.Column('vif_model', sa.String(length=255), nullable=True))
-
-    op.add_column(
-        'ml2_port_bindings',
-        sa.Column('mac_filtering', sa.Boolean(), nullable=True))
 
     op.add_column(
         'ml2_port_bindings',

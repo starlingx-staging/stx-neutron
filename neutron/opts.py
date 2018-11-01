@@ -62,7 +62,6 @@ import neutron.plugins.ml2.config
 import neutron.plugins.ml2.drivers.mech_sriov.agent.common.config
 import neutron.plugins.wrs.agent.avs.agent
 import neutron.plugins.wrs.drivers.mech_vswitch
-import neutron.setting
 import neutron.wsgi
 
 
@@ -306,13 +305,6 @@ def list_xenapi_opts():
     return [
         ('xenapi',
          neutron.conf.agent.xenapi_conf.XENAPI_OPTS)
-    ]
-
-
-def list_settings_opts():
-    return [
-        ('settings',
-         neutron.setting.setting_opts)
     ]
 
 
