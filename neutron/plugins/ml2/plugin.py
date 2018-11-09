@@ -64,7 +64,6 @@ from neutron.api.rpc.handlers import dhcp_rpc
 from neutron.api.rpc.handlers import dvr_rpc
 from neutron.api.rpc.handlers import metadata_rpc
 from neutron.api.rpc.handlers import pnet_connectivity_rpc
-from neutron.api.rpc.handlers import qos_rpc
 from neutron.api.rpc.handlers import resources_rpc
 from neutron.api.rpc.handlers import securitygroups_rpc
 from neutron.common import constants as n_const
@@ -89,7 +88,6 @@ from neutron.db import models_v2
 from neutron.db import portforwardings_db
 from neutron.db import providernet_db
 from neutron.db import provisioning_blocks
-from neutron.db import qos_db
 from neutron.db.quota import driver  # noqa
 from neutron.db import securitygroups_rpc_base as sg_db_rpc
 from neutron.db import segments_db
@@ -117,6 +115,7 @@ from neutron.plugins.ml2 import rpc
 from neutron.quota import resource_registry
 from neutron.services.qos import qos_consts
 from neutron.services.segments import plugin as segments_plugin
+
 
 LOG = log.getLogger(__name__)
 
@@ -149,8 +148,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 address_scope_db.AddressScopeDbMixin,
                 service_type_db.SubnetServiceTypeMixin,
                 hosts_db.HostSchedulerDbMixin,
-                providernet_db.ProviderNetDbMixin,
-                qos_db.QoSDbMixin):
+                providernet_db.ProviderNetDbMixin):
 
     """Implement the Neutron L2 abstractions using modules.
 
@@ -182,7 +180,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                     "default-subnetpools",
                                     "subnet-service-types",
                                     "host", "wrs-provider",
-                                    "wrs-binding", "wrs-tm", "wrs-net"]
+                                    "wrs-binding", "wrs-net"]
 
     @property
     def supported_extension_aliases(self):
@@ -248,7 +246,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             agents_db.AgentExtRpcCallback(),
             metadata_rpc.MetadataRpcCallback(),
             resources_rpc.ResourcesPullRpcCallback(),
-            qos_rpc.QoSServerRpcCallback(),
             self.pnet_connectivity_rpc_callback,
         ]
 
@@ -836,24 +833,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
         session = plugin._object_session_or_new_session(subnetdb)
         plugin.extension_manager.extend_subnet_dict(session, subnetdb, result)
 
-    # Register dict extend functions for networks
-    @staticmethod
-    @resource_extend.extends([net_def.COLLECTION_NAME])
-    def _extend_network_dict_qos(network_res, network_db):
-        plugin = directory.get_plugin()
-        if not isinstance(plugin, qos_db.QoSDbMixin):
-            return
-        plugin.extend_network_dict_qos(network_res, network_db)
-
-    # Register dict extend functions for ports
-    @staticmethod
-    @resource_extend.extends([port_def.COLLECTION_NAME])
-    def _extend_port_dict_qos(port_res, port_db):
-        plugin = directory.get_plugin()
-        if not isinstance(plugin, qos_db.QoSDbMixin):
-            return
-        plugin.extend_port_dict_qos(port_res, port_db)
-
     # Register dict extend functions for routers
     @staticmethod
     @resource_extend.extends([l3.ROUTERS])
@@ -1038,7 +1017,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                 result)
 
             self._process_l3_create(context, result, net_data)
-            self._process_qos_network_update(context, result, net_data)
             self.type_manager.extend_network_dict_provider(context, result)
 
             # Update the transparent vlan if configured
@@ -1106,8 +1084,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             self.extension_manager.process_update_network(context, net_data,
                                                           updated_network)
             self._process_l3_update(context, updated_network, net_data)
-            self._process_qos_network_update(context, updated_network,
-                                             net_data)
 
             # ToDO(QoS): This would change once EngineFacade moves out
             db_network = self._get_network(context, id)
@@ -1487,7 +1463,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
             # sgids must be got after portsec checked with security group
             sgids = self._get_security_groups_on_port(context, port)
             self._process_port_create_security_group(context, result, sgids)
-            self._process_qos_port_update(context, result, port['port'])
             network = self.get_network(context, result['network_id'])
             binding = db.add_port_binding(context, result['id'])
             mech_context = driver_context.PortContext(self, context, result,
@@ -1641,8 +1616,6 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
                                                       updated_port))
             need_port_update_notify |= self.update_security_group_on_port(
                 context, id, port, original_port, updated_port)
-            need_port_update_notify |= self._process_qos_port_update(
-                context, updated_port, port['port'])
             network = self.get_network(context, original_port['network_id'])
             need_port_update_notify |= self._update_extra_dhcp_opts_on_port(
                 context, id, port, updated_port)

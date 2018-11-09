@@ -170,24 +170,6 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
         # obtain WRS subnet bindings
         subnets = port_context.subnet_segments()
 
-        # obtain WRS qos policies
-        plugin = directory.get_plugin()
-        port_qos_id = plugin.get_qos_by_port(rpc_context, port['id'])
-        if port_qos_id is not None:
-            port_qos_policy = plugin.get_policy_for_qos(rpc_context,
-                                                        port_qos_id)
-        else:
-            port_qos_policy = None
-
-        # obtain WRS qos policies
-        network_qos_id = plugin.get_qos_by_network(rpc_context,
-                                                   port['network_id'])
-        if network_qos_id is not None:
-            network_qos_policy = plugin.get_policy_for_qos(rpc_context,
-                                                           network_qos_id)
-        else:
-            network_qos_policy = None
-
         network_qos_policy_id = port_context.network._network.get(
             qos_consts.QOS_POLICY_ID)
         entry = {'device': device,
@@ -202,8 +184,6 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
                  'mtu': port_context.network._network.get('mtu'),
                  'network': port_context.network.current,
                  'subnets': subnets,
-                 'port_qos_policy': port_qos_policy,
-                 'network_qos_policy': network_qos_policy,
                  'fixed_ips': port['fixed_ips'],
                  'device_owner': port['device_owner'],
                  'allowed_address_pairs': port['allowed_address_pairs'],

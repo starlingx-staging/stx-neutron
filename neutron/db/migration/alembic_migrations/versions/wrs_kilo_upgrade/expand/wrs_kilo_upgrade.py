@@ -25,7 +25,7 @@ Create Date: 2016-05-25 00:00:01.000000
 
 # revision identifiers, used by Alembic.
 revision = 'wrs_kilo_upgrade'
-down_revision = '41038c0cd102'
+down_revision = 'wrs_kilo_shipped'
 
 
 def upgrade():

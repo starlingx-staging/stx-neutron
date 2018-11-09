@@ -94,44 +94,6 @@ def upgrade():
         'ml2_port_bindings',
         sa.Column('mtu', sa.Integer(), nullable=True))
 
-    op.create_table(
-        'qoses',
-        sa.Column('tenant_id', sa.String(length=255), nullable=True),
-        sa.Column('id', sa.String(length=36), nullable=False),
-        sa.Column('name', sa.String(length=255), nullable=False),
-        sa.Column('description', sa.String(length=255), nullable=False),
-        sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('name'))
-
-    op.create_table(
-        'qos_policies',
-        sa.Column('id', sa.String(length=36), nullable=False),
-        sa.Column('qos_id', sa.String(length=36), nullable=False),
-        sa.Column('type',
-                  sa.Enum('dscp', 'ratelimit', 'scheduler', name='qos_types'),
-                  nullable=True),
-        sa.Column('key', sa.String(length=255), nullable=False),
-        sa.Column('value', sa.String(length=255), nullable=False),
-        sa.ForeignKeyConstraint(['qos_id'], ['qoses.id'], ondelete='CASCADE'),
-        sa.PrimaryKeyConstraint('id', 'qos_id', 'key'))
-
-    op.create_table(
-        'networkqosmappings',
-        sa.Column('network_id', sa.String(length=36), nullable=False),
-        sa.Column('qos_id', sa.String(length=36), nullable=False),
-        sa.ForeignKeyConstraint(['network_id'], ['networks.id'],
-                                ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['qos_id'], ['qoses.id'], ondelete='CASCADE'),
-        sa.PrimaryKeyConstraint('network_id', 'qos_id'))
-
-    op.create_table(
-        'portqosmappings',
-        sa.Column('port_id', sa.String(length=36), nullable=False),
-        sa.Column('qos_id', sa.String(length=36), nullable=False),
-        sa.ForeignKeyConstraint(['port_id'], ['ports.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['qos_id'], ['qoses.id'], ondelete='CASCADE'),
-        sa.PrimaryKeyConstraint('port_id', 'qos_id'))
-
     op.add_column(
         'subnets',
         sa.Column('vlan_id', sa.Integer(), nullable=True))

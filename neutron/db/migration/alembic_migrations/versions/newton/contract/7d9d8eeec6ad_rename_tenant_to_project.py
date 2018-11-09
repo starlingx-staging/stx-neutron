@@ -88,7 +88,6 @@ def get_tables():
         'ha_router_networks',
         'quotausages',
         'providernet_ranges',
-        'wrs_qoses',
         'portforwardingrules',
     ]
 
