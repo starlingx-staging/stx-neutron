@@ -326,13 +326,6 @@ VALID_VXLAN_UDP_PORTS = [4789, 4790, 8472]
 #
 VXLAN_MTU_OVERHEAD = 74
 
-# QoS Extension constants
-TYPE_QOS_DSCP = "dscp"
-TYPE_QOS_RATELIMIT = "ratelimit"
-TYPE_QOS_SCHEDULER = "scheduler"
-
-QOS_SCHEDULER_POLICY_WEIGHT = "weight"
-
 # VLAN Subnets
 NONE_VLAN_TAG = 0
 

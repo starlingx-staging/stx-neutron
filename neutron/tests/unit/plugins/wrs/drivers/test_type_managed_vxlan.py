@@ -18,7 +18,6 @@
 from oslo_log import log as logging
 
 from neutron.common import constants
-from neutron.db import qos_db  # noqa
 from neutron.plugins.ml2 import driver_api as api
 from neutron.plugins.wrs.drivers import type_managed_vxlan
 from neutron.tests.unit.db import test_db_base_plugin_v2

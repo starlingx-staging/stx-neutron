@@ -23,7 +23,6 @@ from neutron.common import constants as n_const
 from neutron.common import exceptions as n_exc
 from neutron.db import api as db
 from neutron.db.models.plugins.ml2 import flatallocation
-from neutron.db import qos_db  # noqa
 from neutron.plugins.common import constants as p_const
 from neutron.plugins.ml2 import driver_api as api
 from neutron.plugins.wrs.drivers import type_managed_flat
