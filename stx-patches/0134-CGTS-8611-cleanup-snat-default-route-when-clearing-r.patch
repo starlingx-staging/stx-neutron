@@ -1,0 +1,95 @@
+From fcf93402917b70b15ea9b71954f99f56f4c3f99c Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 9 Feb 2018 15:51:21 -0500
+Subject: [PATCH 134/155] CGTS-8611: cleanup snat default route when clearing
+ router gateway
+
+This commit fixes up handling of default gateway for non-primary hosts of
+distributed routers.
+In the case of a router being rescheduled, the updated router gateway should
+overwrite the old gateway.
+In the case of clearing a gateway, the route should be deleted on the
+secondary compute nodes.
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 44 +++++++++++++++++++++++++++-------
+ 1 file changed, 36 insertions(+), 8 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index 9e0448b..af12c2c 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -714,6 +714,13 @@ class AVRAgentManager(manager.Manager):
+                         router.get(n_const.SNAT_ROUTER_INTF_KEY, []))
+         return {}
+ 
++    def _get_snat_ips(self, router):
++        snat_ips = []
++        for port in router.get(n_const.SNAT_ROUTER_INTF_KEY, []):
++            fixed_ips = port.get('fixed_ips', [])
++            snat_ips.extend(fixed_ip['ip_address'] for fixed_ip in fixed_ips)
++        return snat_ips
++
+     def _update_snat_ports(self, router):
+         router_id = router.get('id')
+         existing_router = self.routers.get(router_id)
+@@ -731,13 +738,20 @@ class AVRAgentManager(manager.Manager):
+         for port_id in removed:
+             self._delete_snat_port(existing_router, existing_ports[port_id])
+ 
+-        if len(removed) > 0:
+-            # The snat default route may have been configured to point to an
+-            # interface that is being removed, therefore replace the route
+-            # with an interface that is still configured.
+-            for port_id in configured_ports:
+-                self._update_snat_route(router, configured_ports[port_id])
+-                break  # only need one
++        if not self._is_gateway_owner(router):
++            if len(configured_ports) == 0:
++                default_route = self._get_default_route(router)
++                if default_route:
++                    prefix = default_route.prefix
++                    self._delete_router_route(router, prefix, 0)
++            elif (self._get_default_route_gateway(router) not in
++                  self._get_snat_ips(router)):
++                # The snat default route may have been configured to point to
++                # an interface that is being removed, therefore replace the
++                # route with an interface that is still configured.
++                for port_id in configured_ports:
++                    self._update_snat_route(router, configured_ports[port_id])
++                    break  # only need one
+ 
+         for port_id in added:
+             self._add_snat_port(router, current_ports[port_id])
+@@ -1173,7 +1187,7 @@ class AVRAgentManager(manager.Manager):
+             prefix = self._get_default_route_prefix(subnet)
+             prefixlen = 0
+             self._add_router_route(router, prefix, prefixlen,
+-                                   interface_uuid, gateway)
++                                   interface_uuid, gateway, replace=True)
+ 
+     def _add_snat_default_route(self, router, port):
+         # TODO(alegacy) not sure if it is possible to have multiple subnets on
+@@ -1191,6 +1205,20 @@ class AVRAgentManager(manager.Manager):
+         self._add_router_route(router, prefix, prefixlen, None, gateway,
+                                replace=True)
+ 
++    def _get_default_route(self, router):
++        router_id = router.get('id')
++        routes = self.vswitch_mgr.get_router_routes(router_id)
++        for route in routes:
++            if getattr(route, 'prefix-length') == 0:
++                return route
++
++    def _get_default_route_gateway(self, router):
++        route = self._get_default_route(router)
++        if route:
++            for nexthop in route.nexthops:
++                if 'gateway' in nexthop:
++                    return nexthop['gateway']
++
+     def _add_routes(self, router):
+         routes = router.get('routes', [])
+         for route in routes:
+-- 
+2.7.4
+

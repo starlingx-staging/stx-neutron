@@ -1,0 +1,40 @@
+From 040a5a0380fe1c8c14af1cb9edb1c79e5b902a9b Mon Sep 17 00:00:00 2001
+From: Zachary <mazengxie@126.com>
+Date: Tue, 7 Nov 2017 09:09:48 +0800
+Subject: [PATCH 108/155] ovs-fw: catches exception from ovsdb
+
+OVS agent will raise an exception when deleting
+multiple vms in bulk. Nova will delete tap when vms are
+removed. Then, ovs agent checks ovs_port
+by calling "self.get_ovs_port", and the exception will be raised.
+The patch will catch exception.
+
+Change-Id: Ief7de22e5f85253d8a25ecfbb139a8f87c1a0b35
+Closes-Bug: #1729213
+(cherry picked from commit 364e5db586a93902e99f68a8e213ad9b2a9f39b5)
+---
+ neutron/agent/linux/openvswitch_firewall/firewall.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/agent/linux/openvswitch_firewall/firewall.py b/neutron/agent/linux/openvswitch_firewall/firewall.py
+index 797e2a3..783d304 100644
+--- a/neutron/agent/linux/openvswitch_firewall/firewall.py
++++ b/neutron/agent/linux/openvswitch_firewall/firewall.py
+@@ -504,7 +504,13 @@ class OVSFirewallDriver(firewall.FirewallDriver):
+             self.prepare_port_filter(port)
+             return
+         old_of_port = self.get_ofport(port)
+-        of_port = self.get_or_create_ofport(port)
++        try:
++            of_port = self.get_or_create_ofport(port)
++        except exceptions.OVSFWPortNotFound as not_found_error:
++            LOG.info("port %(port_id)s does not exist in ovsdb: %(err)s.",
++                     {'port_id': port['device'],
++                      'err': not_found_error})
++            return
+         # TODO(jlibosva): Handle firewall blink
+         self.delete_all_port_flows(old_of_port)
+         self.initialize_port_flows(of_port)
+-- 
+2.7.4
+

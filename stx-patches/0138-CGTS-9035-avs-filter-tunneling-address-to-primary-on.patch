@@ -1,0 +1,40 @@
+From c833c47dd3547513db6d5222825614152b81aa24 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 22 Feb 2018 17:04:11 -0600
+Subject: [PATCH 138/155] CGTS-9035: avs: filter tunneling address to primary
+ only
+
+The AVS agent should be ignoring secondary address when reporting candidates
+for tunneling addresses.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index c7f60b5..8828cbc 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -172,9 +172,8 @@ FLOODING_ENTRY_MAC = '00:00:00:00:00:00'
+ L2POP_VXLAN_MODES = [n_const.PROVIDERNET_VXLAN_STATIC]
+ 
+ 
+-def _is_ipv6_link_local(address):
+-    ipaddr = netaddr.IPAddress(address)
+-    return bool(ipaddr.version == 6 and ipaddr.is_link_local())
++def is_primary_address(address):
++    return bool(address.preference == "primary")
+ 
+ 
+ def is_avs_port(device_owner):
+@@ -973,7 +972,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         multiple addresses so return a list of both IPv4 and IPv6 addresses.
+         """
+         data = self.vswitch_mgr.get_address_list(interface_uuid=iface_uuid)
+-        addresses = [a for a in data.keys() if not _is_ipv6_link_local(a)]
++        addresses = [a for a in data.keys() if is_primary_address(data[a])]
+         # Prefer an IPv6 address if one is present
+         addresses = sorted(addresses,
+                            key=lambda x: netaddr.IPAddress(x).version,
+-- 
+2.7.4
+

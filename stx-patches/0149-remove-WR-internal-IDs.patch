@@ -1,0 +1,25 @@
+From d934a87e94cedeeb39117dca6ba0eacdb8b1cf89 Mon Sep 17 00:00:00 2001
+From: yhu6 <yong.hu@intel.com>
+Date: Wed, 25 Apr 2018 21:34:50 +0800
+Subject: [PATCH 149/155] remove WR internal IDs
+
+---
+ neutron/agent/dhcp/agent.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index 9a84ae8..f2d40b8 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -211,7 +211,7 @@ class DhcpAgent(manager.Manager):
+         """
+         self.needs_resync_reasons[network_id].append(reason)
+         self._periodic_resync_event.set()
+-        # CGTS-6661: yield to other threads since it is possible to go in to a
++        # yield to other threads since it is possible to go in to a
+         # failure loop where we keep rescheduling a sync but no other threads
+         # waiting on the dhcp-agent lock will make any progress.
+         time.sleep(0)
+-- 
+2.7.4
+

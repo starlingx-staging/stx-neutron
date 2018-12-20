@@ -1,0 +1,73 @@
+From e02708a67a6ec1195cc6bda657d7d09da1a16ffd Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Mon, 4 Dec 2017 09:55:48 -0500
+Subject: [PATCH 095/155] US106592: pike rebase bug 278, validate
+ update_providernet mtu changes Validate providernet MTU isn't updated to less
+ than any tenant network's MTU.
+
+---
+ neutron/db/providernet_db.py | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 16927ed..427c265 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -25,8 +25,10 @@ from datetime import timedelta
+ import itertools
+ import time
+ 
++from neutron_lib.api.definitions import provider_net as provider
+ from neutron_lib.api import validators
+ from neutron_lib.db import model_base
++from neutron_lib import exceptions as n_exc
+ from oslo_config import cfg
+ from oslo_log import log as logging
+ import oslo_messaging
+@@ -453,10 +455,25 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         except ext_providernet.ProviderNetNotFoundByName:
+             pass
+ 
+-    def _validate_providernet(self, context, providernet):
++    def _validate_providernet_create(self, context, providernet):
+         providernet_data = providernet['providernet']
+         self._validate_providernet_exists(context, providernet_data['name'])
+ 
++    def _validate_providernet_update(self, context, providernet_id,
++                                     providernet_data):
++        providernet = self._get_providernet_by_id(context, providernet_id)
++        pnet_mtu = providernet_data['mtu']
++        pnet_name = providernet['name']
++        filters = {
++            provider.PHYSICAL_NETWORK: pnet_name,
++        }
++        fields = ['mtu']
++        networks = self.get_networks(context, filters=filters, fields=fields)
++        for network in networks:
++            if providernet_data['mtu'] < network['mtu']:
++                msg = _("Requested MTU %s is too small") % pnet_mtu
++                raise n_exc.InvalidInput(error_message=msg)
++
+     @db_api.retry_if_session_inactive()
+     def create_providernet(self, context, providernet):
+         providernet_data = providernet['providernet']
+@@ -468,7 +485,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             'mtu': providernet_data['mtu'],
+             'status': constants.PROVIDERNET_DOWN,
+             'vlan_transparent': providernet_data['vlan_transparent']}
+-        self._validate_providernet(context, providernet)
++        self._validate_providernet_create(context, providernet)
+         with context.session.begin(subtransactions=True):
+             providernet = ProviderNet(**res)
+             context.session.add(providernet)
+@@ -478,6 +495,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+     @db_api.retry_if_session_inactive()
+     def update_providernet(self, context, id, providernet):
+         providernet_data = providernet['providernet']
++        self._validate_providernet_update(context, id, providernet_data)
+         with context.session.begin(subtransactions=True):
+             providernet = self._get_providernet_by_id(context, id)
+             providernet.update(providernet_data)
+-- 
+2.7.4
+

@@ -1,0 +1,68 @@
+From 012eeff9c962398da44b23254c5f73ac988f90e9 Mon Sep 17 00:00:00 2001
+From: Ihar Hrachyshka <ihrachys@redhat.com>
+Date: Tue, 19 Dec 2017 13:54:02 -0800
+Subject: [PATCH 112/155] ipam: don't commit IPAllocation while IpamAllocation
+ is rolled back
+
+Don't mix old and new session management styles. Mixing them is not
+guaranteed to work. The method is not switched to new enginefacade yet,
+so stick to the old style. Since OVO create() method already opens a
+nested transaction, do nothing in IPAM layer.
+
+This change fixes an issue where sometimes, whenever
+add_auto_addrs_on_network_ports raises a retriable exception like
+StaleDataError, corresponding IPAllocation is still persisted in the
+database without being rolled back and without the corresponding
+IpamAllocation model persisted. Later, this situation may break port and
+network deletion for resources affected by the issue, failing with the
+following error:
+
+Unable to find IP address 2003::f816:3eff:fed2:5006 on subnet
+eed623f4-cbad-488c-b230-7f4a8b1514eb
+
+It happens because whenever writer.using context manager exits, and it's
+top level manager, it commits the changes to database. Since
+writer.using doesn't know that it's being executed in scope of the old
+facade .begin() call, it doesn't postpone commitment as needed.
+
+The bug was introduced in Pike as part of the switch to the new
+enginefacade (that was never fully completed), specifically by:
+I50be115ea69f805b48b02aebe4259ec2c839830e
+
+For existing setups that already have IPAllocation objects without
+IpamAllocation counterparts, the solution is to remove those
+dangling IPAllocations manually from the database. (That's of course
+assuming they use Neutron DB IPAM plugin in the first place.)
+
+Note: If we ever decide to remove nested transactions from OVO base
+layer, we may need to revisit this code to keep ignore-on-failure
+semantics.
+
+Change-Id: Ic9e146f51d9a120011892828d3a67b0630f4c5ce
+Closes-Bug: #1706750
+(cherry picked from commit d4c41071645d0c25485d93886fbc09ca671ea18b)
+---
+ neutron/db/ipam_pluggable_backend.py | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/db/ipam_pluggable_backend.py b/neutron/db/ipam_pluggable_backend.py
+index 80307d2..344c5f8 100644
+--- a/neutron/db/ipam_pluggable_backend.py
++++ b/neutron/db/ipam_pluggable_backend.py
+@@ -565,9 +565,10 @@ class IpamPluggableBackend(ipam_backend_mixin.IpamBackendMixin):
+                     # Do the insertion of each IP allocation entry within
+                     # the context of a nested transaction, so that the entry
+                     # is rolled back independently of other entries whenever
+-                    # the corresponding port has been deleted.
+-                    with db_api.context_manager.writer.using(context):
+-                        allocated.create()
++                    # the corresponding port has been deleted; since OVO
++                    # already opens a nested transaction, we don't need to do
++                    # it explicitly here.
++                    allocated.create()
+                     updated_ports.append(port['id'])
+                 except db_exc.DBReferenceError:
+                     LOG.debug("Port %s was deleted while updating it with an "
+-- 
+2.7.4
+

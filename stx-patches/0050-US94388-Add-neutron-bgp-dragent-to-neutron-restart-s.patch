@@ -1,0 +1,25 @@
+From 10f62412e4c89a776a7ba8722f1b685e7ce70469 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 25 Aug 2017 15:45:43 -0400
+Subject: [PATCH 050/155] US94388: Add neutron-bgp-dragent to neutron restart
+ script
+
+---
+ bin/neutron-restart | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/bin/neutron-restart b/bin/neutron-restart
+index 1adc478..8a7d700 100755
+--- a/bin/neutron-restart
++++ b/bin/neutron-restart
+@@ -131,6 +131,7 @@ if is_controller
+ then
+     # neutron-server only runs on the controller
+     restart_neutron_server
++    restart_neutron_agent neutron-bgp-dragent
+ fi
+ 
+ 
+-- 
+2.7.4
+

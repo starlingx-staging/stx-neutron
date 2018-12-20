@@ -1,0 +1,3617 @@
+From 51ea295f5523a40debea12534f8b9975bb644395 Mon Sep 17 00:00:00 2001
+From: Forrest <forrest.zhao@intel.com>
+Date: Tue, 17 Apr 2018 07:19:25 +0000
+Subject: [PATCH 151/155] Refine the patch to remove more AVS code
+
+Signed-off-by: Forrest <forrest.zhao@intel.com>
+---
+ etc/oslo-config-generator/avs_agent.ini            |    1 -
+ neutron/agent/vswitch/api.py                       |    2 +-
+ neutron/agent/vswitch/interface.py                 |  116 +-
+ neutron/agent/vswitch/manager.py                   | 1537 --------------------
+ neutron/api/rpc/handlers/securitygroups_rpc.py     |   40 +-
+ neutron/common/constants.py                        |    4 +-
+ neutron/conf/agent/securitygroups_rpc.py           |   17 +-
+ .../alembic_migrations/versions/CONTRACT_HEAD      |    2 +-
+ neutron/db/securitygroups_rpc_base.py              |   10 +
+ neutron/extensions/wrs_binding.py                  |   11 +-
+ neutron/extensions/wrs_net.py                      |    8 +-
+ neutron/extensions/wrs_provider.py                 |   12 +-
+ neutron/extensions/wrs_tm.py                       |    4 +-
+ neutron/opts.py                                    |   10 +-
+ neutron/pecan_wsgi/app.py                          |    1 +
+ neutron/pecan_wsgi/hooks/__init__.py               |    2 +
+ neutron/pecan_wsgi/hooks/wrs_fields.py             |   65 +
+ neutron/plugins/ml2/plugin.py                      |    3 +-
+ neutron/plugins/wrs/agent/avr/__init__.py          |    1 -
+ neutron/plugins/wrs/agent/avr/agent.py             |   13 +
+ neutron/plugins/wrs/agent/avs/__init__.py          |    1 -
+ neutron/plugins/wrs/agent/avs/agent.py             |   13 +
+ neutron/plugins/wrs/agent/avs/dvr.py               |    1 -
+ neutron/plugins/wrs/agent/avs/sfc.py               |    1 -
+ neutron/plugins/wrs/drivers/firewall.py            |  174 +++
+ neutron/plugins/wrs/drivers/fm.py                  |   53 +
+ neutron/plugins/wrs/drivers/mech_vswitch.py        |  194 +--
+ neutron/tests/functional/vswitch/__init__.py       |    1 +
+ .../tests/functional/vswitch/test_vswitch_agent.py |  243 ----
+ .../tests/functional/vswitch/test_vswitch_api.py   |  447 ------
+ .../functional/vswitch/test_vswitch_interface.py   |  112 --
+ .../unit/plugins/wrs/drivers/test_mech_vswitch.py  |   81 --
+ setup.cfg                                          |    4 +-
+ 33 files changed, 431 insertions(+), 2753 deletions(-)
+ create mode 100644 neutron/pecan_wsgi/hooks/wrs_fields.py
+ create mode 100644 neutron/plugins/wrs/drivers/firewall.py
+
+diff --git a/etc/oslo-config-generator/avs_agent.ini b/etc/oslo-config-generator/avs_agent.ini
+index 917292a..9c0864d 100644
+--- a/etc/oslo-config-generator/avs_agent.ini
++++ b/etc/oslo-config-generator/avs_agent.ini
+@@ -1,5 +1,4 @@
+ [DEFAULT]
+-# TODO(alegacy): rename to avs_agent.ini.sample
+ output_file = etc/vswitch_agent.ini.sample
+ wrap_width = 79
+ 
+diff --git a/neutron/agent/vswitch/api.py b/neutron/agent/vswitch/api.py
+index 6de054e..29e3995 100644
+--- a/neutron/agent/vswitch/api.py
++++ b/neutron/agent/vswitch/api.py
+@@ -15,7 +15,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2013-2016 Wind River Systems, Inc.
++# Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+diff --git a/neutron/agent/vswitch/interface.py b/neutron/agent/vswitch/interface.py
+index 85097f7..d4ddb20 100644
+--- a/neutron/agent/vswitch/interface.py
++++ b/neutron/agent/vswitch/interface.py
+@@ -1,119 +1,5 @@
+-# Copyright 2012 OpenStack Foundation
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-#
+-# Copyright (c) 2013-2014 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+-
+-from oslo_log import log as logging
+-
+-from neutron.agent.linux import interface
+-from neutron.agent.linux import ip_lib
+-from neutron.agent.vswitch import api
+-from neutron.agent.vswitch import constants
+-from neutron.agent.vswitch import exceptions
+-
+-
+-LOG = logging.getLogger(__name__)
+-
+-
+ class VSwitchInterfaceDriver(interface.LinuxInterfaceDriver):
+ 
+-    DEV_NAME_PREFIX = 'avp'
+ 
+     def __init__(self, conf):
+-        super(VSwitchInterfaceDriver, self).__init__(conf)
+-        self.api = api.VSwitchManagementAPI()
+-
+-    def _find_port_by_device_name(self, device_name):
+-        for port in self.api.get_port_list():
+-            prefix = device_name[len(self.DEV_NAME_PREFIX):]
+-            if port['uuid'].startswith(prefix):
+-                return port
+-        return None
+-
+-    def plug_new(self, network_id, port_id, device_name, mac_address,
+-                 bridge=None, namespace=None, prefix=None, mtu=None):
+-        """Plugin the interface."""
+-        LOG.debug("plug() %(network_id)s %(port_id)s "
+-                  "%(device_name)s %(mac_address)s"
+-                  "%(bridge)s %(namespace)s %(prefix)s",
+-                  {'network_id': network_id, 'port_id': port_id,
+-                   'device_name': device_name, 'mac_address': mac_address,
+-                   'bridge': bridge, 'namespace': namespace, 'prefix': prefix})
+-
+-        ip = ip_lib.IPWrapper()
+-        if not ip_lib.device_exists(device_name,
+-                                    namespace=namespace):
+-            port = {'type': constants.VSWITCH_AVP_HOST_PORT,
+-                    'device-name': device_name,
+-                    'uuid': port_id,
+-                    'mac-address': mac_address,
+-                    'network-uuid': network_id,
+-                    'mtu': mtu,
+-                    'neutron': True}
+-            try:
+-                # Attempt to create
+-                self.api.add_port(port)
+-            except exceptions.VSwitchError as e:
+-                LOG.error("Failed to create port {}, {}".format(
+-                    port_id, e))
+-                raise
+-
+-            # Do not unlock or attach the port.  The L2 agent will do it
+-            LOG.info("Device %s has been created", device_name)
+-
+-            # Get a reference to the device and create NS if necessary
+-            device = ip.device(device_name)
+-            ip_ns = ip.ensure_namespace(namespace)
+-
+-            # Attempt to move the device to a namespace
+-            ip_ns.add_device_to_namespace(device)
+-            LOG.info("Device %(name)s has been added "
+-                     "to namespace %(namespace)s",
+-                     {'name': device_name, 'namespace': namespace})
+-        else:
+-            device = ip.device(device_name)
+-            LOG.warning("Device %s already exists", device_name)
+-
+-        # Attempt to set the interface MTU
+-        mtu_value = mtu if mtu else self.conf.network_device_mtu
+-        if mtu_value:
+-            device.link.set_mtu(mtu_value)
+-        # Attempt to bring up linux interface
+-        device.link.set_up()
+-        LOG.info("Device %s has been set to up", device_name)
+-
+-    def unplug(self, device_name, bridge=None, namespace=None, prefix=None):
+-        """Unplug the interface."""
+-        LOG.debug("unplug() %(device_name)s %(bridge)s "
+-                  "%(namespace)s %(prefix)s",
+-                  {'device_name': device_name, 'bridge': bridge,
+-                   'namespace': namespace, 'prefix': prefix})
+-        port = self._find_port_by_device_name(device_name)
+-        if not port:
+-            LOG.info("Device %s has already been deleted", device_name)
+-            return
+-        try:
+-            # Attempt to lock, detach and delete the port
+-            self.api.destroy_port(port)
+-            LOG.info("Device %s has been deleted", device_name)
+-        except exceptions.VSwitchError as e:
+-            LOG.error("Failed to detach port {}, {}".format(
+-                      port['uuid'], e))
+-            raise
++        pass
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index 4d6ed2c..e69de29 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -1,1537 +0,0 @@
+-#!/usr/bin/env python
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-#
+-# Copyright (c) 2013-2016 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+-
+-
+-import collections
+-import re
+-import time
+-import uuid
+-
+-from neutron_lib import constants
+-from oslo_log import log as logging
+-import six
+-from tsconfig import tsconfig
+-
+-from neutron.agent.vswitch import constants as avs_constants
+-from neutron.agent.vswitch import exceptions
+-from neutron.common import constants as n_const
+-
+-
+-LOG = logging.getLogger(__name__)
+-
+-AVS_NAT_PROTOCOLS = {
+-    constants.PROTO_NAME_TCP: 'tcp',
+-    constants.PROTO_NAME_UDP: 'udp',
+-    constants.PROTO_NAME_UDPLITE: 'udp-lite',
+-    constants.PROTO_NAME_SCTP: 'sctp',
+-    constants.PROTO_NAME_DCCP: 'dccp',
+-    constants.PROTO_NAME_ICMP: 'icmp'}
+-
+-
+-def port_sort_key(port):
+-    """
+-    Sort ports by their created-timetamp so that older ports are treated
+-    first.  This is to ensure that we get to a port as soon as possible after
+-    it has been created by nova, or by one of the agents.
+-    """
+-    return port['created-timestamp']
+-
+-
+-def interface_sort_key(iface):
+-    """
+-    Sort interfaces by interface type placing aggregated ethernet interfaces
+-    ahead of ethernet interfaces, and vlan interfaces last.  This is to satisfy
+-    processing of the 'upper-uuid' and 'lower-uuid' attributes which need to
+-    refer to interfaces that have already been processed.
+-
+-    Use the created-timestamp as the secondary key to ensure that older
+-    interfaces are treated first so that they are handled as soon as possible
+-    after they have been created by an agent.
+-    """
+-    if iface['type'] == avs_constants.VSWITCH_AE_INTERFACE:
+-        return (0, iface['created-timestamp'])
+-    elif iface['type'] == avs_constants.VSWITCH_ETHERNET_INTERFACE:
+-        return (1, iface['created-timestamp'])
+-    else:  # if iface['type'] == avs_constants.VSWITCH_VLAN_INTERFACE:
+-        return (2, iface['created-timestamp'])
+-
+-
+-class VSwitchManagerError(Exception):
+-    """
+-    Errors reported from the manager layer.
+-    """
+-    def __init__(self, message):
+-        self.message = message
+-
+-    def __str__(self):
+-        return "{}".format(self.message)
+-
+-
+-class VSwitchManager(object):
+-    """
+-    Abstraction layer to handle interactions between the Agent and the API.
+-    Incoming parameters are expected to be in openstack format and converted
+-    to vswitch equivalents before being passed to the API.
+-    """
+-
+-    def __init__(self, api, mappings=None):
+-        self.api = api
+-        self.interface_mappings = mappings or {}
+-
+-    def add_port(self, uuid, device_name, mac_address, mtu, neutron=True):
+-        port = {'type': avs_constants.VSWITCH_AVP_HOST_PORT,
+-                'device-name': device_name,
+-                'uuid': uuid,
+-                'mac-address': mac_address,
+-                'mtu': mtu,
+-                'neutron': neutron}
+-        LOG.debug("Adding port {}".format(port))
+-        try:
+-            # Attempt to create
+-            self.api.add_port(port)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add port {}, {}".format(port, e))
+-
+-    def unlock_port(self, uuid):
+-        """
+-        Unlock a vswitch port.
+-        """
+-        LOG.debug("Unlocking port {}".format(uuid))
+-        port = {'uuid': uuid}
+-        try:
+-            self.api.unlock_port(port)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to unlock port {}, {}".format(port['uuid'], e))
+-
+-    def lock_port(self, uuid):
+-        """
+-        Lock a vswitch port.
+-        """
+-        LOG.debug("Locking port {}".format(uuid))
+-        port = {'uuid': uuid}
+-        try:
+-            self.api.lock_port(port)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to lock port {}, {}".format(port['uuid'], e))
+-
+-    def update_port(self, uuid, params):
+-        """
+-        Update a vswitch port parameters.
+-        """
+-        LOG.debug("Updating port {} {}".format(uuid, params))
+-        port = {'uuid': uuid}
+-        port.update(params)
+-        try:
+-            self.api.update_port(port)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to update port {}, {}".format(port['uuid'], e))
+-
+-    def destroy_port(self, uuid):
+-        """
+-        Destroy a vswitch port by locking, detaching and then deleting the port
+-        """
+-        LOG.debug("Destroy port {}".format(uuid))
+-        port = {'uuid': uuid}
+-        try:
+-            self.api.destroy_port(port)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to destroy port {}, {}".format(port['uuid'], e))
+-
+-    def attach_port(self, uuid, network_uuid):
+-        """
+-        Attach a vswitch port to a network segment.
+-        """
+-        LOG.debug("Attaching port {} to network {}".format(uuid, network_uuid))
+-        port = {'uuid': uuid, "network-uuid": network_uuid}
+-        try:
+-            self.api.attach_port(port)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to attach port {}, {}".format(port['uuid'], e))
+-
+-    def update_interface(self, uuid, params):
+-        """
+-        Update vswitch interface parameters.
+-        """
+-        LOG.debug("Updating port {} {}".format(uuid, params))
+-        interface = {'uuid': uuid}
+-        interface.update(params)
+-        try:
+-            self.api.update_interface(interface)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to update interface {}, {}".format(
+-                    interface['uuid'], e))
+-
+-    def get_interface(self, uuid):
+-        """
+-        Obtain an interface object by uuid.
+-        """
+-        try:
+-            return self.api.get_interface(uuid)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to query interface {}, {}".format(uuid, e))
+-
+-    def find_interface(self, name):
+-        """
+-        Lookup an interface object by name.
+-        """
+-        try:
+-            for interface in self.api.get_interface_list():
+-                if name == interface['name']:
+-                    return interface
+-            return None
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to query interface list, {}".format(e))
+-
+-    def add_vlan_interface(self, uuid, vlan_id, mtu, lower_uuid):
+-        """
+-        Create new vlan interface.
+-        """
+-        interface = {
+-            'type': avs_constants.VSWITCH_VLAN_INTERFACE,
+-            'mtu': mtu,
+-            'uuid': uuid,
+-            'vlan-id': vlan_id,
+-            'lower-uuid': lower_uuid,
+-        }
+-        try:
+-            self.api.add_interface(interface)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add vlan interface {}, {}".format(interface, e))
+-
+-    def add_vxlan_interface(self, uuid, vxlan_id, group, port, ttl, mtu,
+-                            lower_uuid, vtep_mode):
+-        """
+-        Create new vxlan interface.
+-        """
+-        interface = {
+-            'type': avs_constants.VSWITCH_VXLAN_INTERFACE,
+-            'group': group,
+-            'port': port,
+-            'mtu': mtu,
+-            'ttl': ttl,
+-            'uuid': uuid,
+-            'vxlan-id': vxlan_id,
+-            'lower-uuid': lower_uuid,
+-            'vtep-mode': vtep_mode
+-        }
+-        try:
+-            self.api.add_interface(interface)
+-        except exceptions.VSwitchError as e:
+-            msg = "Failed to add vxlan interface {}, {}".format(
+-                interface, e)
+-            raise VSwitchManagerError(msg)
+-
+-    def add_router_interface(self, uuid, router_uuid, mac_address, mtu,
+-                             **kwargs):
+-        """
+-        Create a new router interface for the supplied router
+-        """
+-        # Determine if the interface already exists
+-        try:
+-            interface = self.get_interface(uuid)
+-        except VSwitchManagerError:
+-            interface = None
+-        if not interface:
+-            # Create new router interface
+-            interface = {
+-                'type': avs_constants.VSWITCH_ROUTER_INTERFACE,
+-                'uuid': uuid,
+-                'mac-address': mac_address,
+-                'mtu': mtu,
+-                'router-uuid': router_uuid,
+-                'neutron': True,
+-            }
+-            for arg in kwargs.keys():
+-                if kwargs[arg] is not None:
+-                    interface[arg] = kwargs[arg]
+-            try:
+-                self.api.add_interface(interface)
+-            except exceptions.VSwitchError as e:
+-                raise VSwitchManagerError(
+-                    "Failed to add router interface {}, {}".format(
+-                        interface, e))
+-
+-    def delete_interface(self, uuid):
+-        """
+-        Delete an existing logical interface
+-        """
+-        try:
+-            interface = self.get_interface(uuid)
+-        except VSwitchManagerError:
+-            interface = None
+-        if interface:
+-            try:
+-                self.api.delete_interface(interface)
+-            except exceptions.VSwitchError as e:
+-                raise VSwitchManagerError(
+-                    "Failed to delete interface {}, {}".format(interface, e))
+-
+-    def attach_interface(self, uuid, network_uuid):
+-        """
+-        Attach a vswitch interface to a network segment.
+-        """
+-        LOG.debug("Attaching interface {} to network {}".format(
+-            uuid, network_uuid))
+-
+-        interface = {'uuid': uuid, "network-uuid": network_uuid}
+-        try:
+-            self.api.attach_interface(interface)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to attach interface {}, {}".format(
+-                    interface['uuid'], e))
+-
+-    def get_logical_interface(self, physical_network):
+-        """
+-        Retrieve the logical interface name which provides service to the
+-        specified provider network (physical network).
+-        """
+-        value = self.interface_mappings.get(physical_network)
+-        if not value:
+-            msg = "No interface mapping for {}".format(physical_network)
+-            raise VSwitchManagerError(msg)
+-        result = re.search('port(\\d+)', value)
+-        if result and len(result.groups()) == 1:
+-            # backward compatibility to old mapping format
+-            matches = result.groups()
+-            return self.find_interface("eth{}".format(matches[0]))
+-        return self.get_interface(value)
+-
+-    def get_network_name(self, network_uuid, vlan_id=None):
+-        """
+-        The plugin does not send us the network name therefore we build one
+-        based on the network uuid.
+-        """
+-        name = "net-" + network_uuid[:8]
+-        if vlan_id:
+-            name = name + "-" + str(vlan_id)
+-        return name
+-
+-    def _setup_flat_provider_interface(self, lower_iface, data):
+-        """
+-        Flat provider networks do not add any additional protocol encapsulation
+-        so there is no addition interface to create (ie. vlan, vxlan, gre,
+-        etc...).
+-        """
+-        return lower_iface['uuid']
+-
+-    def _setup_vlan_provider_interface(self, lower_iface, data):
+-        """
+-        Attach the network to a VLAN interface which is first created atop the
+-        logical interface which implements the provider network.
+-        """
+-        iface_uuid = data['uuid']
+-        vlan_id = data['segmentation_id']
+-        # Query the MTU from the provider
+-        mtu = data['mtu']
+-        if not mtu:
+-            msg = "Missing MTU for vlan provider interface: {}".format(data)
+-            raise VSwitchManagerError(msg)
+-        self.add_vlan_interface(iface_uuid,
+-                                vlan_id,
+-                                mtu,
+-                                lower_iface['uuid'])
+-        return iface_uuid
+-
+-    def _convert_vxlan_mode_to_vtep_mode(self, vxlan_mode):
+-        if vxlan_mode == n_const.PROVIDERNET_VXLAN_DYNAMIC:
+-            return "multicast"
+-        elif vxlan_mode == n_const.PROVIDERNET_VXLAN_STATIC:
+-            return "unicast"
+-        elif vxlan_mode is None:
+-            return "multicast"
+-        raise VSwitchManagerError("Unsupported VXLAN mode: {}".format(
+-            vxlan_mode))
+-
+-    def _setup_vxlan_provider_interface(self, lower_iface, data):
+-        """
+-        Attach the network to a VLAN interface which is first created atop the
+-        logical interface which implements the provider network.
+-        """
+-        iface_uuid = data['uuid']
+-        vxlan_id = data['segmentation_id']
+-        vxlan = data['vxlan']
+-        # Query the MTU from the provider
+-        mtu = data['mtu']
+-        if not mtu:
+-            msg = "Missing MTU for vxlan provider interface: {}".format(data)
+-            raise VSwitchManagerError(msg)
+-
+-        vtep_mode = self._convert_vxlan_mode_to_vtep_mode(vxlan.get('mode'))
+-        self.add_vxlan_interface(iface_uuid,
+-                                 vxlan_id,
+-                                 vxlan['group'],
+-                                 vxlan['port'],
+-                                 vxlan['ttl'],
+-                                 mtu,
+-                                 lower_iface['uuid'],
+-                                 vtep_mode)
+-        return iface_uuid
+-
+-    def setup_provider_interface(self, lower_uuid, data):
+-        """
+-        Create and a new logical interface which implements the provider
+-        segment (e.g., vlan, vxlan, gre, etc...) on the provider network.
+-        """
+-        lower_iface = self.get_interface(lower_uuid)
+-        if not lower_iface:
+-            msg = "Missing lower interface {} for provider network: {}".format(
+-                lower_uuid, data)
+-            raise VSwitchManagerError(msg)
+-        network_type = data['network_type']
+-        data['uuid'] = self.get_provider_interface_uuid(
+-            lower_uuid, network_type, data.get('segmentation_id'))
+-        if network_type == n_const.PROVIDERNET_VLAN:
+-            return self._setup_vlan_provider_interface(lower_iface, data)
+-        elif network_type == n_const.PROVIDERNET_VXLAN:
+-            return self._setup_vxlan_provider_interface(lower_iface, data)
+-        elif network_type == n_const.PROVIDERNET_FLAT:
+-            return self._setup_flat_provider_interface(lower_iface, data)
+-        else:
+-            msg = "Unsupported provider network type {}".format(network_type)
+-            raise VSwitchManagerError(msg)
+-
+-    def setup_network(self, network_uuid, network):
+-        """
+-        This is a utility wrapper to create a network and its provider
+-        interface.
+-        """
+-        try:
+-            nw_instance = self.get_network(network_uuid)
+-        except VSwitchManagerError:
+-            nw_instance = None
+-        if not nw_instance:
+-            nw_instance = self.add_network(network_uuid, network)
+-        physical_uuid = self.get_physical_interface_uuid(
+-            network['physical_network'])
+-        provider_uuid = self.get_provider_interface_uuid(
+-            physical_uuid,
+-            network['network_type'],
+-            network['segmentation_id'])
+-        try:
+-            instance = self.get_interface(provider_uuid)
+-        except VSwitchManagerError:
+-            instance = None
+-        if not instance:
+-            provider_uuid = self.setup_provider_interface(physical_uuid,
+-                    network)
+-        self.attach_interface(provider_uuid, network_uuid)
+-        return provider_uuid, nw_instance
+-
+-    def add_network(self, uuid, network):
+-        """
+-        Add a new logical network segment to the vswitch.
+-        """
+-        LOG.debug("Adding network {}".format(network))
+-
+-        # Obtain the UUID of the physical network to identify the provider
+-        # network that this network is associated with
+-        physical_uuid = self.get_physical_interface_uuid(
+-            network['physical_network'])
+-
+-        # Setup the network
+-        network = {
+-            'uuid': uuid,
+-            'name': network['name'],
+-            'type': network.get('type', avs_constants.VSWITCH_LAYER2_NETWORK),
+-            'provider-uuid': physical_uuid,
+-            'vlan-transparent': network.get('vlan_transparent', False)}
+-
+-        try:
+-            self.api.add_network(network)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add network {}, {}".format(network['uuid'], e))
+-
+-    def update_network(self, uuid, params):
+-        """
+-        Update a vswitch port parameters.
+-        """
+-        LOG.debug("Updating network {} {}".format(uuid, params))
+-        network = {'uuid': uuid}
+-        network.update(params)
+-        try:
+-            self.api.update_network(network)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to update network {}, {}".format(uuid, e))
+-
+-    def get_network(self, uuid):
+-        """
+-        Obtain an network object by uuid.
+-        """
+-        try:
+-            return self.api.get_network(uuid)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to query network {}, {}".format(uuid, e))
+-
+-    def delete_network(self, uuid, in_use_interfaces=None):
+-        """
+-        Delete a logical network segment from the vswitch.  All attached
+-        interfaces will be detached prior to deletion and any related logical
+-        provider network interface (i.e., vlan, vxlan, gre, ...) will be
+-        deleted.
+-        """
+-        LOG.debug("Deleting network {}".format(uuid))
+-        in_use_interfaces = in_use_interfaces or []
+-        try:
+-            interfaces = self.api.get_network_interface_list(uuid)
+-            # Detach all interfaces before deleting the network
+-            for interface in interfaces:
+-                try:
+-                    self.api.detach_interface(interface)
+-                    auto_delete_set = (avs_constants.VSWITCH_VLAN_INTERFACE,
+-                                       avs_constants.VSWITCH_VXLAN_INTERFACE)
+-                    if (interface['type'] in auto_delete_set and
+-                            interface['uuid'] not in in_use_interfaces):
+-                        # Delete VLANs since we initially created it.
+-                        self.api.delete_interface(interface)
+-                except exceptions.VSwitchError as e:
+-                    msg = ("Failed to detach interface {} from {}, {}".format(
+-                            interface['uuid'], uuid, e))
+-                    raise VSwitchManagerError(msg)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to get interface list for {}, {}".format(uuid, e))
+-
+-        try:
+-            # Delete the network
+-            network = {'uuid': uuid}
+-            self.api.delete_network(network)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete network {}, {}".format(uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def is_network_orphaned(self, uuid):
+-        """
+-        Determine whether a network only has provider type interfaces
+-        remaining.  Any such network can be safely deleted since it is not
+-        providing service to any tenant resources.
+-        """
+-        count = 0
+-        try:
+-            interfaces = self.api.get_network_interface_list(uuid)
+-            for interface in interfaces:
+-                ifclass = interface['class']
+-                if ifclass != avs_constants.VSWITCH_PROVIDER_INTERFACE:
+-                    count += 1
+-            return bool(count == 0)
+-        except exceptions.VSwitchNetworkNotFoundError as e:
+-            # Network has already been deleted
+-            pass
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to get interface list for {}, {}".format(uuid, e))
+-
+-    def delete_orphaned_networks(self):
+-        """
+-        Delete any network which only has provider type interfaces remaining.
+-        Any such network can be safely deleted since it is not providing
+-        service to any tenant resources.
+-        """
+-        try:
+-            networks = self.api.get_network_list()
+-            for network in networks:
+-                uuid = network['uuid']
+-                if self.is_network_orphaned(uuid):
+-                    LOG.warning("Deleting orphaned network {}".format(uuid))
+-                    self.delete_network(uuid)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to get interface list for {}, {}".format(uuid, e))
+-
+-    def add_network_entry(self, interface_uuid, mac_address):
+-        """
+-        Add a static layer2 table entry against an interface network
+-        attachment. The target network is derived from the interface_uuid.
+-        """
+-        try:
+-            return self.api.add_network_entry(interface_uuid, mac_address)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add static entry {} on {}, {}".format(
+-                    mac_address, interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def remove_network_entry(self, interface_uuid, mac_address):
+-        """
+-        Remove a static layer2 table entry from an interface network
+-        attachment.  The target network is derived from the interface_uuid.
+-        """
+-        try:
+-            return self.api.remove_network_entry(interface_uuid, mac_address)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to remove static entry {} on {}, {}".format(
+-                    mac_address, interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_networks(self):
+-        """
+-        Retrieve the network list.
+-        """
+-        try:
+-            networks = self.api.get_network_list()
+-            return dict((network['uuid'], network)
+-                        for network in networks or [])
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to get network list for {}, {}".format(uuid, e))
+-
+-    def get_port_status(self, uuid):
+-        """
+-        Query the port status for the specified port.  If an error occurs
+-        while query the port status False is returned to indicate that the
+-        port is assumed to be down.
+-        """
+-        port = {'uuid': uuid}
+-        try:
+-            return self.api.get_port_status(port)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query status for port {}, {}".format(uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_port_list(self):
+-        """
+-        Retrieve the current list of vswitch ports.  The list is structured
+-        as dictionary where the key is a port uuid and the value is the port
+-        object.
+-        """
+-        try:
+-            ports = collections.OrderedDict()
+-            port_list = sorted(self.api.get_port_list(), key=port_sort_key)
+-            for port in port_list:
+-                ports[port['uuid']] = port
+-            return ports
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query port list, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_virtual_port_list(self):
+-        """
+-        Retrieve the current list of virtual ports.  All physical ports are
+-        excluded from the list.  The list is structured as dictionary where
+-        the key is a port uuid and the value is the port object.
+-        """
+-        ports = self.get_port_list()
+-        return collections.OrderedDict(
+-            [(uuid, port) for uuid, port in six.iteritems(ports)
+-             if getattr(port, 'neutron', False)])
+-
+-    def get_virtual_port_count(self):
+-        """
+-        Query the number of virtual ports are provisioned in the vswitch.  All
+-        physical ports are excluded from the count.
+-        """
+-        return len(self.get_virtual_port_list())
+-
+-    def get_physical_port_list(self):
+-        """
+-        Retrieve the current list of physical ports.  All virtual ports are
+-        excluded from the list.  The list is structured as dictionary where
+-        the key is a port uuid and the value is the port object.
+-        """
+-        ports = self.get_port_list()
+-        return collections.OrderedDict(
+-            [(uuid, port) for uuid, port in six.iteritems(ports)
+-             if port['type'] == avs_constants.VSWITCH_PHYSICAL_PORT])
+-
+-    def get_interface_list(self):
+-        """
+-        Retrieve the current list of logical interfaces.
+-        The list is structured as dictionary where the key is an interface
+-        uuid and the value is the interface object.  The interface objects are
+-        augmented with a vlan list and/or member list depending on whether the
+-        interface has upper vlans or lower AE members.
+-        """
+-        try:
+-            interfaces = collections.OrderedDict()
+-            tmp = sorted(self.api.get_interface_list(), key=interface_sort_key)
+-            for iface in tmp:
+-                interfaces[iface['uuid']] = iface
+-                if iface['type'] == avs_constants.VSWITCH_VLAN_INTERFACE:
+-                    lower_iface = interfaces[iface['lower-uuid']]
+-                    vlans = getattr(lower_iface, 'vlans', [])
+-                    vlans.append(iface['uuid'])
+-                    setattr(lower_iface, 'vlans', vlans)
+-                elif iface['type'] == avs_constants.VSWITCH_ETHERNET_INTERFACE:
+-                    if 'upper-uuid' in iface:
+-                        upper_iface = interfaces[iface['upper-uuid']]
+-                        members = getattr(upper_iface, 'members', [])
+-                        members.append(iface['uuid'])
+-                        setattr(upper_iface, 'members', members)
+-            return interfaces
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query interface list, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_lacp_interface_list(self):
+-        """
+-        Retrieve the current list of LACP enabled AE logical interfaces as
+-        a tuple of LACP enabled (lower) interfaces and LACP enabled (upper)
+-        AE interfaces.
+-        The lists are structured as a tuple of two interfaces dictionaries,
+-        where the key is an interface uuid and the value is the interface
+-        object.
+-        """
+-        try:
+-            interfaces = {}
+-            ae_interfaces = {}
+-            for interface in self.api.get_lacp_interface_list():
+-                interfaces[interface['uuid']] = interface
+-                ae_interfaces[interface['upper-uuid']] = \
+-                    interface['upper-uuid']
+-            return (interfaces, ae_interfaces)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query LACP interface list, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_router_interface_list(self, interfaces=None):
+-        if interfaces is None:
+-            interfaces = self.get_interface_list()
+-        return collections.OrderedDict(
+-            [(uuid, interface) for uuid, interface in six.iteritems(interfaces)
+-             if interface['type'] == avs_constants.VSWITCH_ROUTER_INTERFACE])
+-
+-    def get_engine_stats(self):
+-        """
+-        Retrieve the current statistics for all engines.
+-        """
+-        try:
+-            return self.api.get_engine_list_stats()
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query engine stats, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_port_stats(self):
+-        """
+-        Retrieve the current statistics for all ports.
+-        """
+-        try:
+-            return self.api.get_port_list_stats()
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query port stats, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_interface_stats(self):
+-        """
+-        Retrieve the current statistics for all interfaces.
+-        """
+-        try:
+-            return self.api.get_interface_list_stats()
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query interface stats, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_network_uuid(self, network_uuid, vlan_id=None):
+-        """
+-        Generate a unique network UUID based on the current network and
+-        optional VLAN ID
+-        """
+-        if vlan_id:
+-            namespace = uuid.UUID(network_uuid)
+-            return str(uuid.uuid5(namespace, "vlan" + str(vlan_id)))
+-        else:
+-            return network_uuid
+-
+-    def get_interface_uuid(self, lower_uuid, vlan_id=None):
+-        """
+-        Generate a unique interface UUID based on the lower interface UUID
+-        and vlan_id
+-        """
+-        if vlan_id:
+-            namespace = uuid.UUID(lower_uuid)
+-            return str(uuid.uuid5(namespace, "vlan" + str(vlan_id)))
+-        else:
+-            return lower_uuid
+-
+-    def get_vxlan_interface_uuid(self, lower_uuid, vxlan_id):
+-        """
+-        Generate a unique VXLAN interface UUID based on the lower interface
+-        UUID and vxlan_id
+-        """
+-        return str(uuid.uuid5(uuid.UUID(lower_uuid), "vxlan" + str(vxlan_id)))
+-
+-    def get_physical_interface_uuid(self, physical_network):
+-        """
+-        Retrieve the uuid value of the physical interface that implements the
+-        provider network named in physical_network.
+-        """
+-        value = self.interface_mappings.get(physical_network)
+-        if not value:
+-            msg = "No interface mapping for {}".format(physical_network)
+-            raise VSwitchManagerError(msg)
+-        return value
+-
+-    def get_provider_interface_uuid(self, lower_uuid, network_type,
+-                                    segmentation_id=None):
+-        """
+-        Generate a unique provider interface UUID.  This needs to be
+-        predictable and repeatible so we derive it from the lower uuid and the
+-        provider interface details.
+-        """
+-        if network_type == 'flat':
+-            return lower_uuid
+-        else:
+-            suffix = "%s-%s" % (str(network_type), str(segmentation_id or 0))
+-            return str(uuid.uuid5(uuid.UUID(lower_uuid), suffix))
+-
+-    def update_port_filters(self, port_uuid, rules):
+-        """
+-        Update the rule filters for the supplied port.
+-        """
+-        LOG.debug("Updating port filters {} {}".format(port_uuid, rules))
+-
+-        try:
+-            bindings = self.api.get_filter_bindings(port_uuid)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to retrieve port {} filter bindings, {}".format(
+-                    port_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-        rule_lookup = {r['uuid']: r for r in rules}
+-
+-        new_rules = set([r['uuid'] for r in rules])
+-        old_rules = set(bindings['rules'])
+-
+-        removed_rules = old_rules - new_rules
+-        added_rules = new_rules - old_rules
+-
+-        for rule_uuid in added_rules:
+-            rule = rule_lookup[rule_uuid]
+-
+-            try:
+-                self.api.add_filter_rule(rule)
+-                self.api.add_filter_binding(rule, port_uuid)
+-            except exceptions.VSwitchError as e:
+-                msg = ("Failed to add port {} filter {}, {}".format(
+-                        port_uuid, rule_uuid, e))
+-                raise VSwitchManagerError(msg)
+-
+-        for rule_uuid in removed_rules:
+-            rule = {'uuid': rule_uuid}
+-
+-            try:
+-                self.api.delete_filter_binding(rule, port_uuid)
+-                self.api.delete_filter_rule(rule)
+-            except exceptions.VSwitchFilterForbiddenError:
+-                LOG.debug("Filter rule {} still in-use".format(rule_uuid))
+-            except exceptions.VSwitchError as e:
+-                msg = ("Failed to remove port {} filter {}, {}".format(
+-                        port_uuid, rule_uuid, e))
+-                raise VSwitchManagerError(msg)
+-
+-    def remove_port_filters(self, port_uuid, rules):
+-        """
+-        Remove the rule filters for the supplied port.
+-        """
+-        LOG.debug("Removing port filters {} {}".format(port_uuid, rules))
+-
+-        for rule in rules:
+-
+-            try:
+-                self.api.delete_filter_binding(rule, port_uuid)
+-            except exceptions.VSwitchFilterNotFoundError:
+-                LOG.debug(("Port {} filter binding {} not found".format(
+-                            port_uuid, rule['uuid'])))
+-            except exceptions.VSwitchError as e:
+-                msg = ("Failed to remove port {} filter binding {}, {}".format(
+-                        port_uuid, rule['uuid'], e))
+-                raise VSwitchManagerError(msg)
+-
+-            try:
+-                self.api.delete_filter_rule(rule)
+-            except exceptions.VSwitchFilterNotFoundError:
+-                LOG.debug("Filter rule {} not found".format(rule['uuid']))
+-            except exceptions.VSwitchFilterForbiddenError:
+-                LOG.debug("Filter rule {} still in-use".format(rule['uuid']))
+-            except exceptions.VSwitchError as e:
+-                msg = ("Failed to remove port {} filter rule {}, {}".format(
+-                        port_uuid, rule['uuid'], e))
+-                raise VSwitchManagerError(msg)
+-
+-    def add_address(self, address, prefixlen, interface_uuid, **kwargs):
+-        """
+-        Create a new IP address on the supplied interface.
+-        """
+-        LOG.debug("Adding IP address {}/{} on {}".format(
+-            address, prefixlen, interface_uuid))
+-
+-        # Create new address
+-        address = {
+-            'interface-uuid': interface_uuid,
+-            'address': str(address),
+-            'prefix-length': prefixlen,
+-        }
+-        for arg in kwargs:
+-            address[arg] = kwargs[arg]
+-        try:
+-            self.api.add_address(address)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add IP address {}, {}".format(address, e))
+-
+-    def delete_address(self, address, prefixlen, interface_uuid):
+-        """
+-        Create an existing IP address from the supplied interface.
+-        """
+-        LOG.debug("Removing IP address {}/{} on {}".format(
+-            address, prefixlen, interface_uuid))
+-
+-        # Create new address
+-        address = {
+-            'interface-uuid': interface_uuid,
+-            'address': str(address),
+-            'prefix-length': prefixlen,
+-        }
+-        try:
+-            self.api.delete_address(address)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to delete IP address {}, {}".format(address, e))
+-
+-    def get_address_list(self, family=None, interface_uuid=None):
+-        """
+-        Retrieve the current list of IP addresses.  The list is structured as
+-        dictionary where the key is an IP address and the value is the
+-        address object.
+-
+-        """
+-        try:
+-            addresses = {}
+-            for address in self.api.get_address_list(
+-                    family=family, interface_uuid=interface_uuid):
+-                addresses[address['address']] = address
+-            return addresses
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query address list, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def add_route(self, router_uuid, prefix, prefixlen,
+-                  interface_uuid=None, gateway=None, replace=False):
+-        """
+-        Create a new route to vswitch.
+-        """
+-        LOG.debug("Adding route {}/{} to {} {} from {}".format(
+-            prefix, prefixlen, interface_uuid, gateway, router_uuid))
+-
+-        nexthop = {}
+-        if interface_uuid:
+-            nexthop['interface-uuid'] = interface_uuid
+-        if gateway:
+-            nexthop['gateway'] = str(gateway)
+-
+-        route = {
+-            'router-uuid': router_uuid,
+-            'prefix': str(prefix),
+-            'prefix-length': prefixlen,
+-            'nexthops': [nexthop],
+-        }
+-
+-        try:
+-            if replace:
+-                self.api.replace_route(route)
+-            else:
+-                self.api.add_route(route)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add route {}, {}".format(route, e))
+-
+-    def delete_route(self, router_uuid, prefix, prefixlen):
+-        """
+-        Create an existing route from vswitch.
+-        """
+-        LOG.debug("Removing route {}/{} from {}".format(
+-            prefix, prefixlen, router_uuid))
+-
+-        route = {
+-            'router-uuid': router_uuid,
+-            'prefix': str(prefix),
+-            'prefix-length': prefixlen,
+-        }
+-
+-        try:
+-            self.api.delete_route(route)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to remove route {}, {}".format(route, e))
+-
+-    def add_neighbour(self, interface_uuid, ip_address, mac_address):
+-        """
+-        Add a static neighbour entry to an interface
+-        """
+-        LOG.debug("Adding neighbour {} for {} on {}".format(
+-                mac_address, ip_address, interface_uuid))
+-        neighbour = {
+-            'mac-address': mac_address,
+-            'address': ip_address,
+-            'interface-uuid': interface_uuid}
+-        try:
+-            self.api.add_neighbour(neighbour)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add neighbour {}, {}".format(neighbour, e))
+-
+-    def delete_neighbour(self, interface_uuid, ip_address):
+-        """
+-        Remove a static neighbour entry from an interface
+-        """
+-        LOG.debug("Removing neighbour for {} from {}".format(
+-                ip_address, interface_uuid))
+-        neighbour = {
+-            'address': ip_address,
+-            'interface-uuid': interface_uuid}
+-        try:
+-            self.api.delete_neighbour(neighbour)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to add delete {}, {}".format(neighbour, e))
+-
+-    def get_neighbours(self, interface_uuid):
+-        """
+-        Retrieve the list of neighbours for a given interface.
+-        """
+-        LOG.debug("Querying neighbours for {}".format(interface_uuid))
+-        try:
+-            return self.api.get_neighbours(interface_uuid)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to query neighbours on {}, {}".format(
+-                    interface_uuid, e))
+-
+-    def get_router_name(self, router_uuid):
+-        """
+-        The plugin does not send us the router name therefore we build one
+-        based on the router uuid.
+-        """
+-        return "rtr-" + router_uuid[:8]
+-
+-    def get_fip_router_name(self, network_uuid):
+-        """
+-        The agent automatically creates a shared router context to represent
+-        what upstream openstack refers to as the FIP namespace.  There is no
+-        name assigned by the plugin so we generate one automatically based on
+-        the external network uuid.
+-        """
+-        return "fip-" + network_uuid[:8]
+-
+-    def get_router_list(self):
+-        """
+-        Retrieve the current list of neutron managed virtual routers.
+-        The list is structured as dictionary where the key is a router
+-        uuid and the value is the router object.
+-        """
+-        try:
+-            routers = {}
+-            for router in self.api.get_router_list():
+-                if getattr(router, 'neutron', False):
+-                    routers[router['uuid']] = router
+-            return routers
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query router list, {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_router(self, uuid):
+-        """
+-        Obtain an router object by uuid.
+-        """
+-        try:
+-            return self.api.get_router(uuid)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to query router {}, {}".format(uuid, e))
+-
+-    def get_router_interfaces(self, uuid):
+-        try:
+-            interfaces = {}
+-            for interface in self.api.get_router_interfaces(uuid):
+-                interfaces[interface['uuid']] = interface
+-            return interfaces
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query router interfaces for {}, {}".
+-                   format(uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_router_routes(self, uuid):
+-        try:
+-            return self.api.get_router_routes(uuid)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query router routes for {}, {}".format(uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_router_fip_addresses(self, uuid):
+-        try:
+-            for addr in self.api.get_address_list():
+-                if (getattr(addr, 'router-uuid', None) == uuid and
+-                        getattr(addr, 'floating-ip', False)):
+-                    yield addr
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query address list for {}, {}".format(uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def add_router(self, uuid, name,
+-                   neutron_managed=False, snat_enabled=False):
+-        """
+-        Create a new virtual router to vswitch.
+-        """
+-        LOG.debug("Adding router {}".format(uuid))
+-        # Determine if the router already exists
+-        try:
+-            router = self.get_router(uuid)
+-        except VSwitchManagerError:
+-            router = None
+-
+-        if not router:
+-            # Create new router
+-            router = {
+-                'uuid': uuid,
+-                'name': name,
+-                'neutron': neutron_managed,
+-                'snat-enabled': snat_enabled
+-            }
+-            try:
+-                self.api.add_router(router)
+-            except exceptions.VSwitchError as e:
+-                raise VSwitchManagerError(
+-                    "Failed to add router {}, {}".format(router, e))
+-
+-    def update_router(self, uuid, snat_enabled=False):
+-        """
+-        Update an existing virtual router to vswitch.
+-        """
+-        LOG.debug("Update router {}".format(uuid))
+-
+-        router = {
+-            'uuid': uuid,
+-            'snat-enabled': snat_enabled
+-        }
+-        try:
+-            self.api.update_router(router)
+-        except exceptions.VSwitchError as e:
+-            raise VSwitchManagerError(
+-                "Failed to update router {}, {}".format(router, e))
+-
+-    def delete_router(self, uuid):
+-        """
+-        Delete an existing virtual router from vswitch.
+-        """
+-        LOG.debug("Deleting router {}".format(uuid))
+-        try:
+-            # Delete the router
+-            router = {'uuid': uuid}
+-            self.api.delete_router(router)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete router {}, {}".format(uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def attach_router_interface(self, router_uuid, interface_uuid):
+-        """
+-        Attach the supplied interface to the router
+-        :param router_uuid: The UUID of the router
+-        :param interface_uuid: The UUID of the interface to attach
+-        :return: None
+-        """
+-        LOG.debug("Attach interface {} from router {}".format(
+-            interface_uuid, router_uuid))
+-
+-        router = {'uuid': router_uuid,
+-                  'interface-uuid': interface_uuid}
+-        try:
+-            self.api.router_attach_interface(router)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to attach router interface {}, {}".format(
+-                router, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def detach_router_interface(self, router_uuid, interface_uuid):
+-        """
+-        Detach the supplied interface from the router
+-        :param router_uuid: The UUID of the router
+-        :param interface_uuid: The UUID of the interface to detach
+-        :return: None
+-        """
+-        LOG.debug("Detach interface {} from router {}".format(
+-            interface_uuid, router_uuid))
+-
+-        router = {'uuid': router_uuid,
+-                  'interface-uuid': interface_uuid}
+-        try:
+-            self.api.router_detach_interface(router)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to detach router interface {}, {}".format(
+-                router, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_dvr_host_macs(self):
+-        """
+-        Query the current set of peer DVR MAC addresses that are known to the
+-        vswitch.
+-        """
+-        LOG.debug("Query DVR host MAC addresses")
+-        try:
+-            return self.api.get_dvr_host_macs()
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query DVR host MAC addresses {}".format(e))
+-            raise VSwitchManagerError(msg)
+-
+-    def update_dvr_host_macs(self, host_macs):
+-        """
+-        Update the current set of peer DVR MAC addresses that are known to the
+-        vswitch.
+-        """
+-        LOG.debug("Update DVR host MAC addresses: {}".format(host_macs))
+-        try:
+-            return self.api.update_dvr_host_macs(host_macs)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to update DVR host MAC addresses {}: {}".format(
+-                    host_macs, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def _convert_protocol_to_avs(self, protocol):
+-        protocol = protocol.lower()
+-        if protocol in AVS_NAT_PROTOCOLS:
+-            return AVS_NAT_PROTOCOLS[protocol]
+-        LOG.warning("No AVS NAT protocol conversion for {}; "
+-                    "trying original value".format(protocol))
+-        return protocol
+-
+-    def add_snat_entry(self, interface_uuid, src_address,
+-                       src_port, nat_port, protocol, **kwargs):
+-        """
+-        Add an IPv4 static SNAT entry.
+-        """
+-        try:
+-            snat = {'interface-uuid': interface_uuid,
+-                    'src-address': src_address,
+-                    'src-proto-key': src_port,
+-                    'nat-proto-key': nat_port,
+-                    'protocol': self._convert_protocol_to_avs(protocol)}
+-            return self.api.add_snat_entry(snat)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add static SNAT entry {}: {}".format(snat, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def delete_snat_entry(self, interface_uuid, src_address,
+-                          src_port, protocol):
+-        """
+-        Delete an IPv4 static SNAT entry.
+-        """
+-        try:
+-            return self.api.delete_snat_entry(interface_uuid,
+-                                              src_address,
+-                                              src_port,
+-                                              protocol)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete static SNAT entry {}:{} {} on {}: {}".
+-                   format(src_address, src_port, protocol, interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_snat_entries(self, interface_uuid, static=True):
+-        """
+-        Get the list of IPv4 SNAT entries for an interface.
+-        """
+-        try:
+-            type_value = 'static' if static else 'dynamic'
+-            for addr in self.api.get_snat_list():
+-                if (static is not None and (addr['type'] != type_value)):
+-                    continue
+-                if addr['interface-uuid'] == interface_uuid:
+-                    yield addr
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query SNAT list for {}, {}".
+-                   format(interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def _send_ping_request(self, body):
+-        for i in range(3):
+-            try:
+-                response = self.api.send_ping_request(body)
+-                ping_id = response['identifier']
+-            except Exception as e:
+-                LOG.warning("send_ping failed with error {}".format(e))
+-                time.sleep(1)
+-                continue
+-            return ping_id
+-        return None
+-
+-    def _get_ping_response(self, ping_id):
+-        check_interval = avs_constants.VSWITCH_PING_RESPONSE_CHECK_INTERVAL
+-        check_multiplier = avs_constants.VSWITCH_PING_RESPONSE_CHECK_MULTIPLIER
+-        check_count = avs_constants.VSWITCH_PING_RESPONSE_CHECK_COUNT
+-        for i in range(check_count):
+-            progress = self.api.get_ping_response(ping_id)
+-            progress = sorted(progress, key=lambda x: x['index'])
+-            for entry in progress or []:
+-                if entry['type'] == 'error':
+-                    return False
+-                elif entry['type'] == 'summary':
+-                    return True
+-            time.sleep(check_interval)
+-            check_interval = check_interval * check_multiplier
+-        progress = self.api.get_ping(ping_id)
+-        progress = sorted(progress, key=lambda x: x['index'])
+-        for entry in progress or []:
+-            if entry['type'] == 'error':
+-                return False
+-            elif entry['type'] == 'summary':
+-                return True
+-        return False
+-
+-    def ping(self, ip_address, interface_uuid, length=64, count=1):
+-        """
+-        Use vswitch API to ping given address from specified interface.
+-        """
+-        body = {'address': ip_address,
+-                'interface': interface_uuid,
+-                'count': count,
+-                'length': length}
+-        ping_id = self._send_ping_request(body)
+-        if ping_id:
+-            return self._get_ping_response(ping_id)
+-        return False
+-
+-    def get_openflow_bridge_uuid(self, network_name):
+-        """
+-        Calculate the uuid value that AVS will be using for a given openflow
+-        bridge name.
+-        """
+-        suffix = "bridge-%s" % network_name
+-        return str(uuid.uuid5(uuid.UUID(tsconfig.host_uuid), suffix))
+-
+-    def add_vtep_endpoint(self, interface_uuid, mac_address, ip_address):
+-        """
+-        Adds a VTEP endpoint entry to direct traffic destined to a given MAC to
+-        the IP address of a remote VTEP instance.
+-        """
+-        try:
+-            endpoint = {'mac-address': mac_address,
+-                        'peer-address': ip_address}
+-            return self.api.add_vtep_endpoint(interface_uuid, endpoint)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add static VTEP endpoint {}: {}".format(
+-                endpoint, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def delete_vtep_endpoint(self, interface_uuid, mac_address):
+-        """
+-        Removes a VTEP endpoint entry.
+-        """
+-        try:
+-            return self.api.delete_vtep_endpoint(interface_uuid, mac_address)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete static VTEP endpoint {} on {}: {}".
+-                   format(mac_address, interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_vtep_endpoints(self, interface_uuid, static=True):
+-        """
+-        Retrieves the current list of VTEP endpoints.
+-        """
+-        try:
+-            type_value = 'static' if static else 'dynamic'
+-            for endpoint in self.api.get_vtep_endpoint_list(interface_uuid):
+-                if (static is not None and (endpoint['type'] != type_value)):
+-                    continue
+-                yield endpoint
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query VTEP endpoint list for {}, {}".
+-                   format(interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def add_vtep_peer(self, interface_uuid, ip_address):
+-        """
+-        Adds a VTEP peer entry to allow broadcast traffic to be directed
+-        to this peer as well as any other peer already registered.
+-        """
+-        try:
+-            peer = {'address': ip_address}
+-            return self.api.add_peer(interface_uuid, peer)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add static VTEP peer {}: {}".format(
+-                peer, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def delete_vtep_peer(self, interface_uuid, ip_address):
+-        """
+-        Removes a VTEP peer entry.
+-        """
+-        try:
+-            return self.api.delete_peer(interface_uuid, ip_address)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete static VTEP endpoint {} on {}: {}".
+-                   format(ip_address, interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_vtep_peers(self, interface_uuid):
+-        """
+-        Retrieves the current list of VTEP endpoints.
+-        """
+-        try:
+-            return self.api.get_peers(interface_uuid)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query VTEP peer list for {}, {}".
+-                   format(interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def add_vtep_ip_endpoint(self, interface_uuid, ip_address, peer_address):
+-        """
+-        Adds a VTEP IP endpoint entry to direct traffic destined to a given
+-        device IP address to a specific remote VTEP instance.
+-        """
+-        try:
+-            endpoint = {'device-address': ip_address,
+-                        'peer-address': peer_address}
+-            return self.api.add_vtep_ip_endpoint(interface_uuid, endpoint)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add static VTEP IP endpoint {}: {}".format(
+-                endpoint, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def delete_vtep_ip_endpoint(self, interface_uuid, ip_address):
+-        """
+-        Removes a VTEP IP endpoint entry.
+-        """
+-        try:
+-            return self.api.delete_vtep_ip_endpoint(interface_uuid, ip_address)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete static VTEP IP endpoint {} on {}: {}".
+-                   format(ip_address, interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_vtep_ip_endpoints(self, interface_uuid):
+-        """
+-        Retrieves the current list of VTEP endpoints.
+-        """
+-        try:
+-            return self.api.get_vtep_ip_endpoint_list(interface_uuid)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query VTEP IP endpoint list for {}, {}".
+-                   format(interface_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_flow_list(self, network_uuid, table_id):
+-        """
+-        Retrieves the current list of flows.
+-        """
+-        try:
+-            return self.api.get_flow_list(network_uuid, table_id)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query flow list for {}, {}".
+-                   format(network_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_flow(self, network_uuid, table_id, cookie):
+-        """
+-        Retrieves a flow from a given table id on a given network.
+-        """
+-        try:
+-            return self.api.get_flow(network_uuid, table_id, cookie)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query flow list for {}, {}".
+-                   format(cookie, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def add_flow(self, network_uuid, table_id, rule):
+-        """
+-        Adds a flow to a given table id on a given network.
+-        """
+-        try:
+-            return self.api.add_flow(network_uuid, table_id, rule)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add flow on network {}, {}".
+-                   format(network_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def delete_flow(self, network_uuid, table_id, cookie):
+-        """
+-        Deletes a flow from a given table id on a given network.
+-        """
+-        try:
+-            return self.api.delete_flow(network_uuid, table_id, cookie)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete flow for {}, {}".
+-                   format(cookie, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_flow_group_list(self, network_uuid):
+-        """
+-        Retrieves the current list of flow groups.
+-        """
+-        try:
+-            return self.api.get_flow_group_list(network_uuid)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query flow group list for {}, {}".
+-                   format(network_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def get_flow_group(self, network_uuid, group_id):
+-        """
+-        Retrieves a flow group on a given network.
+-        """
+-        try:
+-            return self.api.get_flow_group(network_uuid, group_id)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to query flow group for {}, {}".
+-                   format(group_id, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def add_flow_group(self, network_uuid, group):
+-        """
+-        Adds a flow group on a given network.
+-        """
+-        try:
+-            return self.api.add_flow_group(network_uuid, group)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to add flow group on network {}, {}".
+-                   format(network_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def delete_flow_group(self, network_uuid, group_id):
+-        """
+-        Deletes a flow group on a given network.
+-        """
+-        try:
+-            return self.api.delete_flow_group(network_uuid, group_id)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete flow group on network {}, {}".
+-                   format(network_uuid, e))
+-            raise VSwitchManagerError(msg)
+-
+-    def update_flow_group(self, network_uuid, group_id, group):
+-        """
+-        Updates a flow group on a given network.
+-        """
+-        try:
+-            return self.api.update_flow_group(network_uuid, group_id, group)
+-        except exceptions.VSwitchError as e:
+-            msg = ("Failed to update flow group on network {}, {}".
+-                   format(network_uuid, e))
+-            raise VSwitchManagerError(msg)
+diff --git a/neutron/api/rpc/handlers/securitygroups_rpc.py b/neutron/api/rpc/handlers/securitygroups_rpc.py
+index 44d0ecf..670d33e 100644
+--- a/neutron/api/rpc/handlers/securitygroups_rpc.py
++++ b/neutron/api/rpc/handlers/securitygroups_rpc.py
+@@ -14,8 +14,11 @@
+ 
+ import collections
+ 
++import eventlet
++
+ from neutron_lib.plugins import directory
+ from neutron_lib.utils import net
++from oslo_config import cfg
+ from oslo_log import log as logging
+ import oslo_messaging
+ 
+@@ -25,10 +28,14 @@ from neutron.callbacks import registry
+ from neutron.common import constants
+ from neutron.common import rpc as n_rpc
+ from neutron.common import topics
++from neutron.conf.agent import securitygroups_rpc as sc_cfg
+ from neutron.db import securitygroups_rpc_base as sg_rpc_base
+ 
++
+ LOG = logging.getLogger(__name__)
+ 
++sc_cfg.register_securitygroups_opts()
++
+ 
+ class SecurityGroupServerRpcApi(object):
+     """RPC client for security group methods in the plugin.
+@@ -133,6 +140,9 @@ class SecurityGroupAgentRpcApiMixin(object):
+     #   1.1 Support Security Group RPC
+     SG_RPC_VERSION = "1.1"
+ 
++    defer_notify_suppress = False
++    defer_notify_delay = cfg.CONF.SECURITYGROUP.notify_interval
++
+     def _get_security_group_topic(self):
+         return topics.get_topic_name(self.topic,
+                                      topics.SECURITY_GROUP,
+@@ -158,8 +168,8 @@ class SecurityGroupAgentRpcApiMixin(object):
+         cctxt.cast(context, 'security_groups_member_updated',
+                    security_groups=security_groups)
+ 
+-    def security_groups_provider_updated(self, context,
+-                                         devices_to_update=None):
++    def _security_groups_provider_updated(self, context,
++                                          devices_to_update=None):
+         """Notify provider updated security groups."""
+         # TODO(kevinbenton): remove in Queens
+         # NOTE(ihrachys) the version here should really be 1.3, but since we
+@@ -177,6 +187,32 @@ class SecurityGroupAgentRpcApiMixin(object):
+         cctxt.cast(context, 'security_groups_provider_updated',
+                    devices_to_update=devices_to_update)
+ 
++    def security_groups_provider_updated(self, context,
++                                         devices_to_update=None):
++        """Notify provider updated security groups."""
++        if not self.defer_notify_delay:
++            self._security_groups_provider_updated(
++                context, devices_to_update=devices_to_update)
++            return
++        # defer the notification, subsequent calls will not be sent
++        # until the previous notification has completed
++        if not self.defer_notify_suppress:
++            self.defer_notify_suppress = True
++            LOG.debug("spawning deferred security_groups_provider_updated")
++            try:
++                eventlet.spawn_after(self.defer_notify_delay,
++                                     self._security_groups_provider_updated,
++                                     context,
++                                     devices_to_update=devices_to_update)
++            except Exception:
++                LOG.error("failed to spawn "
++                          "security_groups_provider_updated thread")
++                self._security_groups_provider_updated(
++                    context, devices_to_update=devices_to_update)
++                self.defer_notify_suppress = False
++        else:
++            LOG.debug("suppressing security_groups_provider_updated")
++
+ 
+ class SecurityGroupAgentRpcCallbackMixin(object):
+     """A mix-in that enable SecurityGroup support in agent implementations.
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index 452504a..2e010f1 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -280,8 +280,6 @@ PROVIDERNET_GRE = 'gre'
+ 
+ PROVIDERNET_VXLAN_DYNAMIC = 'dynamic'
+ PROVIDERNET_VXLAN_STATIC = 'static'
+-PROVIDERNET_VXLAN_EVPN = 'evpn'
+-# TODO(alegacy): add evpn to valid list.
+ PROVIDERNET_VXLAN_MODES = [PROVIDERNET_VXLAN_DYNAMIC,
+                            PROVIDERNET_VXLAN_STATIC]
+ 
+@@ -344,3 +342,5 @@ NONE_VLAN_TAG = 0
+ 
+ # PCI-Passthrough support
+ PORT_STATUS_UNKNOWN = 'UNKNOWN'
++
++WRS_FIELD_PREFIX = 'wrs-'
+diff --git a/neutron/conf/agent/securitygroups_rpc.py b/neutron/conf/agent/securitygroups_rpc.py
+index b49592e..17a11fd 100644
+--- a/neutron/conf/agent/securitygroups_rpc.py
++++ b/neutron/conf/agent/securitygroups_rpc.py
+@@ -13,6 +13,12 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
++# Copyright (c) 2013-2014,2017 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ 
+ from oslo_config import cfg
+@@ -36,7 +42,16 @@ security_group_opts = [
+         default=True,
+         help=_('Use ipset to speed-up the iptables based security groups. '
+                'Enabling ipset support requires that ipset is installed on L2 '
+-               'agent node.'))
++               'agent node.')),
++    cfg.BoolOpt(
++        'ensure_default_security_group',
++        default=True,
++        help=_("Enable/Disable association of default security group "
++               "on port during port creation")),
++    cfg.IntOpt(
++        'notify_interval',
++        default=0,
++        help=_('Throttled firewall rule update notification interval')),
+ ]
+ 
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD b/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD
+index b0d0e20..bd414f1 100644
+--- a/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD
++++ b/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD
+@@ -1 +1 @@
+-5c85685d616d
++cgts_7354
+diff --git a/neutron/db/securitygroups_rpc_base.py b/neutron/db/securitygroups_rpc_base.py
+index 55406ed..afbce41 100644
+--- a/neutron/db/securitygroups_rpc_base.py
++++ b/neutron/db/securitygroups_rpc_base.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ import netaddr
+ from neutron_lib import constants as const
+@@ -323,6 +330,9 @@ class SecurityGroupInfoAPIMixin(object):
+ 
+     def _apply_provider_rule(self, context, ports):
+         for port in ports.values():
++            # DO NOT CREATE GENERATED RULES IF NO RULES CONFIGURED
++            if not port['security_group_rules']:
++                continue
+             self._add_ingress_ra_rule(port)
+             self._add_ingress_dhcp_rule(port)
+ 
+diff --git a/neutron/extensions/wrs_binding.py b/neutron/extensions/wrs_binding.py
+index 9190802..401d81f 100644
+--- a/neutron/extensions/wrs_binding.py
++++ b/neutron/extensions/wrs_binding.py
+@@ -23,15 +23,19 @@
+ from neutron_lib.api import extensions as api_extensions
+ from neutron_lib import constants
+ 
++from neutron.common import constants as n_const
++
+ # The MTU value is associated to the network to which the port is attached
+-MTU = 'wrs-binding:mtu'
++# wrs-binding:mtu
++MTU = '%sbinding:mtu' % n_const.WRS_FIELD_PREFIX
+ 
+ # The VIF model describes the type of emulated device in the guest.  This is
+ # analoguous to the hw_vif_model property in Nova.  For clarity, the
+ # 'vif_type' above represents the type of virtual switch that runs on the
+ # host, and this field represents type type of hardware emulated in the
+ # guest.
+-VIF_MODEL = 'wrs-binding:vif_model'
++# wrs-binding:vif_model
++VIF_MODEL = '%sbinding:vif_model' % n_const.WRS_FIELD_PREFIX
+ 
+ VIF_MODEL_DEFAULT = 'default'
+ VIF_MODEL_VIRTIO = 'virtio'
+@@ -39,7 +43,8 @@ VIF_MODEL_PCI_PASSTHROUGH = 'pci-passthrough'
+ 
+ # The mac_filtering attribute describes whether the MAC filtering was enabled
+ # as an attribute of the project that this port is owned by.
+-MAC_FILTERING = 'wrs-binding:mac_filtering'
++# wrs-binding:mac_filtering
++MAC_FILTERING = '%sbinding:mac_filtering' % n_const.WRS_FIELD_PREFIX
+ 
+ VIF_TYPE_AVS = 'avs'
+ 
+diff --git a/neutron/extensions/wrs_net.py b/neutron/extensions/wrs_net.py
+index a232381..e241c62 100644
+--- a/neutron/extensions/wrs_net.py
++++ b/neutron/extensions/wrs_net.py
+@@ -24,12 +24,16 @@ from oslo_log import log as logging
+ 
+ from neutron_lib.api import extensions as api_extensions
+ 
++from neutron.common import constants as n_const
++
+ 
+ LOG = logging.getLogger(__name__)
+ 
+-VLAN = 'wrs-net:vlan_id'
++# wrs-net:vlan_id
++VLAN = '%snet:vlan_id' % n_const.WRS_FIELD_PREFIX
+ 
+-HOST = 'wrs-net:host'
++# wrs-net:host
++HOST = '%snet:host' % n_const.WRS_FIELD_PREFIX
+ 
+ 
+ EXTENDED_ATTRIBUTES_2_0 = {
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index e9f6052..3d3cb76 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -58,11 +58,15 @@ def _validate_ip_mcast_address(data, valid_values=None):
+ 
+ validators.add_validator('type:ip_mcast_address', _validate_ip_mcast_address)
+ 
+-NETWORK_TYPE = 'wrs-provider:network_type'
+-PHYSICAL_NETWORK = 'wrs-provider:physical_network'
+-SEGMENTATION_ID = 'wrs-provider:segmentation_id'
++# wrs-provider:network_type
++# wrs-provider:physical_network
++# wrs-provider:segmentation_id
++NETWORK_TYPE = '%sprovider:network_type' % n_const.WRS_FIELD_PREFIX
++PHYSICAL_NETWORK = '%sprovider:physical_network' % n_const.WRS_FIELD_PREFIX
++SEGMENTATION_ID = '%sprovider:segmentation_id' % n_const.WRS_FIELD_PREFIX
+ ATTRIBUTES = [NETWORK_TYPE, PHYSICAL_NETWORK, SEGMENTATION_ID]
+-MTU = 'wrs-provider:mtu'
++# wrs-provider:mtu
++MTU = '%sprovider:mtu' % n_const.WRS_FIELD_PREFIX
+ 
+ EXTENDED_ATTRIBUTES_2_0 = {
+     'subnets': {
+diff --git a/neutron/extensions/wrs_tm.py b/neutron/extensions/wrs_tm.py
+index fd31dcc..04e9f7d 100644
+--- a/neutron/extensions/wrs_tm.py
++++ b/neutron/extensions/wrs_tm.py
+@@ -29,6 +29,7 @@ from neutron._i18n import _
+ from neutron.api import extensions
+ from neutron.api.v2 import attributes as attr
+ from neutron.api.v2 import base
++from neutron.common import constants as n_const
+ 
+ import six
+ 
+@@ -59,7 +60,8 @@ RESOURCE_ATTRIBUTE_MAP = {
+     },
+ }
+ 
+-QOS = "wrs-tm:qos"
++# wrs-tm:qos
++QOS = "%stm:qos" % n_const.WRS_FIELD_PREFIX
+ 
+ EXTENDED_ATTRIBUTES_2_0 = {
+     'ports': {QOS: {'allow_post': True,
+diff --git a/neutron/opts.py b/neutron/opts.py
+index 0ff219d..3ab9d89 100644
+--- a/neutron/opts.py
++++ b/neutron/opts.py
+@@ -60,6 +60,7 @@ import neutron.extensions.l3
+ import neutron.extensions.securitygroup
+ import neutron.plugins.ml2.config
+ import neutron.plugins.ml2.drivers.mech_sriov.agent.common.config
++import neutron.plugins.wrs.agent.avs.agent
+ import neutron.plugins.wrs.drivers.mech_vswitch
+ import neutron.setting
+ import neutron.wsgi
+@@ -322,8 +323,15 @@ def list_pnet_connectivity_opts():
+     ]
+ 
+ 
++def list_avs_agent_opts():
++    return [
++        ('securitygroup',
++         neutron.conf.agent.securitygroups_rpc.security_group_opts)
++    ]
++
++
+ def list_vhost_opts():
+     return [
+         ('vhost',
+-         neutron.plugins.wrs.drivers.mech_vswitch.VHOST_OPTS)
++         neutron.conf.agent.securitygroups_rpc.security_group_opts)
+     ]
+diff --git a/neutron/pecan_wsgi/app.py b/neutron/pecan_wsgi/app.py
+index 279b3f3..dc6d97c 100644
+--- a/neutron/pecan_wsgi/app.py
++++ b/neutron/pecan_wsgi/app.py
+@@ -33,6 +33,7 @@ def v2_factory(global_config, **local_config):
+         hooks.ContextHook(),  # priority 95
+         hooks.ExceptionTranslationHook(),  # priority 100
+         hooks.BodyValidationHook(),  # priority 120
++        hooks.WrsFieldsHook(),  # priority 121
+         hooks.OwnershipValidationHook(),  # priority 125
+         hooks.QuotaEnforcementHook(),  # priority 130
+         hooks.NotifierHook(),  # priority 135
+diff --git a/neutron/pecan_wsgi/hooks/__init__.py b/neutron/pecan_wsgi/hooks/__init__.py
+index e557988..2a3a668 100644
+--- a/neutron/pecan_wsgi/hooks/__init__.py
++++ b/neutron/pecan_wsgi/hooks/__init__.py
+@@ -22,6 +22,7 @@ from neutron.pecan_wsgi.hooks import query_parameters
+ from neutron.pecan_wsgi.hooks import quota_enforcement
+ from neutron.pecan_wsgi.hooks import translation
+ from neutron.pecan_wsgi.hooks import userfilters
++from neutron.pecan_wsgi.hooks import wrs_fields
+ 
+ 
+ ExceptionTranslationHook = translation.ExceptionTranslationHook
+@@ -33,3 +34,4 @@ QuotaEnforcementHook = quota_enforcement.QuotaEnforcementHook
+ NotifierHook = notifier.NotifierHook
+ QueryParametersHook = query_parameters.QueryParametersHook
+ UserFilterHook = userfilters.UserFilterHook
++WrsFieldsHook = wrs_fields.WrsFieldsHook
+diff --git a/neutron/pecan_wsgi/hooks/wrs_fields.py b/neutron/pecan_wsgi/hooks/wrs_fields.py
+new file mode 100644
+index 0000000..cb87906
+--- /dev/null
++++ b/neutron/pecan_wsgi/hooks/wrs_fields.py
+@@ -0,0 +1,65 @@
++# All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License"); you may
++# not use this file except in compliance with the License. You may obtain
++# a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++# Copyright (c) 2017-2018 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from neutron.common import constants as n_const
++from pecan import hooks
++
++
++class WrsFieldsHook(hooks.PecanHook):
++
++    # Do this at around the same as body validation hook
++    # we use this to strip out wrs- attributes when the request
++    # comes from a non-wrs client
++    # this is part of compliance to refstack, tempest, functest etc
++    priority = 121
++
++    def after(self, state):
++        # filter out wrs fields when the request does not
++        # comes from a wrs client
++        if state.request.headers.get('wrs-header') is not None:
++            return
++
++        try:
++            data = state.response.json
++        except ValueError:
++            return
++        resource = state.request.context.get('resource')
++        collection = state.request.context.get('collection')
++        if collection not in data and resource not in data:
++            return
++        is_single = resource in data
++        key = resource if resource in data else collection
++        if is_single:
++            data[key] = self._filter_item(
++                state.response.json[key])
++        else:
++            data[key] = [
++                self._filter_item(i)
++                for i in state.response.json[key]
++            ]
++        state.response.json = data
++
++    def _filter_item(self, item):
++        return {
++            field: value
++            for field, value in item.items()
++            if not field.startswith(n_const.WRS_FIELD_PREFIX)
++        }
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index c0a0be7..ed127be 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -1450,7 +1450,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             attrs[addr_pair.ADDRESS_PAIRS] = []
+ 
+         if port_security:
+-            self._ensure_default_security_group_on_port(context, port)
++            if cfg.CONF.SECURITYGROUP.ensure_default_security_group:
++                self._ensure_default_security_group_on_port(context, port)
+         elif self._check_update_has_security_groups(port):
+             raise psec_exc.PortSecurityAndIPRequiredForSecurityGroups()
+ 
+diff --git a/neutron/plugins/wrs/agent/avr/__init__.py b/neutron/plugins/wrs/agent/avr/__init__.py
+index 8b13789..e69de29 100644
+--- a/neutron/plugins/wrs/agent/avr/__init__.py
++++ b/neutron/plugins/wrs/agent/avr/__init__.py
+@@ -1 +0,0 @@
+-
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index 8b13789..15ac378 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -1 +1,14 @@
++import os
++import time
+ 
++def main():
++    try:
++        os.remove("/etc/pmon.d/neutron-avr-agent.conf")
++    except: 
++        pass 
++
++    while True:
++        time.sleep(100)
++
++if __name__ == "__main__":
++    main()
+diff --git a/neutron/plugins/wrs/agent/avs/__init__.py b/neutron/plugins/wrs/agent/avs/__init__.py
+index 8b13789..e69de29 100644
+--- a/neutron/plugins/wrs/agent/avs/__init__.py
++++ b/neutron/plugins/wrs/agent/avs/__init__.py
+@@ -1 +0,0 @@
+-
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 8b13789..caa1d31 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1 +1,14 @@
++import os
++import time
+ 
++def main():
++    try:
++        os.remove("/etc/pmon.d/neutron-avs-agent.conf")
++    except:
++        pass
++    
++    while True:
++        time.sleep(100)
++
++if __name__ == "__main__":
++    main()
+diff --git a/neutron/plugins/wrs/agent/avs/dvr.py b/neutron/plugins/wrs/agent/avs/dvr.py
+index 8b13789..e69de29 100644
+--- a/neutron/plugins/wrs/agent/avs/dvr.py
++++ b/neutron/plugins/wrs/agent/avs/dvr.py
+@@ -1 +0,0 @@
+-
+diff --git a/neutron/plugins/wrs/agent/avs/sfc.py b/neutron/plugins/wrs/agent/avs/sfc.py
+index 8b13789..e69de29 100644
+--- a/neutron/plugins/wrs/agent/avs/sfc.py
++++ b/neutron/plugins/wrs/agent/avs/sfc.py
+@@ -1 +0,0 @@
+-
+diff --git a/neutron/plugins/wrs/drivers/firewall.py b/neutron/plugins/wrs/drivers/firewall.py
+new file mode 100644
+index 0000000..00754cd
+--- /dev/null
++++ b/neutron/plugins/wrs/drivers/firewall.py
+@@ -0,0 +1,174 @@
++# Copyright (c) 2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import uuid
++
++import netaddr
++
++from oslo_log import log as logging
++
++from neutron.agent import firewall
++from neutron_lib import constants as n_const
++
++LOG = logging.getLogger(__name__)
++
++DIRECTION_IP_PREFIX = {'ingress': 'source_ip_prefix',
++                       'egress': 'dest_ip_prefix'}
++
++METADATA_DEFAULT_PREFIX = 32
++METADATA_DEFAULT_IP = '169.254.169.254'
++METADATA_DEFAULT_CIDR = '%s/%d' % (METADATA_DEFAULT_IP,
++                                   METADATA_DEFAULT_PREFIX)
++METADATA_DEFAULT_PORT = 80
++
++
++class VSwitchFirewallDriver(firewall.FirewallDriver):
++    """VSwitch Firewall Driver."""
++
++    vswitch_mgr = None
++
++    def __init__(self):
++        # list of port which has security groups
++        self.filtered_ports = {}
++
++    def add_ingress_metadata_rule(self, port):
++        rule = {'direction': 'ingress',
++                'ethertype': n_const.IPv4,
++                'protocol': 'tcp',
++                'source_ip_prefix': METADATA_DEFAULT_CIDR,
++                'port_range_min': METADATA_DEFAULT_PORT,
++                'port_range_max': METADATA_DEFAULT_PORT}
++        #Required to avoid duplicates of rule
++        if rule not in port['security_group_rules']:
++            port['security_group_rules'].append(rule)
++
++    def register_manager(self, manager):
++        self.vswitch_mgr = manager
++
++    def update_security_group_rules(self, sg_id, sg_rules):
++        LOG.debug("Update rules of security group (%s)", sg_id)
++
++    def update_security_group_members(self, sg_id, sg_members):
++        LOG.debug("Update members of security group (%s)", sg_id)
++
++    def prepare_port_filter(self, port):
++        LOG.debug("Preparing port (%s) filter", port['device'])
++        self.filtered_ports[port['device']] = port
++        self._update_port_rules(port)
++
++    def update_port_filter(self, port):
++        LOG.debug("Update port (%s) filter", port['device'])
++        self.filtered_ports[port['device']] = port
++        self._update_port_rules(port)
++
++    def remove_port_filter(self, port):
++        LOG.debug("Remove port (%s) filter", port['device'])
++        self.filtered_ports.pop(port['device'], None)
++        self._remove_port_rules(port)
++
++    @property
++    def ports(self):
++        return self.filtered_ports
++
++    def _update_port_rules(self, port):
++        rules = []
++        if port['security_group_rules']:
++            self.add_ingress_metadata_rule(port)
++        for sg_rule in port['security_group_rules']:
++            rules.append(self._convert_security_group_rule(sg_rule))
++        self.vswitch_mgr.update_port_filters(port['id'], rules)
++
++    def _remove_port_rules(self, port):
++        rules = []
++        for sg_rule in port['security_group_rules']:
++            rules.append({'uuid': sg_rule['id']})
++        self.vswitch_mgr.remove_port_filters(port['id'], rules)
++
++    @classmethod
++    def _convert_security_group_rule(cls, sg_rule):
++
++        # build match criteria
++        direction = str(sg_rule.get('direction')).lower()
++        ethertype = str(sg_rule.get('ethertype')).lower()
++
++        match = {
++            "direction": direction,
++            "ethernet": {
++                "type-name": ethertype
++            }
++        }
++
++        ip_protocol = sg_rule.get('protocol', None)
++        ip_prefix = sg_rule.get(DIRECTION_IP_PREFIX[direction], None)
++        if ip_protocol or ip_prefix:
++            match['ip'] = {}
++            if ip_protocol:
++                if ip_protocol in ["tcp", "udp"]:
++                    match['ip']['protocol-name'] = ip_protocol
++
++                    # setup destination port range
++                    port_min = sg_rule.get('port_range_min', None)
++                    port_max = sg_rule.get('port_range_max', None)
++                    if port_min is not None:
++                        match.setdefault(ip_protocol, {})
++                        match[ip_protocol]['dst-port-min'] = port_min
++                    if port_max is not None:
++                        match.setdefault(ip_protocol, {})
++                        match[ip_protocol]['dst-port-max'] = port_max
++
++                elif ip_protocol == "icmp":
++                    if ethertype == n_const.IPv4.lower():
++                        match['ip']['protocol-name'] = "icmpv4"
++                    else:
++                        match['ip']['protocol-name'] = "icmpv6"
++
++                    # setup icmp type/code (stored in min/max range field)
++                    icmp_type = sg_rule.get('port_range_min', None)
++                    icmp_code = sg_rule.get('port_range_max', None)
++                    if (icmp_type is not None) and (icmp_code is not None):
++                        match['icmp'] = {
++                            'type': icmp_type,
++                            'code': icmp_code
++                        }
++                else:
++                    # custom protocol, if it is not valid, then an exception
++                    # will be raised
++                    match['ip']['protocol-value'] = int(ip_protocol)
++
++            if ip_prefix:
++                ip_network = netaddr.IPNetwork(ip_prefix)
++                match['ip']['remote-network'] = {
++                    'family': 'ipv{}'.format(ip_network.version),
++                    'prefix-length': ip_network.prefixlen,
++                    'address': str(ip_network.ip)
++                }
++
++        # generate a unique rule identifier for generated rule
++        rule_id = str(uuid.uuid5(uuid.NAMESPACE_OID,
++                                 str(match).encode('utf-8')))
++        sg_rule['id'] = rule_id
++
++        rule = {"uuid": rule_id, "match": match}
++
++        LOG.debug("sg_rule {} converted to rule {}".format(sg_rule, rule))
++
++        return rule
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index d73f3be..a33a121 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -99,6 +99,21 @@ class DefaultFmDriver(fm.FmDriver):
+                                     agent_id)
+ 
+     @staticmethod
++    def _get_bgp_peer_entity_type_id():
++        return "{}.{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                 fm_constants.FM_ENTITY_TYPE_AGENT,
++                                 fm_constants.FM_ENTITY_TYPE_BGP_PEER)
++
++    @staticmethod
++    def _get_bgp_peer_entity_instance_id(host_id, agent_id, bgp_peer_id):
++        return "{}={}.{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                          host_id,
++                                          fm_constants.FM_ENTITY_TYPE_AGENT,
++                                          agent_id,
++                                          fm_constants.FM_ENTITY_TYPE_BGP_PEER,
++                                          bgp_peer_id)
++
++    @staticmethod
+     def _get_ml2_driver_entity_type_id():
+         return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
+                               fm_constants.FM_ENTITY_TYPE_ML2DRIVER)
+@@ -283,6 +298,44 @@ class DefaultFmDriver(fm.FmDriver):
+                                                                 agent_id)
+         self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_AGENT,
+                                 entity_instance_id)
++        self.fm_api.clear_all("%s.bgp-peer" % entity_instance_id)
++
++    def report_bgp_peer_down_fault(self, host_id, agent_id, bgp_peer_id):
++        """
++        Generate a fault management alarm condition for BGP peer down
++        """
++        entity_type_id = self._get_bgp_peer_entity_type_id()
++        entity_instance_id = self._get_bgp_peer_entity_instance_id(host_id,
++                                                                   agent_id,
++                                                                   bgp_peer_id)
++        reason_text = (_("Dynamic routing agent %(agent_id)s lost connectivity"
++                         " to peer %(bgp_peer_id)s.") %
++                       {"agent_id": agent_id, "bgp_peer_id": bgp_peer_id})
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_BGP_PEER,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_constants.FM_ALARM_SEVERITY_MAJOR,
++            reason_text=reason_text,
++            alarm_type=fm_constants.FM_ALARM_TYPE_7,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
++            proposed_repair_action=(
++                _("If condition persists, fix connectivity to peer.")),
++            service_affecting=True,
++            suppression=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_bgp_peer_down_fault(self, host_id, agent_id, bgp_peer_id):
++        """
++        Clear a fault management alarm condition for BGP peer down
++        """
++        entity_instance_id = self._get_bgp_peer_entity_instance_id(host_id,
++                                                                   agent_id,
++                                                                   bgp_peer_id)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_BGP_PEER,
++                                entity_instance_id)
+ 
+     def report_ml2_driver_fault(self, hostname, driver, reason):
+         """
+diff --git a/neutron/plugins/wrs/drivers/mech_vswitch.py b/neutron/plugins/wrs/drivers/mech_vswitch.py
+index 6f78a1c..431bcf5 100644
+--- a/neutron/plugins/wrs/drivers/mech_vswitch.py
++++ b/neutron/plugins/wrs/drivers/mech_vswitch.py
+@@ -1,198 +1,6 @@
+-# Copyright (c) 2014 OpenStack Foundation
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-#
+-# Copyright (c) 2013-2015 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+-
+-from oslo_log import log as logging
+-from tsconfig import tsconfig
+-
+-from neutron_lib.api.definitions import portbindings
+-
+-from neutron._i18n import _
+-from neutron.agent import securitygroups_rpc
+-from neutron.callbacks import events
+-from neutron.callbacks import registry
+-from neutron.common import constants
+-from neutron.db import segments_db
+-from neutron.extensions import external_net
+-from neutron.extensions import wrs_binding
+-from neutron.extensions import wrs_provider
+-from neutron.plugins.ml2 import driver_api as api
+ from neutron.plugins.ml2.drivers import mech_agent
+-from neutron.plugins.wrs.drivers import trunk_vswitch
+-from neutron.services.trunk import constants as trunk_constants
+-from oslo_config import cfg
+-
+-LOG = logging.getLogger(__name__)
+-
+-VHOST_OPTS = [
+-    cfg.BoolOpt('vhost_user_enabled', default=True,
+-               help=_('Enable vhost-user backed virtio devices')),
+-    cfg.StrOpt('vhost_user_socket_path',
+-               default='/var/run/vswitch',
+-               help=_("Where to store vhost-user unix socket")),
+-    cfg.StrOpt('vhost_user_socket_prefix',
+-               default='usvhost',
+-               help=_("vhost-user unix socket name prefix")),
+-]
+-
+-CONF = cfg.CONF
+-CONF.register_opts(VHOST_OPTS, "vhost")
+-
+-VHOST_USER_MODE = portbindings.VHOST_USER_MODE
+-VHOST_USER_MODE_CLIENT = portbindings.VHOST_USER_MODE_CLIENT
+-VHOST_USER_SOCKET = portbindings.VHOST_USER_SOCKET
+-VHOST_USER_ENABLED = wrs_binding.VHOST_USER_ENABLED
+-
+ 
+ class VSwitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
+-    """Attach to networks using Wind River vSwitch L2 agent.
+-
+-    The VSwitchMechanismDriver integrates the ml2 plugin with the
+-    vswitch L2 agent. Port binding with this driver requires the
+-    vswitch agent to be running on the port's host, and that agent
+-    to have connectivity to at least one segment of the port's
+-    network.
+-    """
+-
+-    def is_sdn_enabled(self):
+-        return bool(tsconfig.sdn_enabled.lower() == 'yes')
+-
+-    def _check_segment_compatibility_for_sdn(self, context):
+-        """SDN controllers are expected to implicitly or explicitly set the
+-        destination address of all VXLAN packets therefore using multicast or
+-        evpn is not supported/possible.  Eliminate confusion by blocking it
+-        here when the network is created.
+-        """
+-        for s in context.network_segments:
+-            if s[segments_db.NETWORK_TYPE] != constants.PROVIDERNET_VXLAN:
+-                continue
+-            if not context._plugin.is_static_vxlan_segment(
+-                    context.context,
+-                    s[segments_db.PHYSICAL_NETWORK],
+-                    s[segments_db.SEGMENTATION_ID]):
+-                raise wrs_provider.ProviderNetDynamicVxlanNotSupported()
+-
+-    def update_network_precommit(self, context):
+-        super(VSwitchMechanismDriver, self).update_network_precommit(context)
+-        network = context.current
+-        original = context.original
+-        if original[external_net.EXTERNAL] == network[external_net.EXTERNAL]:
+-            return  # no change
+-        if not network[external_net.EXTERNAL]:
+-            return  # not external; no further action required
+-        if not any(s[segments_db.NETWORK_TYPE] == constants.PROVIDERNET_VXLAN
+-                   for s in context.network_segments):
+-            return  # no vxlan segments; no further action required
+-
+-    def create_network_precommit(self, context):
+-        super(VSwitchMechanismDriver, self).create_network_precommit(context)
+-        if not any(s[segments_db.NETWORK_TYPE] == constants.PROVIDERNET_VXLAN
+-                   for s in context.network_segments):
+-            return  # no vxlan segments; no further action required
+-        if self.is_sdn_enabled():
+-            self._check_segment_compatibility_for_sdn(context)
+ 
+     def __init__(self):
+-        sg_enabled = securitygroups_rpc.is_firewall_enabled()
+-        vif_details = {portbindings.CAP_PORT_FILTER: sg_enabled}
+-        super(VSwitchMechanismDriver, self).__init__(
+-            constants.AGENT_TYPE_WRS_VSWITCH,
+-            wrs_binding.VIF_TYPE_AVS,
+-            vif_details)
+-        self.trunk_driver = None
+-        registry.subscribe(self.register_trunk_driver,
+-                           trunk_constants.TRUNK_PLUGIN, events.AFTER_INIT)
+-
+-    def register_trunk_driver(self, resource, event, trigger, **kwargs):
+-        self.trunk_driver = trunk_vswitch.VSwitchTrunkDriver.create()
+-        self.trunk_driver.register(resource, event, trigger, **kwargs)
+-
+-    def try_to_bind_segment_for_agent(self, context, segment, agent):
+-        if self.check_segment_for_agent(segment, agent):
+-            vif_details = self.vif_details.copy()
+-            if self.check_vhostuser(context):
+-                port = context.current
+-                vif_model = port.get(wrs_binding.VIF_MODEL)
+-                if vif_model == wrs_binding.VIF_MODEL_VIRTIO:
+-                    sock_path = ("%s/%s-%s" %
+-                                 (CONF.vhost.vhost_user_socket_path,
+-                                  CONF.vhost.vhost_user_socket_prefix,
+-                                  port['id']))
+-                    vif_details[VHOST_USER_MODE] = VHOST_USER_MODE_CLIENT
+-                    vif_details[VHOST_USER_SOCKET] = sock_path
+-            else:
+-                vif_details[VHOST_USER_ENABLED] = False
+-
+-            context.set_binding(segment[api.ID],
+-                                self.vif_type,
+-                                vif_details)
+-            return True
+-        else:
+-            return False
+-
+-    def get_allowed_network_types(self, agent=None):
+-        """Return the agent's or driver's allowed network types."""
+-        # The 'local' type is include for SRIOV support
+-        network_types = ['flat', 'vlan', 'vxlan', 'local']
+-        return network_types
+-
+-    def get_mappings(self, agent):
+-        """Return the agent's bridge or interface mappings."""
+-        mappings = agent['configurations'].get('mappings', {})
+-        return mappings
+-
+-    def check_segment_for_agent(self, segment, agent):
+-        result = (super(VSwitchMechanismDriver, self).
+-                  check_segment_for_agent(segment, agent))
+-        if not result:
+-            return result
+-        mappings = self.get_mappings(agent)
+-        network_type = segment[api.NETWORK_TYPE]
+-        if network_type in ['vxlan']:
+-            # The parent class does not check whether the physical network is
+-            # included in the reported mappings when the network_type because
+-            # they assume VXLAN provider networks to be universally available
+-            physnet = segment[api.PHYSICAL_NETWORK]
+-            if not self.physnet_in_mappings(physnet, mappings):
+-                LOG.debug(
+-                    'Network %(network_id)s is connected to physical '
+-                    'network %(physnet)s, but agent %(agent)s reported '
+-                    'physical networks %(mappings)s. '
+-                    'The physical network must be configured on the '
+-                    'agent if binding is to succeed.',
+-                    {'network_id': segment['id'],
+-                     'physnet': physnet,
+-                     'agent': agent['host'],
+-                     'mappings': mappings})
+-                return False
+-        # Otherwise trust the decision made by the parent class
+-        return True
+-
+-    def check_vlan_transparency(self, context):
+-        """Report that VLAN transparency is supported."""
+-        return True
+-
+-    def check_vhostuser(self, context):
+-        """Return the vhostuser support status."""
+-        if context.vif_details:
+-            return (CONF.vhost.vhost_user_enabled and
+-                    context.vif_details.get(VHOST_USER_ENABLED, True))
+-        return CONF.vhost.vhost_user_enabled
++        pass
+diff --git a/neutron/tests/functional/vswitch/__init__.py b/neutron/tests/functional/vswitch/__init__.py
+index e69de29..8b13789 100644
+--- a/neutron/tests/functional/vswitch/__init__.py
++++ b/neutron/tests/functional/vswitch/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/neutron/tests/functional/vswitch/test_vswitch_agent.py b/neutron/tests/functional/vswitch/test_vswitch_agent.py
+index 4629072..8b13789 100644
+--- a/neutron/tests/functional/vswitch/test_vswitch_agent.py
++++ b/neutron/tests/functional/vswitch/test_vswitch_agent.py
+@@ -1,244 +1 @@
+-# Copyright (c) 2013 OpenStack Foundation
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+ 
+-#
+-# Copyright (c) 2013-2017 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+-import uuid
+-
+-import six
+-
+-import fixtures
+-import testtools
+-
+-from neutron.agent.vswitch import api
+-from neutron.agent.vswitch import constants
+-from neutron.agent.vswitch import exceptions
+-from neutron.agent.vswitch import manager
+-from neutron.common import constants as q_constants
+-
+-
+-class TestVSwitchManager(testtools.TestCase):
+-
+-    def setUp(self):
+-        super(TestVSwitchManager, self).setUp()
+-        self.useFixture(fixtures.FakeLogger())
+-        self.api = api.VSwitchManagementAPI()
+-        self.port = {
+-            'type': constants.VSWITCH_AVP_GUEST_PORT,
+-            'uuid': str(uuid.uuid4()),
+-            'mac-address': "00:11:22:33:44:55",
+-            'neutron': True}
+-        self.mappings = self._resolve_interface_mappings({
+-            'physnet0': 'eth0',
+-            'physnet1': 'eth1'})
+-        self.manager = manager.VSwitchManager(self.api, self.mappings)
+-        self.network = {
+-            'port_id': str(uuid.uuid4()),
+-            'network_id': str(uuid.uuid4()),
+-            'mtu': 1500,
+-            'segmentation_id': 1000,
+-            'network_type': 'vlan',
+-            'physical_network': 'physnet0',
+-            'vlan_transparent': False}
+-
+-    def tearDown(self):
+-        super(TestVSwitchManager, self).tearDown()
+-        for port in self.api.get_port_list():
+-            if port['type'] != "physical":
+-                self.api.lock_port(port)
+-                if 'network-uuid' in port:
+-                    self.api.detach_port(port)
+-                self.api.delete_port(port)
+-        for interface in self.api.get_interface_list():
+-            try:
+-                self.api.detach_interface(interface)
+-            except exceptions.VSwitchError:
+-                # Ignore for now... should not fail on unattached interface
+-                pass
+-            if interface['type'] in ['vlan', 'vxlan']:
+-                self.api.delete_interface(interface)
+-        for network in self.api.get_network_list():
+-            self.api.delete_network(network)
+-
+-    def _resolve_interface_mappings(self, mappings):
+-        """
+-        Translate the interface mappings from names to uuid values.
+-        """
+-        result = {}
+-        interfaces = {i['name']: i for i in self.api.get_interface_list()}
+-        for physical_network, ifname in six.iteritems(mappings):
+-            result = {physical_network: interfaces[ifname]['uuid']}
+-        return result
+-
+-    def add_network(self, network):
+-        uuid = self.network['network_id']
+-        network['name'] = self.manager.get_network_name(uuid)
+-        self.manager.setup_network(uuid, network)
+-
+-    def delete_network(self, network_id):
+-        self.manager.delete_network(network_id)
+-
+-    def test_lock_port(self):
+-        ports = self.api.get_port_list()
+-        self.manager.lock_port(getattr(ports[0], 'uuid'))
+-
+-    def test_unlock_port(self):
+-        ports = self.api.get_port_list()
+-        self.manager.unlock_port(getattr(ports[0], 'uuid'))
+-
+-    def test_lock_port_non_existent(self):
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.manager.lock_port,
+-            str(uuid.uuid4()))
+-
+-    def test_unlock_port_non_existent(self):
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.manager.unlock_port,
+-            str(uuid.uuid4()))
+-
+-    def test_find_interface(self):
+-        interface = self.manager.find_interface('eth0')
+-        self.assertIsNotNone(interface)
+-        self.assertEqual(getattr(interface, 'name'), 'eth0')
+-
+-    def test_attach_port(self):
+-        self.test_add_network_on_vlan()
+-        self.api.add_port(self.port)
+-        self.manager.attach_port(self.port['uuid'], self.network['network_id'])
+-
+-    def test_attach_port_not_existent_port(self):
+-        self.test_add_network_on_vlan()
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.manager.attach_port,
+-            self.port['uuid'], self.network['network_id'])
+-
+-    def test_attach_port_not_existent_network(self):
+-        self.api.add_port(self.port)
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.manager.attach_port,
+-            self.port['uuid'], self.network['network_id'])
+-
+-    def test_add_vlan_transparent_network(self):
+-        self.network['segmentation_id'] = None
+-        self.network['network_type'] = 'flat'
+-        self.network['vlan_transparent'] = True
+-        self.add_network(self.network)
+-        count = 0
+-        for interface in self.api.get_interface_list():
+-            if interface['type'] == constants.VSWITCH_VLAN_INTERFACE:
+-                count = count + 1
+-        self.assertEqual(count, 0)
+-
+-    def test_add_network_on_ethernet(self):
+-        self.network['segmentation_id'] = None
+-        self.network['network_type'] = 'flat'
+-        self.add_network(self.network)
+-        count = 0
+-        for interface in self.api.get_interface_list():
+-            if interface['type'] == constants.VSWITCH_VLAN_INTERFACE:
+-                count = count + 1
+-        self.assertEqual(count, 0)
+-
+-    def test_add_network_on_vlan(self):
+-        self.add_network(self.network)
+-        count = 0
+-        for interface in self.api.get_interface_list():
+-            if interface['type'] == constants.VSWITCH_VLAN_INTERFACE:
+-                count = count + 1
+-        self.assertNotEqual(count, 0)
+-
+-    def test_add_network_on_vxlan(self):
+-        self.network['network_type'] = 'vxlan'
+-        self.network['vxlan'] = {'group': '239.0.0.9',
+-                                 'port': 4789,
+-                                 'ttl': 1,
+-                                 'mode': 'dynamic'}
+-        self.network['mtu'] = (int(self.network['mtu']) -
+-                               q_constants.VXLAN_MTU_OVERHEAD)
+-        self.add_network(self.network)
+-        count = 0
+-        for interface in self.api.get_interface_list():
+-            if interface['type'] == constants.VSWITCH_VXLAN_INTERFACE:
+-                count = count + 1
+-        self.assertNotEqual(count, 0)
+-
+-    def test_add_network_on_vlan_zero(self):
+-        self.network['segmentation_id'] = 0
+-        self.assertRaises(manager.VSwitchManagerError,
+-                          self.add_network,
+-                          self.network)
+-
+-# Disable until vswitch ignores duplicate networks
+-#
+-#    def test_add_duplicate_network(self):
+-#        self.assertTrue(self.add_network(self.network))
+-#        self.assertTrue(self.add_network(self.network))
+-
+-    def test_add_network_invalid_physical_network(self):
+-        self.network['physical_network'] = 'xxx'
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.add_network,
+-            self.network)
+-
+-    def test_add_network_invalid_ethernet_interface(self):
+-        self.network['segmentation_id'] = None
+-        self.network['physical_network'] = 'physnet9'
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.add_network,
+-            self.network)
+-
+-    def test_add_network_invalid_vlan_interface(self):
+-        self.network['physical_network'] = 'physnet9'
+-        self.assertRaises(
+-            manager.VSwitchManagerError,
+-            self.add_network,
+-            self.network)
+-
+-    def test_delete_network(self):
+-        self.add_network(self.network)
+-        self.delete_network(self.network['network_id'])
+-
+-    def test_delete_network_non_existent(self):
+-        self.assertRaises(manager.VSwitchManagerError,
+-                          self.delete_network,
+-                          str(uuid.uuid4()))
+-
+-    def test_get_port_count(self):
+-        count = self.manager.get_virtual_port_count()
+-        self.assertEqual(count, 0)
+-        self.api.add_port(self.port)
+-        count = self.manager.get_virtual_port_count()
+-        self.assertEqual(count, 1)
+-        self.api.delete_port(self.port)
+-
+-    def test_get_port_status(self):
+-        ports = self.api.get_port_list()
+-        self.manager.get_port_status(getattr(ports[0], 'uuid'))
+-
+-    def test_get_port_status_non_existent(self):
+-        self.assertRaises(manager.VSwitchManagerError,
+-                          self.manager.get_port_status,
+-                          str(uuid.uuid4()))
+diff --git a/neutron/tests/functional/vswitch/test_vswitch_api.py b/neutron/tests/functional/vswitch/test_vswitch_api.py
+index 64f086c..8b13789 100644
+--- a/neutron/tests/functional/vswitch/test_vswitch_api.py
++++ b/neutron/tests/functional/vswitch/test_vswitch_api.py
+@@ -1,448 +1 @@
+-# Copyright (c) 2013 OpenStack Foundation
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+ 
+-#
+-# Copyright (c) 2013-2015 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+-
+-import uuid
+-
+-import fixtures
+-import testtools
+-
+-from neutron.agent.vswitch import api
+-from neutron.agent.vswitch import constants
+-from neutron.agent.vswitch import exceptions
+-
+-
+-class TestVSwitchManagementAPI(testtools.TestCase):
+-
+-    def ignoreError(self, callable):
+-        try:
+-            callable()
+-        except Exception:
+-            pass
+-
+-    def setUp(self):
+-        super(TestVSwitchManagementAPI, self).setUp()
+-        self.useFixture(fixtures.FakeLogger())
+-        self.api = api.VSwitchManagementAPI()
+-        ports = self.api.get_port_list()
+-        self.lower_uuid = ports[0]['interface-uuid']
+-        self.port = {
+-            'type': constants.VSWITCH_AVP_GUEST_PORT,
+-            'uuid': str(uuid.uuid4()),
+-            'mac-address': "00:11:22:33:44:55"}
+-        self.network = {
+-            'type': constants.VSWITCH_LAYER2_NETWORK,
+-            'uuid': str(uuid.uuid4()),
+-            'name': 'test-net1'}
+-        self.interface = {
+-            'type': constants.VSWITCH_VLAN_INTERFACE,
+-            'uuid': str(uuid.uuid4()),
+-            'vlan-id': 99,
+-            'mtu': 1500}
+-        self.neighbour4 = {"mac-address": "02:11:22:33:44:55",
+-                           "address": "1.2.3.4",
+-                           "interface-uuid": self.lower_uuid}
+-        self.neighbour6 = {"mac-address": "02:11:22:33:44:56",
+-                          "address": "fd6c:cbf:d1d1::1",
+-                           "interface-uuid": self.lower_uuid}
+-        self.neighbours = [self.neighbour4, self.neighbour6]
+-        self.address4 = {"address": "192.168.1.2",
+-                         "prefix-length": 24,
+-                         "interface-uuid": self.lower_uuid}
+-        self.address6 = {"address": "cc:dd::2",
+-                         "prefix-length": 120,
+-                         "interface-uuid": self.lower_uuid}
+-        self.addresses = [self.address4, self.address6]
+-        self.route4 = {"prefix": "192.168.0.0",
+-                       "prefix-length": 24,
+-                       "nexthops": [{"interface-uuid": self.lower_uuid,
+-                                     "gateway": "192.168.1.1",
+-                                     "weight": 10,
+-                                     "lifetime": 86400}]}
+-        self.route6 = {"prefix": "aa:bb::",
+-                       "prefix-length": 120,
+-                       "nexthops": [{"interface-uuid": self.lower_uuid,
+-                                     "gateway": "cc:dd::1",
+-                                     "weight": 10,
+-                                     "lifetime": 86400}]}
+-        self.routes = [self.route4, self.route6]
+-        self.router = {"name": "test-router0",
+-                       "uuid": str(uuid.uuid4())}
+-        self.routers = [self.router]
+-        self.router_interface = {"type": constants.VSWITCH_ROUTER_INTERFACE,
+-                                 "name": "router0-if0",
+-                                 "uuid": str(uuid.uuid4()),
+-                                 "mac-address": "02:23:45:67:89:9a",
+-                                 "mtu": 1500,
+-                                 "router-uuid": self.router["uuid"]}
+-        self.router_interfaces = [self.router_interface]
+-
+-    def tearDown(self):
+-        super(TestVSwitchManagementAPI, self).tearDown()
+-        for port in self.api.get_port_list():
+-            if port['type'] != "physical":
+-                self.api.lock_port(port)
+-                if 'network-uuid' in port:
+-                    self.api.detach_port(port)
+-                self.api.delete_port(port)
+-        for interface in self.api.get_interface_list():
+-            if 'network-uuid' in interface:
+-                self.api.detach_interface(interface)
+-            if interface['type'] == constants.VSWITCH_VLAN_INTERFACE:
+-                self.api.delete_interface(interface)
+-        for network in self.api.get_network_list():
+-            self.api.delete_network(network)
+-        for neighbour in self.neighbours:
+-            self.ignoreError(lambda n=neighbour: self.api.delete_neighbour(n))
+-        for route in self.routes:
+-            self.ignoreError(lambda r=route: self.api.delete_route(r))
+-        for address in self.addresses:
+-            self.ignoreError(lambda a=address: self.api.delete_address(a))
+-        for router_interface in self.router_interfaces:
+-            self.ignoreError(
+-                lambda i=router_interface: self.api.delete_interface(i))
+-        for router in self.routers:
+-            self.ignoreError(lambda: self.api.delete_router(router))
+-
+-    def test_get_port_list(self):
+-        ports = self.api.get_port_list()
+-        self.assertIsNotNone(ports)
+-        self.assertNotEqual(len(ports), 0)
+-
+-    def test_get_port(self):
+-        ports = self.api.get_port_list()
+-        self.assertIsNotNone(ports)
+-        self.assertGreater(len(ports), 0)
+-        port = self.api.get_port(getattr(ports[0], 'uuid'))
+-        self.assertIsNotNone(port)
+-        self.assertEqual(port['uuid'], getattr(ports[0], 'uuid'))
+-
+-    def test_get_port_not_existent(self):
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.get_port,
+-                          (str(uuid.uuid4())))
+-
+-    def test_get_port_status(self):
+-        ports = self.api.get_port_list()
+-        self.assertIsNotNone(ports)
+-        self.assertGreater(len(ports), 0)
+-        port = self.api.get_port(getattr(ports[0], 'uuid'))
+-        self.assertIsNotNone(port)
+-        self.assertIn('admin-state', port)
+-        self.assertIn('link-state', port)
+-        status = self.api.get_port_status(port)
+-        self.assertIsNotNone(status)
+-        if status:
+-            self.assertEqual(port['admin-state'], 'up')
+-            self.assertEqual(port['link-state'], 'up')
+-        else:
+-            self.assertEqual(port['link-state'], 'down')
+-
+-    def test_get_port_status_not_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.get_port_status,
+-                          self.port)
+-
+-    def test_add_port(self):
+-        port = self.api.add_port(self.port)
+-        for key in self.port.keys():
+-            self.assertEqual(self.port[key], port[key])
+-
+-    def test_add_port_duplicate(self):
+-        port1 = self.api.add_port(self.port)
+-        port2 = self.api.add_port(self.port)
+-        self.assertIsNotNone(port1)
+-        self.assertIsNone(port2)
+-
+-    def test_add_port_missing_uuid(self):
+-        del self.port['uuid']
+-        self.assertRaises(exceptions.VSwitchError,
+-                          self.api.add_port, self.port)
+-
+-    def test_add_port_missing_mac(self):
+-        del self.port['mac-address']
+-        self.assertRaises(exceptions.VSwitchError,
+-                          self.api.add_port, self.port)
+-
+-    def test_add_port_missing_type(self):
+-        del self.port['type']
+-        self.assertRaises(exceptions.VSwitchError,
+-                          self.api.add_port, self.port)
+-
+-    def test_add_port_invalid_uuid(self):
+-        self.port['uuid'] = '1234'
+-        self.assertRaises(exceptions.VSwitchPortError,
+-                          self.api.add_port, self.port)
+-
+-    def test_add_port_invalid_mac(self):
+-        self.port['mac-address'] = '1234'
+-        self.assertRaises(exceptions.VSwitchError,
+-                          self.api.add_port, self.port)
+-
+-    def test_add_port_invalid_type(self):
+-        self.port['type'] = '1234'
+-        self.assertRaises(exceptions.VSwitchError,
+-                          self.api.add_port, self.port)
+-
+-    def test_lock_port(self):
+-        for port in self.api.get_port_list():
+-            self.api.lock_port(port)
+-
+-    def test_lock_port_already_locked(self):
+-        for port in self.api.get_port_list():
+-            self.api.lock_port(port)
+-            self.api.lock_port(port)
+-
+-    def test_unlock_port(self):
+-        for port in self.api.get_port_list():
+-            self.api.unlock_port(port)
+-
+-    def test_unlock_port_already_unlocked(self):
+-        for port in self.api.get_port_list():
+-            self.api.unlock_port(port)
+-            self.api.unlock_port(port)
+-
+-    def test_lock_port_not_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.unlock_port, self.port)
+-
+-    def test_unlock_port_not_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.unlock_port, self.port)
+-
+-    def test_delete_port(self):
+-        port = self.api.add_port(self.port)
+-        self.api.delete_port(port)
+-
+-    def test_delete_port_non_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.api.delete_port(self.port)
+-
+-    def test_destroy_port(self):
+-        port = self.api.add_port(self.port)
+-        self.api.destroy_port(port)
+-
+-    def test_destroy_port_non_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.api.destroy_port(self.port)
+-
+-    def test_attach_port(self):
+-        port = self.api.add_port(self.port)
+-        self.assertIsNotNone(port)
+-        self.api.add_network(self.network)
+-        self.port['network-uuid'] = self.network['uuid']
+-        self.api.attach_port(self.port)
+-        port = self.api.get_port(self.port['uuid'])
+-        self.assertIsNotNone(port)
+-        self.assertIn('network-uuid', port)
+-        self.assertEqual(port['network-uuid'], self.network['uuid'])
+-
+-    def test_attach_port_not_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.port['network-uuid'] = self.network['uuid']
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.attach_port, self.port)
+-
+-    def test_attach_port_network_not_found(self):
+-        port = self.api.add_port(self.port)
+-        self.assertIsNotNone(port)
+-        self.port['network-uuid'] = str(uuid.uuid4())
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.attach_port, self.port)
+-
+-    def test_attach_port_network_invalid_uuid(self):
+-        port = self.api.add_port(self.port)
+-        self.assertIsNotNone(port)
+-        self.port['network-uuid'] = '1234'
+-        self.assertRaises(exceptions.VSwitchPortError,
+-                          self.api.attach_port, self.port)
+-
+-    def test_detach_port(self):
+-        port = self.api.add_port(self.port)
+-        self.assertIsNotNone(port)
+-        self.api.add_network(self.network)
+-        self.port['network-uuid'] = self.network['uuid']
+-        self.api.attach_port(self.port)
+-        port = self.api.get_port(self.port['uuid'])
+-        self.assertIsNotNone(port)
+-        self.assertIn('network-uuid', port)
+-        self.assertEqual(port['network-uuid'], self.network['uuid'])
+-        self.api.detach_port(port)
+-
+-    def test_detach_port_not_existent(self):
+-        self.port['uuid'] = str(uuid.uuid4())
+-        self.assertRaises(exceptions.VSwitchPortNotFoundError,
+-                          self.api.detach_port, self.port)
+-
+-    def test_detach_port_not_attached(self):
+-        port = self.api.add_port(self.port)
+-        self.assertIsNotNone(port)
+-        self.api.detach_port(port)
+-
+-    def test_get_interface_list(self):
+-        interfaces = self.api.get_interface_list()
+-        count = len(interfaces)
+-        self.assertIsNotNone(interfaces)
+-        self.assertNotEqual(count, 0)
+-        self.test_add_interface()
+-        interfaces = self.api.get_interface_list()
+-        self.assertIsNotNone(interfaces)
+-        self.assertEqual(len(interfaces), count + 1)
+-
+-    def test_get_interface(self):
+-        interfaces = self.api.get_interface_list()
+-        self.assertIsNotNone(interfaces)
+-        self.assertNotEqual(len(interfaces), 0)
+-        interface = self.api.get_interface(getattr(interfaces[0], 'uuid'))
+-        self.assertIsNotNone(interface)
+-        self.assertEqual(interface['uuid'], getattr(interfaces[0], 'uuid'))
+-
+-    def test_get_interface_not_existent(self):
+-        self.assertRaises(exceptions.VSwitchInterfaceNotFoundError,
+-                          self.api.get_interface,
+-                          (str(uuid.uuid4())))
+-
+-    def test_add_interface(self):
+-        interfaces = self.api.get_interface_list()
+-        self.assertGreater(len(interfaces), 0)
+-        self.interface['lower-uuid'] = getattr(interfaces[0], 'uuid')
+-        self.interface['mtu'] = getattr(interfaces[0], 'mtu')
+-        interface = self.api.add_interface(self.interface)
+-        self.assertIsNotNone(interface)
+-        self.assertEqual(interface['uuid'], self.interface['uuid'])
+-
+-    def test_add_interface_duplicate(self):
+-        interfaces = self.api.get_interface_list()
+-        self.assertGreater(len(interfaces), 0)
+-        self.interface['lower-uuid'] = getattr(interfaces[0], 'uuid')
+-        interface = self.api.add_interface(self.interface)
+-        self.assertIsNotNone(interface)
+-        self.assertEqual(interface['uuid'], self.interface['uuid'])
+-
+-    def test_add_interface_invalid_lower(self):
+-        self.interface['lower-uuid'] = str(uuid.uuid4())
+-        self.assertRaises(exceptions.VSwitchInterfaceNotFoundError,
+-                          self.api.add_interface,
+-                          self.interface)
+-
+-    def test_delete_interface(self):
+-        interfaces = self.api.get_interface_list()
+-        self.assertGreater(len(interfaces), 0)
+-        self.interface['lower-uuid'] = getattr(interfaces[0], 'uuid')
+-        interface = self.api.add_interface(self.interface)
+-        self.assertIsNotNone(interface)
+-        self.assertEqual(interface['uuid'], self.interface['uuid'])
+-        self.api.delete_interface(interface)
+-
+-    def test_delete_interface_not_existent(self):
+-        self.interface['uuid'] = str(uuid.uuid4())
+-        self.api.delete_interface(self.interface)
+-
+-    def test_get_network_list(self):
+-        networks = self.api.get_network_list()
+-        self.assertIsNotNone(networks)
+-        self.assertEqual(len(networks), 0)
+-
+-    def test_add_network(self):
+-        count = len(self.api.get_network_list())
+-        self.assertEqual(count, 0)
+-        network = self.api.add_network(self.network)
+-        self.assertIsNotNone(network)
+-        self.assertIn('uuid', network)
+-        self.assertEqual(network['uuid'], self.network['uuid'])
+-        count = len(self.api.get_network_list())
+-        self.assertEqual(count, 1)
+-
+-    def test_add_network_duplicate(self):
+-        network = self.api.add_network(self.network)
+-        self.assertIsNotNone(network)
+-        self.assertIn('uuid', network)
+-        self.assertEqual(network['uuid'], self.network['uuid'])
+-        count = len(self.api.get_network_list())
+-        self.assertEqual(count, 1)
+-        network = self.api.add_network(self.network)
+-        count = len(self.api.get_network_list())
+-        self.assertEqual(count, 1)
+-
+-    def test_delete_network(self):
+-        network = self.api.add_network(self.network)
+-        self.assertIsNotNone(network)
+-        self.api.delete_network(network)
+-        count = len(self.api.get_network_list())
+-        self.assertEqual(count, 0)
+-
+-    def test_delete_network_not_existent(self):
+-        self.api.delete_network(self.network)
+-
+-    def test_add_ipv4_neighbour(self):
+-        neighbour = self.api.add_neighbour(self.neighbour4)
+-        self.assertIsNotNone(neighbour)
+-        self.api.delete_neighbour(neighbour)
+-
+-    def test_add_ipv4_address(self):
+-        address = self.api.add_address(self.address4)
+-        self.assertIsNotNone(address)
+-        self.api.delete_address(address)
+-
+-    def test_add_ipv4_route(self):
+-        self.api.add_address(self.address4)
+-        route = self.api.add_route(self.route4)
+-        self.assertIsNotNone(route)
+-        self.api.delete_route(route)
+-
+-    def test_add_ipv6_neighbour(self):
+-        neighbour = self.api.add_neighbour(self.neighbour6)
+-        self.assertIsNotNone(neighbour)
+-        self.api.delete_neighbour(neighbour)
+-
+-    def test_add_ipv6_address(self):
+-        address = self.api.add_address(self.address6)
+-        self.assertIsNotNone(address)
+-        self.api.delete_address(address)
+-
+-    def test_add_ipv6_route(self):
+-        self.api.add_address(self.address6)
+-        route = self.api.add_route(self.route6)
+-        self.assertIsNotNone(route)
+-        self.api.delete_route(route)
+-
+-    def test_get_router(self):
+-        self.api.add_router(self.router)
+-        router = self.api.get_router(self.router['uuid'])
+-        self.assertIsNotNone(router)
+-
+-    def test_add_router(self):
+-        router = self.api.add_router(self.router)
+-        self.assertIsNotNone(router)
+-        self.api.delete_router(router)
+-
+-    def test_add_router_interface(self):
+-        router = self.api.add_router(self.router)
+-        self.assertIsNotNone(router)
+-        interface = self.api.add_interface(self.router_interface)
+-        self.assertIsNotNone(interface)
+-        self.assertEqual(interface['router-uuid'], self.router['uuid'])
+-        self.api.delete_interface(interface)
+-        self.api.delete_router(router)
+diff --git a/neutron/tests/functional/vswitch/test_vswitch_interface.py b/neutron/tests/functional/vswitch/test_vswitch_interface.py
+index 81df847..8b13789 100644
+--- a/neutron/tests/functional/vswitch/test_vswitch_interface.py
++++ b/neutron/tests/functional/vswitch/test_vswitch_interface.py
+@@ -1,113 +1 @@
+-# Copyright 2012 OpenStack Foundation
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-#
+-# Copyright (c) 2013-2017 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+-import uuid
+-
+-import fixtures
+-import testtools
+-
+-from neutron.agent.linux import interface as linux_interface
+-from neutron.agent.linux import ip_lib
+-from neutron.agent.vswitch import api
+-from neutron.agent.vswitch import interface
+-from neutron.common import constants as n_const
+-from neutron.conf.agent import common as config
+-
+-
+-class FakeNetwork(object):
+-    id = '12345678-1234-5678-90ab-ba0987654321'
+-
+-
+-class FakePort(object):
+-    id = 'abcdef01-1234-5678-90ab-ba0987654321'
+-    device_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+-    network = FakeNetwork()
+-    network_id = network.id
+-
+-
+-class TestVSwitchInterfaceDriver(testtools.TestCase):
+-
+-    def setUp(self):
+-        super(TestVSwitchInterfaceDriver, self).setUp()
+-        self.useFixture(fixtures.FakeLogger())
+-        self.conf = config.setup_conf()
+-        self.conf.register_opts(linux_interface.OPTS)
+-        config.register_root_helper(self.conf)
+-        self.driver = interface.VSwitchInterfaceDriver(self.conf)
+-        self.api = api.VSwitchManagementAPI()
+-        self.mac_address = 'aa:bb:cc:dd:ee:ff'
+-        self.network_id = str(uuid.uuid4())
+-        self.port_id = str(uuid.uuid4())
+-        self.port = FakePort()
+-        self.port.id = self.port_id
+-        self.namespace_id = str(uuid.uuid4())
+-        self.plugged = False
+-        self.ip = ip_lib.IPWrapper(namespace=self.namespace_id)
+-
+-    def tearDown(self):
+-        super(TestVSwitchInterfaceDriver, self).tearDown()
+-        if self.plugged:
+-            self.driver.unplug(self.driver.get_device_name(self.port))
+-            self.plugged = False
+-
+-    def test_get_device_name(self):
+-        device_name = self.driver.get_device_name(FakePort())
+-        self.assertEqual('avpabcdef01-12', device_name)
+-
+-    def test_find_port_by_device_name(self):
+-        port = FakePort()
+-        ports = self.api.get_port_list()
+-        port.id = getattr(ports[0], 'uuid')
+-        device_name = self.driver.get_device_name(port)
+-        x = self.driver._find_port_by_device_name(device_name)
+-        self.assertEqual(x, ports[0])
+-
+-    def test_find_port_missing_port(self):
+-        port = FakePort()
+-        device_name = self.driver.get_device_name(port)
+-        x = self.driver._find_port_by_device_name(device_name)
+-        self.assertIsNone(x)
+-
+-    def test_plug_with_ns(self):
+-        self.test_plug(namespace=self.namespace_id)
+-
+-    def test_plug(self, namespace=None, mtu=n_const.DEFAULT_MTU):
+-        ports = self.api.get_port_list()
+-        count = len(ports)
+-        self.driver.plug(self.network_id,
+-                         self.port_id,
+-                         self.driver.get_device_name(self.port),
+-                         self.mac_address,
+-                         namespace=self.namespace_id,
+-                         mtu=mtu)
+-        self.plugged = True
+-        ports = self.api.get_port_list()
+-        self.assertGreater(len(ports), count)
+-
+-    def test_unplug(self):
+-        self.test_plug()
+-        ports = self.api.get_port_list()
+-        count = len(ports)
+-        self.driver.unplug(self.driver.get_device_name(self.port))
+-        self.plugged = False
+-        ports = self.api.get_port_list()
+-        self.assertLess(len(ports), count)
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_mech_vswitch.py b/neutron/tests/unit/plugins/wrs/drivers/test_mech_vswitch.py
+index 90d2ffb..e69de29 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_mech_vswitch.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_mech_vswitch.py
+@@ -1,81 +0,0 @@
+-# Copyright (c) 2013 OpenStack Foundation
+-# All Rights Reserved.
+-#
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-# Copyright (c) 2013-2015 Wind River Systems, Inc.
+-#
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+-
+-from neutron.common import constants
+-from neutron.extensions import wrs_binding
+-from neutron.plugins.wrs.drivers import mech_vswitch
+-from neutron.tests.unit.plugins.ml2 import _test_mech_agent as base
+-
+-
+-class VSwitchMechanismBaseTestCase(base.AgentMechanismBaseTestCase):
+-    VIF_TYPE = wrs_binding.VIF_TYPE_AVS
+-    CAP_PORT_FILTER = True
+-
+-    AGENT_TYPE = constants.AGENT_TYPE_WRS_VSWITCH
+-
+-    GOOD_MAPPINGS = {'fake_physical_network': 'fake_bridge'}
+-    GOOD_CONFIGS = {'mappings': GOOD_MAPPINGS}
+-
+-    BAD_MAPPINGS = {'wrong_physical_network': 'wrong_bridge'}
+-    BAD_CONFIGS = {'mappings': BAD_MAPPINGS}
+-
+-    AGENTS = [{'alive': True,
+-               'configurations': GOOD_CONFIGS,
+-               'host': 'host'}]
+-    AGENTS_DEAD = [{'alive': False,
+-                    'configurations': GOOD_CONFIGS,
+-                    'host': 'dead_host'}]
+-    AGENTS_BAD = [{'alive': False,
+-                   'configurations': GOOD_CONFIGS,
+-                   'host': 'bad_host_1'},
+-                  {'alive': True,
+-                   'configurations': BAD_CONFIGS,
+-                   'host': 'bad_host_2'}]
+-
+-    def setUp(self):
+-        super(VSwitchMechanismBaseTestCase, self).setUp()
+-        self.driver = mech_vswitch.VSwitchMechanismDriver()
+-        self.driver.initialize()
+-
+-
+-class VSwitchMechanismGenericTestCase(VSwitchMechanismBaseTestCase,
+-                                      base.AgentMechanismGenericTestCase):
+-    pass
+-
+-
+-class VSwitchMechanismLocalTestCase(VSwitchMechanismBaseTestCase,
+-                                    base.AgentMechanismLocalTestCase):
+-    pass
+-
+-
+-class VSwitchMechanismFlatTestCase(VSwitchMechanismBaseTestCase,
+-                                   base.AgentMechanismFlatTestCase):
+-    pass
+-
+-
+-class VSwitchMechanismVlanTestCase(VSwitchMechanismBaseTestCase,
+-                                   base.AgentMechanismVlanTestCase):
+-    pass
+-
+-
+-class VSwitchMechanismVxlanTestCase(VSwitchMechanismBaseTestCase,
+-                                    base.AgentMechanismVxlanTestCase):
+-    pass
+diff --git a/setup.cfg b/setup.cfg
+index c434412..5a050c2 100644
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -69,6 +69,7 @@ console_scripts =
+     neutron-sanity-check = neutron.cmd.sanity_check:main
+     neutron-avs-agent = neutron.plugins.wrs.agent.avs.agent:main
+     neutron-avr-agent = neutron.plugins.wrs.agent.avr.agent:main
++
+ neutron.core_plugins =
+     ml2 = neutron.plugins.ml2.plugin:Ml2Plugin
+ neutron.service_plugins =
+@@ -106,7 +107,7 @@ neutron.ml2.mechanism_drivers =
+     sriovnicswitch = neutron.plugins.ml2.drivers.mech_sriov.mech_driver.mech_driver:SriovNicSwitchMechanismDriver
+     fake_agent = neutron.tests.unit.plugins.ml2.drivers.mech_fake_agent:FakeAgentMechanismDriver
+     faulty_agent = neutron.tests.unit.plugins.ml2.drivers.mech_faulty_agent:FaultyAgentMechanismDriver
+-    vswitch = neutron.plugins.wrs.drivers.mech_vswitch:VSwitchMechanismDriver
++    vswitch = neutron.plugins.ml2.drivers.openvswitch.mech_driver.mech_openvswitch:OpenvswitchMechanismDriver
+ neutron.ml2.extension_drivers =
+     test = neutron.tests.unit.plugins.ml2.drivers.ext_test:TestExtensionDriver
+     testdb = neutron.tests.unit.plugins.ml2.drivers.ext_test:TestDBExtensionDriver
+@@ -149,6 +150,7 @@ oslo.config.opts =
+     neutron.ml2.sriov.agent = neutron.opts:list_sriov_agent_opts
+     neutron.ml2.xenapi = neutron.opts:list_xenapi_opts
+     neutron.settings = neutron.opts:list_settings_opts
++    neutron.avs.agent = neutron.opts:list_ovs_opts
+     nova.auth = neutron.opts:list_auth_opts
+ oslo.config.opts.defaults =
+     neutron = neutron.common.config:set_cors_middleware_defaults
+-- 
+2.7.4
+

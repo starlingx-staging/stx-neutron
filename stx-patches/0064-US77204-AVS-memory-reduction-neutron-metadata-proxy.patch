@@ -1,0 +1,55 @@
+From a198b461ba46a463616feebdad5569343458d4c8 Mon Sep 17 00:00:00 2001
+From: Teresa Ho <teresa.ho@windriver.com>
+Date: Tue, 26 Apr 2016 16:10:11 -0400
+Subject: [PATCH 064/155] US77204: AVS memory reduction - neutron metadata
+ proxy
+
+The neutron-ns-metadata-proxy process is replaced with haproxy for the purpose
+of memory reduction.
+
+This is replaced by an upstream feature.  Include haproxy_router.cfg so that
+this can still be used for metadata support on routers until neutron-avr-agent
+is updated to use the upstream implementation.
+---
+ etc/haproxy_router.cfg | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+ create mode 100644 etc/haproxy_router.cfg
+
+diff --git a/etc/haproxy_router.cfg b/etc/haproxy_router.cfg
+new file mode 100644
+index 0000000..800ea66
+--- /dev/null
++++ b/etc/haproxy_router.cfg
+@@ -0,0 +1,29 @@
++global
++  daemon
++  log  127.0.0.1 local1 info
++  maxconn  4000
++
++defaults
++  log  global
++  maxconn  8000
++  mode  http
++  option  httplog
++  option  dontlognull
++  option  forwardfor
++  retries  3
++  stats  enable
++  timeout  http-request 10s
++  timeout  queue 10m
++  timeout  connect 10s
++  timeout  client 30s
++  timeout  server 30s
++  timeout  check 10s
++
++frontend neutron-metadata-proxy
++  bind *:80
++  default_backend neutron-metadata-agent
++
++backend neutron-metadata-agent
++  http-request set-header X-Neutron-Router-ID "${HEADER_VALUE}"
++  server neutron-metadata-proxy unix@/var/run/neutron/metadata_proxy
++
+-- 
+2.7.4
+

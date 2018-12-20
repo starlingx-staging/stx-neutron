@@ -1,0 +1,60 @@
+From 76c49a8677a52e756ab22594b960ac4f0d426b27 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 25 Apr 2017 09:34:48 -0400
+Subject: [PATCH 045/155] CGTS-6661: dhcp: yield to other threads before
+ scheduling
+
+The underlying threading library does not yield to other threads when releasing
+a lock or a semaphore.  This creates a situation where it is possible for one
+green thread to acquire the same lock over and over again before any other
+waiting green threads get to acquire it.
+
+In the context of this Jira, a resync scheduling loop is created because the
+dhcp driver is unable to plug a new interface.  An exception occurs in the
+driver which triggers the agent to schedule a new resync.  That resync needs to
+acquire the "dhcp-agent" lock again and since there is no yield when the
+original driver operations released the lock previously that thread acquires
+the lock again before any other thread.
+
+Since the other threads competing for the semaphore are RPC worker threads we
+end up with unbounded growth of the delayed_work queue in the oslo_messaging
+library.  That consumes memory at a rapid pace since each resync failure
+generates a port update and port delete event.  If left overnight the agent
+process consumes over 1GB of memory.
+
+In my opinion, the threading library should yield to other threads whenever
+releasing a lock but the simplest and safest fix is to introduce a yield in the
+agent to avoid this situation.
+
+Conflicts:
+	neutron/agent/dhcp/agent.py
+---
+ neutron/agent/dhcp/agent.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index 0a3ae60..9c4897e 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -17,6 +17,7 @@ import collections
+ import functools
+ import os
+ import threading
++import time
+ 
+ import eventlet
+ from neutron_lib import constants
+@@ -210,6 +211,10 @@ class DhcpAgent(manager.Manager):
+         """
+         self.needs_resync_reasons[network_id].append(reason)
+         self._periodic_resync_event.set()
++        # CGTS-6661: yield to other threads since it is possible to go in to a
++        # failure loop where we keep rescheduling a sync but no other threads
++        # waiting on the dhcp-agent lock will make any progress.
++        time.sleep(0)
+ 
+     @_sync_lock
+     def sync_state(self, networks=None):
+-- 
+2.7.4
+

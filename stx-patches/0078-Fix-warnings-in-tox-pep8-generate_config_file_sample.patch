@@ -1,0 +1,36 @@
+From 49523439eb4762d89aad0511fb4ed08ff0c0de38 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 24 Nov 2017 11:34:09 -0500
+Subject: [PATCH 078/155] Fix warnings in tox pep8
+ generate_config_file_samples.
+
+Squash with cb084bf during next rebase.
+---
+ neutron/opts.py | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/opts.py b/neutron/opts.py
+index 6796e0e..d653284 100644
+--- a/neutron/opts.py
++++ b/neutron/opts.py
+@@ -325,13 +325,13 @@ def list_pnet_connectivity_opts():
+ 
+ def list_avs_agent_opts():
+     return [
+-        ('AVS',
++        ('avs',
+          neutron.plugins.wrs.agent.avs.agent.avs_opts),
+-        ('AGENT',
++        ('agent',
+          neutron.plugins.wrs.agent.avs.agent.agent_opts),
+-        ('VXLAN',
++        ('vxlan',
+          neutron.plugins.wrs.agent.avs.agent.vxlan_opts),
+-        ('SECURITYGROUP',
++        ('securitygroup',
+          neutron.conf.agent.securitygroups_rpc.security_group_opts)
+     ]
+ 
+-- 
+2.7.4
+

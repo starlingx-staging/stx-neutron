@@ -1,0 +1,274 @@
+From 390d8cc0324de5cb1ef00e7fa0b49c969e3bb3ab Mon Sep 17 00:00:00 2001
+From: Zachary <mazengxie@126.com>
+Date: Fri, 27 Oct 2017 10:13:58 +0800
+Subject: [PATCH 109/155] [Qos] Fix residues of ovs in ingress bw limit
+
+When we delete vm port with attached QoS policy,
+it is just doing nothing if vif_port does not exist.
+
+This is fine for egress bandwidth limit as it is configured
+directly on vif_port in OVS.
+
+For ingress bw limit however it uses additional records in
+Openvswitch database: qos and queue. Those records are not
+cleaned up in such case.
+
+This patch also records port in self.ports in the case of
+bandwidth limit rules, just as in the case of dscp rules.
+Never execute port clear if vif_port not exists. Finally, ovs
+driver can clean such qos and queue records
+
+Change-Id: Iddeb49e1e6538a178ca468df0fdf9e0617ca4f1c
+Closes-Bug: #1726732
+(cherry picked from commit ee423e1fa035146904eb8cdd78660cf1cafa64e8)
+---
+ neutron/agent/common/ovs_lib.py                    | 23 +++++++---------
+ .../agent/extension_drivers/qos_driver.py          | 32 ++++++++++++++--------
+ neutron/tests/fullstack/test_qos.py                | 21 ++++++++++++++
+ neutron/tests/unit/agent/common/test_ovs_lib.py    | 20 --------------
+ .../agent/extension_drivers/test_qos_driver.py     | 17 +++++++++---
+ 5 files changed, 65 insertions(+), 48 deletions(-)
+
+diff --git a/neutron/agent/common/ovs_lib.py b/neutron/agent/common/ovs_lib.py
+index e3f0463..e958704 100644
+--- a/neutron/agent/common/ovs_lib.py
++++ b/neutron/agent/common/ovs_lib.py
+@@ -669,7 +669,7 @@ class OVSBridge(BaseOVS):
+         self._set_egress_bw_limit_for_port(
+             port_name, 0, 0)
+ 
+-    def _find_qos(self, port_name):
++    def find_qos(self, port_name):
+         qos = self.ovsdb.db_find(
+             'QoS',
+             ('external_ids', '=', {'id': port_name}),
+@@ -677,7 +677,7 @@ class OVSBridge(BaseOVS):
+         if qos:
+             return qos[0]
+ 
+-    def _find_queue(self, port_name, queue_type):
++    def find_queue(self, port_name, queue_type):
+         queues = self.ovsdb.db_find(
+             'Queue',
+             ('external_ids', '=', {'id': port_name,
+@@ -723,8 +723,8 @@ class OVSBridge(BaseOVS):
+             'max-rate': max_bw_in_bits,
+             'burst': max_burst_in_bits,
+         }
+-        qos = self._find_qos(port_name)
+-        queue = self._find_queue(port_name, QOS_DEFAULT_QUEUE)
++        qos = self.find_qos(port_name)
++        queue = self.find_queue(port_name, QOS_DEFAULT_QUEUE)
+         qos_uuid = qos['_uuid'] if qos else None
+         queue_uuid = queue['_uuid'] if queue else None
+         with self.ovsdb.transaction(check_error=True) as txn:
+@@ -743,7 +743,7 @@ class OVSBridge(BaseOVS):
+     def get_ingress_bw_limit_for_port(self, port_name):
+         max_kbps = None
+         max_burst_kbit = None
+-        res = self._find_queue(port_name, QOS_DEFAULT_QUEUE)
++        res = self.find_queue(port_name, QOS_DEFAULT_QUEUE)
+         if res:
+             other_config = res['other_config']
+             max_bw_in_bits = other_config.get('max-rate')
+@@ -755,15 +755,12 @@ class OVSBridge(BaseOVS):
+         return max_kbps, max_burst_kbit
+ 
+     def delete_ingress_bw_limit_for_port(self, port_name):
+-        if not self.port_exists(port_name):
+-            return
+-        self._delete_ingress_bw_limit_for_port(port_name)
+-
+-    def _delete_ingress_bw_limit_for_port(self, port_name):
+-        qos = self._find_qos(port_name)
+-        queue = self._find_queue(port_name, QOS_DEFAULT_QUEUE)
++        qos = self.find_qos(port_name)
++        queue = self.find_queue(port_name, QOS_DEFAULT_QUEUE)
++        does_port_exist = self.port_exists(port_name)
+         with self.ovsdb.transaction(check_error=True) as txn:
+-            txn.add(self.ovsdb.db_clear("Port", port_name, 'qos'))
++            if does_port_exist:
++                txn.add(self.ovsdb.db_clear("Port", port_name, 'qos'))
+             if qos:
+                 txn.add(self.ovsdb.db_destroy('QoS', qos['_uuid']))
+             if queue:
+diff --git a/neutron/plugins/ml2/drivers/openvswitch/agent/extension_drivers/qos_driver.py b/neutron/plugins/ml2/drivers/openvswitch/agent/extension_drivers/qos_driver.py
+index 7dff5e9..4da0720 100644
+--- a/neutron/plugins/ml2/drivers/openvswitch/agent/extension_drivers/qos_driver.py
++++ b/neutron/plugins/ml2/drivers/openvswitch/agent/extension_drivers/qos_driver.py
+@@ -55,29 +55,39 @@ class QosOVSAgentDriver(qos.QosLinuxAgentDriver):
+                       "vif_port was not found. It seems that port is already "
+                       "deleted", port_id)
+             return
++        self.ports[port['port_id']][(qos_consts.RULE_TYPE_BANDWIDTH_LIMIT,
++                                     rule.direction)] = port
+         if rule.direction == constants.INGRESS_DIRECTION:
+             self._update_ingress_bandwidth_limit(vif_port, rule)
+         else:
+             self._update_egress_bandwidth_limit(vif_port, rule)
+ 
+     def delete_bandwidth_limit(self, port):
+-        vif_port = port.get('vif_port')
+-        if not vif_port:
+-            port_id = port.get('port_id')
+-            LOG.debug("delete_bandwidth_limit was received for port %s but "
+-                      "vif_port was not found. It seems that port is already "
+-                      "deleted", port_id)
++        port_id = port.get('port_id')
++        port = self.ports[port_id].pop((qos_consts.RULE_TYPE_BANDWIDTH_LIMIT,
++                                        constants.EGRESS_DIRECTION),
++                                       None)
++        if not port:
++            LOG.debug("delete_bandwidth_limit was received "
++                      "for port %s but port was not found. "
++                      "It seems that bandwidth_limit is already deleted",
++                      port_id)
+             return
++        vif_port = port.get('vif_port')
+         self.br_int.delete_egress_bw_limit_for_port(vif_port.port_name)
+ 
+     def delete_bandwidth_limit_ingress(self, port):
+-        vif_port = port.get('vif_port')
+-        if not vif_port:
+-            port_id = port.get('port_id')
++        port_id = port.get('port_id')
++        port = self.ports[port_id].pop((qos_consts.RULE_TYPE_BANDWIDTH_LIMIT,
++                                        constants.INGRESS_DIRECTION),
++                                       None)
++        if not port:
+             LOG.debug("delete_bandwidth_limit_ingress was received "
+-                      "for port %s but vif_port was not found. "
+-                      "It seems that port is already deleted", port_id)
++                      "for port %s but port was not found. "
++                      "It seems that bandwidth_limit is already deleted",
++                      port_id)
+             return
++        vif_port = port.get('vif_port')
+         self.br_int.delete_ingress_bw_limit_for_port(vif_port.port_name)
+ 
+     def create_dscp_marking(self, port, rule):
+diff --git a/neutron/tests/fullstack/test_qos.py b/neutron/tests/fullstack/test_qos.py
+index 65b0d4c..427b238 100644
+--- a/neutron/tests/fullstack/test_qos.py
++++ b/neutron/tests/fullstack/test_qos.py
+@@ -19,6 +19,7 @@ from neutronclient.common import exceptions
+ from oslo_utils import uuidutils
+ import testscenarios
+ 
++from neutron.agent.common import ovs_lib
+ from neutron.agent.linux import tc_lib
+ from neutron.common import constants as common_constants
+ from neutron.common import utils
+@@ -220,6 +221,26 @@ class TestBwLimitQoSOvs(_TestBwLimitQoS, base.BaseFullStackTestCase):
+                 lambda: vm.bridge.get_ingress_bw_limit_for_port(
+                     vm.port.name) == (limit, burst))
+ 
++    def test_bw_limit_qos_port_removed(self):
++        """Test if rate limit config is properly removed when whole port is
++        removed.
++        """
++
++        # Create port with qos policy attached
++        vm, qos_policy = self._prepare_vm_with_qos_policy(
++            [functools.partial(
++                self._add_bw_limit_rule,
++                BANDWIDTH_LIMIT, BANDWIDTH_BURST, self.direction)])
++        self._wait_for_bw_rule_applied(
++            vm, BANDWIDTH_LIMIT, BANDWIDTH_BURST, self.direction)
++
++        # Delete port with qos policy attached
++        vm.destroy()
++        self._wait_for_bw_rule_removed(vm, self.direction)
++        self.assertIsNone(vm.bridge.find_qos(vm.port.name))
++        self.assertIsNone(vm.bridge.find_queue(vm.port.name,
++                                               ovs_lib.QOS_DEFAULT_QUEUE))
++
+ 
+ class TestBwLimitQoSLinuxbridge(_TestBwLimitQoS, base.BaseFullStackTestCase):
+     l2_agent_type = constants.AGENT_TYPE_LINUXBRIDGE
+diff --git a/neutron/tests/unit/agent/common/test_ovs_lib.py b/neutron/tests/unit/agent/common/test_ovs_lib.py
+index 655757e..2b415d2 100644
+--- a/neutron/tests/unit/agent/common/test_ovs_lib.py
++++ b/neutron/tests/unit/agent/common/test_ovs_lib.py
+@@ -782,26 +782,6 @@ class OVS_Lib_Test(base.BaseTestCase):
+             port_exists_mock.assert_called_once_with("test_port")
+             set_egress_mock.assert_not_called()
+ 
+-    def test_delete_ingress_bw_limit_for_port(self):
+-        with mock.patch.object(
+-            self.br, "_delete_ingress_bw_limit_for_port"
+-        ) as delete_ingress_mock, mock.patch.object(
+-            self.br, "port_exists", return_value=True
+-        ) as port_exists_mock:
+-            self.br.delete_ingress_bw_limit_for_port("test_port")
+-            port_exists_mock.assert_called_once_with("test_port")
+-            delete_ingress_mock.assert_called_once_with("test_port")
+-
+-    def test_delete_ingress_bw_limit_for_port_port_not_exists(self):
+-        with mock.patch.object(
+-            self.br, "_delete_ingress_bw_limit_for_port"
+-        ) as delete_ingress_mock, mock.patch.object(
+-            self.br, "port_exists", return_value=False
+-        ) as port_exists_mock:
+-            self.br.delete_ingress_bw_limit_for_port("test_port")
+-            port_exists_mock.assert_called_once_with("test_port")
+-            delete_ingress_mock.assert_not_called()
+-
+     def test_get_vifs_by_ids(self):
+         db_list_res = [
+             {'name': 'qvo1', 'ofport': 1,
+diff --git a/neutron/tests/unit/plugins/ml2/drivers/openvswitch/agent/extension_drivers/test_qos_driver.py b/neutron/tests/unit/plugins/ml2/drivers/openvswitch/agent/extension_drivers/test_qos_driver.py
+index dba464b..ca46735 100644
+--- a/neutron/tests/unit/plugins/ml2/drivers/openvswitch/agent/extension_drivers/test_qos_driver.py
++++ b/neutron/tests/unit/plugins/ml2/drivers/openvswitch/agent/extension_drivers/test_qos_driver.py
+@@ -55,7 +55,6 @@ class QosOVSAgentDriverTestCase(ovs_test_base.OVSAgentConfigTestBase):
+             self.qos_driver.br_int.delete_egress_bw_limit_for_port)
+         self.delete_ingress = (
+             self.qos_driver.br_int.delete_ingress_bw_limit_for_port)
+-        self.qos_driver.br_int.create_egress_bw_limit_for_port = mock.Mock()
+         self.create_egress = (
+             self.qos_driver.br_int.create_egress_bw_limit_for_port)
+         self.update_ingress = (
+@@ -102,6 +101,7 @@ class QosOVSAgentDriverTestCase(ovs_test_base.OVSAgentConfigTestBase):
+ 
+         class FakeVifPort(object):
+             port_name = self.port_name
++            ofport = 111
+ 
+         return {'vif_port': FakeVifPort(),
+                 'qos_policy_id': policy_id,
+@@ -142,19 +142,28 @@ class QosOVSAgentDriverTestCase(ovs_test_base.OVSAgentConfigTestBase):
+         self.create_egress.assert_not_called()
+         self.update_ingress.assert_not_called()
+ 
+-    def _test_delete_rules(self, policy):
++    def _test_delete_rules(self, qos_policy):
+         self.qos_driver.br_int.get_ingress_bw_limit_for_port = mock.Mock(
+             return_value=(self.rules[1].max_kbps,
+                           self.rules[1].max_burst_kbps))
+-        self.qos_driver.delete(self.port)
++        self.qos_driver.create(self.port, qos_policy)
++        self.qos_driver.delete(self.port, qos_policy)
+         self.delete_egress.assert_called_once_with(self.port_name)
+         self.delete_ingress.assert_called_once_with(self.port_name)
+ 
++    def _test_delete_rules_no_policy(self):
++        self.qos_driver.br_int.get_ingress_bw_limit_for_port = mock.Mock(
++            return_value=(self.rules[1].max_kbps,
++                          self.rules[1].max_burst_kbps))
++        self.qos_driver.delete(self.port)
++        self.delete_egress.assert_not_called()
++        self.delete_ingress.assert_not_called()
++
+     def test_delete_rules(self):
+         self._test_delete_rules(self.qos_policy)
+ 
+     def test_delete_rules_no_policy(self):
+-        self._test_delete_rules(None)
++        self._test_delete_rules_no_policy()
+ 
+     def test_delete_rules_no_vif_port(self):
+         port = copy.copy(self.port)
+-- 
+2.7.4
+

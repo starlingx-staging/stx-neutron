@@ -1,0 +1,36 @@
+From 5821344d932f5cba16927db3ef6f22b96aa6bdee Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Wed, 22 Nov 2017 12:38:33 -0500
+Subject: [PATCH 075/155] CGTS-8148: delete router namespace when destroying
+ metadata proxy.
+
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index 56a5156..5feb81a 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -143,8 +143,6 @@ class AVRAgentManager(manager.Manager):
+                    default="fa:16:3d:00:00:01",
+                    help=_("MAC Address to be used by metadata namespace "
+                           "proxy interface.")),
+-        cfg.BoolOpt('router_delete_namespaces', default=False,
+-                    help=_("Delete namespace after removing a router.")),
+         cfg.IntOpt('snat_interface_weight', default=250,
+                    help=_("Weight assigned to SNAT router interfaces.")),
+     ]
+@@ -1356,8 +1354,7 @@ class AVRAgentManager(manager.Manager):
+             self.process_monitor, router_id, self.conf, ns_name)
+         self._destroy_metadata_port(router_id, ns_name)
+ 
+-        if self.conf.router_delete_namespaces:
+-            self._delete_namespace(ns_name)
++        self._delete_namespace(ns_name)
+ 
+     def _get_metadata_port_uuid(self, router_id):
+         # return str(uuid.uuid5(uuid.UUID(router_id), router_id))
+-- 
+2.7.4
+

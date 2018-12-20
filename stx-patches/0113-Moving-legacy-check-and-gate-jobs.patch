@@ -1,0 +1,1612 @@
+From c48c7183c2adb5e4809ab7290e46f4d1189775c7 Mon Sep 17 00:00:00 2001
+From: Miguel Lavalle <miguel.lavalle@huawei.com>
+Date: Mon, 4 Dec 2017 17:17:34 -0600
+Subject: [PATCH 113/155] Moving legacy check and gate jobs
+
+After the migration to Zuul V3, this patchset relocates all the legacy
+check and gate jobs
+
+Conflicts:
+        .zuul.yaml
+
+Change-Id: I2cfa6030cb0826665d48d2c5e73f29401b6c1f4b
+(cherry picked from commit 1fe66db4a8981a728abc6781ed9c579f7e8dcf52)
+---
+ .zuul.yaml                                         | 291 +++++++++++++++++++++
+ playbooks/legacy/neutron-fullstack/post.yaml       |  80 ++++++
+ playbooks/legacy/neutron-fullstack/run.yaml        |  54 ++++
+ playbooks/legacy/neutron-functional/post.yaml      |  80 ++++++
+ playbooks/legacy/neutron-functional/run.yaml       |  54 ++++
+ .../legacy/neutron-grenade-dvr-multinode/post.yaml |  15 ++
+ .../legacy/neutron-grenade-dvr-multinode/run.yaml  |  47 ++++
+ .../legacy/neutron-grenade-multinode/post.yaml     |  15 ++
+ .../legacy/neutron-grenade-multinode/run.yaml      |  47 ++++
+ playbooks/legacy/neutron-grenade/post.yaml         |  15 ++
+ playbooks/legacy/neutron-grenade/run.yaml          |  57 ++++
+ playbooks/legacy/neutron-rally-neutron/post.yaml   |  41 +++
+ playbooks/legacy/neutron-rally-neutron/run.yaml    | 175 +++++++++++++
+ .../post.yaml                                      |  15 ++
+ .../neutron-tempest-dvr-ha-multinode-full/run.yaml |  63 +++++
+ playbooks/legacy/neutron-tempest-dvr/post.yaml     |  15 ++
+ playbooks/legacy/neutron-tempest-dvr/run.yaml      |  44 ++++
+ playbooks/legacy/neutron-tempest-full/post.yaml    |  15 ++
+ playbooks/legacy/neutron-tempest-full/run.yaml     |  56 ++++
+ .../legacy/neutron-tempest-linuxbridge/post.yaml   |  15 ++
+ .../legacy/neutron-tempest-linuxbridge/run.yaml    |  57 ++++
+ .../neutron-tempest-multinode-full/post.yaml       |  15 ++
+ .../legacy/neutron-tempest-multinode-full/run.yaml |  64 +++++
+ playbooks/legacy/neutron-tempest-ovsfw/post.yaml   |  15 ++
+ playbooks/legacy/neutron-tempest-ovsfw/run.yaml    |  48 ++++
+ 25 files changed, 1393 insertions(+)
+ create mode 100644 .zuul.yaml
+ create mode 100644 playbooks/legacy/neutron-fullstack/post.yaml
+ create mode 100644 playbooks/legacy/neutron-fullstack/run.yaml
+ create mode 100644 playbooks/legacy/neutron-functional/post.yaml
+ create mode 100644 playbooks/legacy/neutron-functional/run.yaml
+ create mode 100644 playbooks/legacy/neutron-grenade-dvr-multinode/post.yaml
+ create mode 100644 playbooks/legacy/neutron-grenade-dvr-multinode/run.yaml
+ create mode 100644 playbooks/legacy/neutron-grenade-multinode/post.yaml
+ create mode 100644 playbooks/legacy/neutron-grenade-multinode/run.yaml
+ create mode 100644 playbooks/legacy/neutron-grenade/post.yaml
+ create mode 100644 playbooks/legacy/neutron-grenade/run.yaml
+ create mode 100644 playbooks/legacy/neutron-rally-neutron/post.yaml
+ create mode 100644 playbooks/legacy/neutron-rally-neutron/run.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/post.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/run.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-dvr/post.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-dvr/run.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-full/post.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-full/run.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-linuxbridge/post.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-linuxbridge/run.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-multinode-full/post.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-multinode-full/run.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-ovsfw/post.yaml
+ create mode 100644 playbooks/legacy/neutron-tempest-ovsfw/run.yaml
+
+diff --git a/.zuul.yaml b/.zuul.yaml
+new file mode 100644
+index 0000000..de431b2
+--- /dev/null
++++ b/.zuul.yaml
+@@ -0,0 +1,291 @@
++- project:
++    name: openstack/neutron
++    check:
++      jobs:
++        - neutron-functional
++        - neutron-fullstack
++        - neutron-rally-neutron
++        - neutron-tempest-dvr
++        - neutron-tempest-linuxbridge
++        - neutron-grenade-multinode
++        - neutron-grenade-dvr-multinode
++        - neutron-tempest-multinode-full
++        - neutron-tempest-dvr-ha-multinode-full
++        - neutron-tempest-ovsfw
++        - neutron-tempest-full
++        - neutron-grenade
++    gate:
++      jobs:
++        - neutron-functional
++        - neutron-tempest-dvr
++        - neutron-tempest-linuxbridge
++        - neutron-grenade-multinode
++        - neutron-grenade-dvr-multinode
++        - neutron-tempest-full
++        - neutron-grenade
++
++- job:
++    name: neutron-functional
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-functional/run.yaml
++    post-run: playbooks/legacy/neutron-functional/post.yaml
++    timeout: 7800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++    irrelevant-files:
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^releasenotes/.*$
++
++- job:
++    name: neutron-fullstack
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-fullstack/run.yaml
++    post-run: playbooks/legacy/neutron-fullstack/post.yaml
++    timeout: 7800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++    irrelevant-files:
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^releasenotes/.*$
++    voting: false
++
++- job:
++    name: neutron-rally-neutron
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-rally-neutron/run.yaml
++    post-run: playbooks/legacy/neutron-rally-neutron/post.yaml
++    timeout: 7800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/aodh
++      - openstack/ceilometer
++      - openstack/diskimage-builder
++      - openstack/ironic
++      - openstack/magnum
++      - openstack/networking-bgpvpn
++      - openstack/neutron
++      - openstack/neutron-fwaas
++      - openstack/neutron-lbaas
++      - openstack/neutron-vpnaas
++      - openstack/octavia
++      - openstack/panko
++      - openstack/python-magnumclient
++      - openstack/python-senlinclient
++      - openstack/python-watcherclient
++      - openstack/python-zaqarclient
++      - openstack/rally
++      - openstack/senlin
++      - openstack/tripleo-image-elements
++      - openstack/watcher
++      - openstack/zaqar-ui
++    irrelevant-files:
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^tools/.*$
++      - ^tox.ini$
++
++- job:
++    name: neutron-tempest-dvr
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-tempest-dvr/run.yaml
++    post-run: playbooks/legacy/neutron-tempest-dvr/post.yaml
++    timeout: 7800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++      - openstack/tempest
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++
++- job:
++    name: neutron-tempest-linuxbridge
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-tempest-linuxbridge/run.yaml
++    post-run: playbooks/legacy/neutron-tempest-linuxbridge/post.yaml
++    timeout: 8400
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++      - openstack/tempest
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++
++- job:
++    name: neutron-grenade-multinode
++    parent: legacy-dsvm-base-multinode
++    run: playbooks/legacy/neutron-grenade-multinode/run.yaml
++    post-run: playbooks/legacy/neutron-grenade-multinode/post.yaml
++    timeout: 10800
++    required-projects:
++      - openstack-dev/grenade
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++    nodeset: legacy-ubuntu-xenial-2-node
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++
++- job:
++    name: neutron-grenade-dvr-multinode
++    parent: legacy-dsvm-base-multinode
++    run: playbooks/legacy/neutron-grenade-dvr-multinode/run.yaml
++    post-run: playbooks/legacy/neutron-grenade-dvr-multinode/post.yaml
++    timeout: 7500
++    required-projects:
++      - openstack-dev/grenade
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++    nodeset: legacy-ubuntu-xenial-2-node
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++
++- job:
++    name: neutron-tempest-multinode-full
++    parent: legacy-dsvm-base-multinode
++    run: playbooks/legacy/neutron-tempest-multinode-full/run.yaml
++    post-run: playbooks/legacy/neutron-tempest-multinode-full/post.yaml
++    timeout: 10800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++      - openstack/tempest
++    nodeset: legacy-ubuntu-xenial-2-node
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++    voting: false
++
++- job:
++    name: neutron-tempest-dvr-ha-multinode-full
++    parent: legacy-dsvm-base-multinode
++    run: playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/run.yaml
++    post-run: playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/post.yaml
++    timeout: 10800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++      - openstack/tempest
++    nodeset: legacy-ubuntu-xenial-3-node
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++    voting: false
++
++- job:
++    name: neutron-tempest-ovsfw
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-tempest-ovsfw/run.yaml
++    post-run: playbooks/legacy/neutron-tempest-ovsfw/post.yaml
++    timeout: 7800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++      - openstack/tempest
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++    voting: false
++
++- job:
++    name: neutron-tempest-full
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-tempest-full/run.yaml
++    post-run: playbooks/legacy/neutron-tempest-full/post.yaml
++    timeout: 10800
++    required-projects:
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++      - openstack/tempest
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
++
++- job:
++    name: neutron-grenade
++    parent: legacy-dsvm-base
++    run: playbooks/legacy/neutron-grenade/run.yaml
++    post-run: playbooks/legacy/neutron-grenade/post.yaml
++    timeout: 10800
++    required-projects:
++      - openstack-dev/grenade
++      - openstack-infra/devstack-gate
++      - openstack/neutron
++    irrelevant-files:
++      - ^(test-|)requirements.txt$
++      - ^.*\.rst$
++      - ^doc/.*$
++      - ^neutron/locale/.*$
++      - ^neutron/tests/unit/.*$
++      - ^releasenotes/.*$
++      - ^setup.cfg$
++      - ^tools/.*$
++      - ^tox.ini$
+diff --git a/playbooks/legacy/neutron-fullstack/post.yaml b/playbooks/legacy/neutron-fullstack/post.yaml
+new file mode 100644
+index 0000000..dac8753
+--- /dev/null
++++ b/playbooks/legacy/neutron-fullstack/post.yaml
+@@ -0,0 +1,80 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=**/*nose_results.html
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=**/*testr_results.html.gz
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/.testrepository/tmp*
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=**/*testrepository.subunit.gz
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}/tox'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/.tox/*/log/*
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-fullstack/run.yaml b/playbooks/legacy/neutron-fullstack/run.yaml
+new file mode 100644
+index 0000000..be9c30f
+--- /dev/null
++++ b/playbooks/legacy/neutron-fullstack/run.yaml
+@@ -0,0 +1,54 @@
++- hosts: all
++  name: Autoconverted job legacy-neutron-dsvm-fullstack from old job gate-neutron-dsvm-fullstack-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=0
++          export DEVSTACK_GATE_EXERCISES=0
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_INSTALL_TESTONLY=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++
++          function gate_hook {
++              bash -xe $BASE/new/neutron/neutron/tests/contrib/gate_hook.sh dsvm-fullstack
++          }
++          export -f gate_hook
++
++          function post_test_hook {
++              bash -xe $BASE/new/neutron/neutron/tests/contrib/post_test_hook.sh dsvm-fullstack
++          }
++          export -f post_test_hook
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-functional/post.yaml b/playbooks/legacy/neutron-functional/post.yaml
+new file mode 100644
+index 0000000..dac8753
+--- /dev/null
++++ b/playbooks/legacy/neutron-functional/post.yaml
+@@ -0,0 +1,80 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=**/*nose_results.html
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=**/*testr_results.html.gz
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/.testrepository/tmp*
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=**/*testrepository.subunit.gz
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}/tox'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/.tox/*/log/*
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-functional/run.yaml b/playbooks/legacy/neutron-functional/run.yaml
+new file mode 100644
+index 0000000..1ebd4ca
+--- /dev/null
++++ b/playbooks/legacy/neutron-functional/run.yaml
+@@ -0,0 +1,54 @@
++- hosts: all
++  name: Autoconverted job legacy-neutron-dsvm-functional from old job gate-neutron-dsvm-functional-ubuntu-xenial-nv
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=0
++          export DEVSTACK_GATE_EXERCISES=0
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_INSTALL_TESTONLY=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++
++          function gate_hook {
++              bash -xe $BASE/new/neutron/neutron/tests/contrib/gate_hook.sh dsvm-functional
++          }
++          export -f gate_hook
++
++          function post_test_hook {
++              bash -xe $BASE/new/neutron/neutron/tests/contrib/post_test_hook.sh dsvm-functional
++          }
++          export -f post_test_hook
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-grenade-dvr-multinode/post.yaml b/playbooks/legacy/neutron-grenade-dvr-multinode/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-grenade-dvr-multinode/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-grenade-dvr-multinode/run.yaml b/playbooks/legacy/neutron-grenade-dvr-multinode/run.yaml
+new file mode 100644
+index 0000000..9fb5324
+--- /dev/null
++++ b/playbooks/legacy/neutron-grenade-dvr-multinode/run.yaml
+@@ -0,0 +1,47 @@
++- hosts: primary
++  name: Autoconverted job legacy-grenade-dsvm-neutron-dvr-multinode from old job gate-grenade-dsvm-neutron-dvr-multinode-ubuntu-xenial-nv
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_CONFIGDRIVE=0
++          export DEVSTACK_GATE_GRENADE=pullup
++          # Test DVR upgrade on multinode
++          export PROJECTS="openstack-dev/grenade $PROJECTS"
++          export DEVSTACK_GATE_NEUTRON_DVR=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          export DEVSTACK_GATE_TOPOLOGY="multinode"
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-grenade-multinode/post.yaml b/playbooks/legacy/neutron-grenade-multinode/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-grenade-multinode/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-grenade-multinode/run.yaml b/playbooks/legacy/neutron-grenade-multinode/run.yaml
+new file mode 100644
+index 0000000..0d7814a
+--- /dev/null
++++ b/playbooks/legacy/neutron-grenade-multinode/run.yaml
+@@ -0,0 +1,47 @@
++- hosts: primary
++  name: Autoconverted job legacy-grenade-dsvm-neutron-multinode from old job gate-grenade-dsvm-neutron-multinode-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_CONFIGDRIVE=0
++          export DEVSTACK_GATE_GRENADE=pullup
++          export PROJECTS="openstack-dev/grenade $PROJECTS"
++          # Default to non DVR
++          export DEVSTACK_GATE_NEUTRON_DVR=0
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          export DEVSTACK_GATE_TOPOLOGY="multinode"
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-grenade/post.yaml b/playbooks/legacy/neutron-grenade/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-grenade/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-grenade/run.yaml b/playbooks/legacy/neutron-grenade/run.yaml
+new file mode 100644
+index 0000000..31701b8
+--- /dev/null
++++ b/playbooks/legacy/neutron-grenade/run.yaml
+@@ -0,0 +1,57 @@
++- hosts: all
++  name: Autoconverted job legacy-grenade-dsvm-neutron from old job gate-grenade-dsvm-neutron-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat << 'EOF' >>"/tmp/dg-local.conf"
++          [[local|localrc]]
++          # NOTE(mriedem): cells v2 should be the default after newton-eol
++          NOVA_CONFIGURE_CELLSV2=True
++
++          EOF
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PROJECTS="openstack-dev/grenade $PROJECTS"
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_GRENADE=pullup
++          export DEVSTACK_GATE_NEUTRON=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-rally-neutron/post.yaml b/playbooks/legacy/neutron-rally-neutron/post.yaml
+new file mode 100644
+index 0000000..4c699fc
+--- /dev/null
++++ b/playbooks/legacy/neutron-rally-neutron/post.yaml
+@@ -0,0 +1,41 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/rally-plot/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/rally-plot/extra/index.html
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-rally-neutron/run.yaml b/playbooks/legacy/neutron-rally-neutron/run.yaml
+new file mode 100644
+index 0000000..2335b48
+--- /dev/null
++++ b/playbooks/legacy/neutron-rally-neutron/run.yaml
+@@ -0,0 +1,175 @@
++- hosts: all
++  name: Autoconverted job legacy-rally-dsvm-neutron-neutron from old job gate-rally-dsvm-neutron-neutron-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          if [ $ZUUL_PROJECT == "openstack/rally" ] && [ $ZUUL_BRANCH != "master" ]; then
++              export DEVSTACK_GATE_FEATURE_MATRIX="/opt/stack/new/rally/devstack/features.yaml"
++          fi
++
++          export PROJECTS="openstack/rally $PROJECTS"
++
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_HORIZON=1
++          export DEVSTACK_GATE_NEUTRON_EXTENSIONS=0
++          export DEVSTACK_GATE_IRONIC=0
++          export DEVSTACK_GATE_ZAQAR=0
++          export DEVSTACK_GATE_SENLIN=0
++          export DEVSTACK_GATE_WATCHER=0
++          export DEVSTACK_GATE_MAGNUM=0
++          export DEVSTACK_GATE_HEAT=0
++          export DEVSTACK_GATE_SWIFT=1
++          export DEVSTACK_GATE_TELEMETRY=0
++          export DEVSTACK_GATE_TEMPEST_LARGE_OPS=0
++          export DEVSTACK_GATE_EXERCISES=0
++          export DEVSTACK_GATE_PREPOPULATE_USERS=0
++
++          export DEVSTACK_GATE_USE_PYTHON3=False
++          export USE_KEYSTONE_V2API=0
++          export RALLY_SCENARIO=$ZUUL_SHORT_PROJECT_NAME-neutron
++
++          if [ $USE_KEYSTONE_V2API -eq 1 ]; then
++              export IDENTITY_API_VERSION=2.0
++          else
++              export IDENTITY_API_VERSION=3
++          fi
++
++          DEVSTACK_LOCAL_CONFIG="enable_plugin rally git://git.openstack.org/openstack/rally"
++          DEVSTACK_LOCAL_CONFIG+=$'\n'"CINDER_ENABLE_V1_API=True"
++          DEVSTACK_LOCAL_CONFIG+=$'\n'"IDENTITY_API_VERSION=$IDENTITY_API_VERSION"
++
++          ENABLED_SERVICES=key,horizon,
++          ENABLED_SERVICES+=cinder,c-api,c-vol,c-sch,c-bak,
++          ENABLED_SERVICES+=g-api,g-reg,
++          ENABLED_SERVICES+=n-api,n-crt,n-cpu,n-sch,n-cond,
++          ENABLED_SERVICES+=q-qos,
++
++          if [ $DEVSTACK_GATE_SWIFT -eq 1 ];
++          then
++              ENABLED_SERVICES+=s-proxy,s-account,s-container,s-object,
++          else
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"disable_service s-account"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"disable_service s-container"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"disable_service s-object"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"disable_service s-proxy"
++          fi
++
++          if [ $DEVSTACK_GATE_HEAT -ne 0 ]; then
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin heat https://git.openstack.org/openstack/heat"
++          fi
++
++          export PROJECTS="openstack/neutron $PROJECTS"
++          export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin neutron git://git.openstack.org/openstack/neutron"
++          if [ $DEVSTACK_GATE_NEUTRON_EXTENSIONS -ne 0 ]; then
++              export PROJECTS="openstack/neutron-lbaas $PROJECTS"
++              export PROJECTS="openstack/octavia $PROJECTS"
++              export PROJECTS="openstack/neutron-fwaas $PROJECTS"
++              export PROJECTS="openstack/diskimage-builder $PROJECTS"
++              export PROJECTS="openstack/tripleo-image-elements $PROJECTS"
++              export PROJECTS="openstack/neutron-vpnaas $PROJECTS"
++              export PROJECTS="openstack/networking-bgpvpn $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin neutron-lbaas git://git.openstack.org/openstack/neutron-lbaas"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin octavia https://git.openstack.org/openstack/octavia"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin neutron-fwaas https://git.openstack.org/openstack/neutron-fwaas"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin neutron-vpnaas https://git.openstack.org/openstack/neutron-vpnaas"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin networking-bgpvpn https://git.openstack.org/openstack/networking-bgpvpn.git"
++              export ENABLED_SERVICES+=q-lbaasv2,octavia,o-cw,o-hk,o-hm,o-api,q-fwaas,q-svc,q-agt,q-dhcp,q-l3,q-meta,
++          fi
++          if [ $DEVSTACK_GATE_IRONIC -ne 0 ]; then
++              export PROJECTS="openstack/ironic $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin ironic git://git.openstack.org/openstack/ironic"
++          fi
++          if [ $DEVSTACK_GATE_ZAQAR -ne 0 ]; then
++              export PROJECTS="openstack/python-zaqarclient $PROJECTS"
++              export PROJECTS="openstack/zaqar-ui $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin zaqar git://git.openstack.org/openstack/zaqar"
++          fi
++          if [ $DEVSTACK_GATE_SENLIN -ne 0 ]; then
++              export PROJECTS="openstack/senlin $PROJECTS"
++              export PROJECTS="openstack/python-senlinclient $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin senlin git://git.openstack.org/openstack/senlin"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_service sl-api sl-eng"
++          fi
++          if [ $DEVSTACK_GATE_WATCHER -ne 0 ]; then
++              export PROJECTS="openstack/watcher $PROJECTS"
++              export PROJECTS="openstack/python-watcherclient $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin watcher git://git.openstack.org/openstack/watcher"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_service watcher-api watcher-decision-engine watcher-applier"
++          fi
++          if [ $DEVSTACK_GATE_MAGNUM -ne 0 ]||[ $RALLY_SCENARIO = "magnum" ]; then
++              export PROJECTS="openstack/magnum $PROJECTS"
++              export PROJECTS="openstack/python-magnumclient $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin magnum https://git.openstack.org/openstack/magnum"
++          fi
++          if [ $DEVSTACK_GATE_TELEMETRY -ne 0 ]; then
++              export PROJECTS="openstack/panko $PROJECTS"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin panko git://git.openstack.org/openstack/panko"
++              export ENABLED_SERVICES+=panko-api,
++              export PROJECTS="openstack/ceilometer $PROJECTS"
++              export PROJECTS="openstack/aodh $PROJECTS"
++              export PROJECTS="openstack/gnocchi $PROJECTS"
++
++              export CEILOMETER_NOTIFICATION_TOPICS=notifications,profiler
++
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin ceilometer git://git.openstack.org/openstack/ceilometer"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin aodh git://git.openstack.org/openstack/aodh"
++              export DEVSTACK_LOCAL_CONFIG+=$'\n'"enable_plugin gnocchi git://git.openstack.org/openstack/gnocchi"
++              export ENABLED_SERVICES+=ceilometer-acompute,ceilometer-acentral,ceilometer-api,
++              export ENABLED_SERVICES+=ceilometer-anotification,ceilometer-collector,
++              export ENABLED_SERVICES+=aodh-api,aodh-evaluator,aodh-notifier,
++          fi
++          export ENABLED_SERVICES
++          export DEVSTACK_LOCAL_CONFIG
++
++          if [[ "$ZUUL_PROJECT" = "openstack/neutron" ]]; then
++              function gate_hook {
++                  bash -xe $BASE/new/neutron/neutron/tests/contrib/gate_hook.sh rally $ZUUL_SHORT_PROJECT_NAME-neutron
++              }
++              export -f gate_hook
++          fi
++
++          function post_test_hook {
++              $BASE/new/rally/tests/ci/rally-gate.sh
++          }
++          export -f post_test_hook
++
++          if [[ "$DEVSTACK_GATE_USE_PYTHON3" = "True" ]]; then
++              # Switch off glance->swift communication as swift fails under py3.x
++              function pre_test_hook {
++                  local localconf=$BASE/new/devstack/local.conf
++                  echo "[[post-config|\$GLANCE_API_CONF]]" >> $localconf
++                  echo "[glance_store]" >> $localconf
++                  echo "default_store=file" >> $localconf
++              }
++              export -f pre_test_hook
++          fi
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/post.yaml b/playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/run.yaml b/playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/run.yaml
+new file mode 100644
+index 0000000..eecae67
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-dvr-ha-multinode-full/run.yaml
+@@ -0,0 +1,63 @@
++- hosts: primary
++  name: Autoconverted job legacy-tempest-dsvm-neutron-dvr-ha-multinode-full from old
++    job gate-tempest-dsvm-neutron-dvr-ha-multinode-full-ubuntu-xenial-nv
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat << 'EOF' >>"/tmp/dg-local.conf"
++          [[local|localrc]]
++          NOVA_VNC_ENABLED=true
++          VNCSERVER_LISTEN=0.0.0.0
++          VNCSERVER_PROXYCLIENT_ADDRESS=$HOST_IP
++
++          EOF
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_CONFIGDRIVE=0
++          export DEVSTACK_GATE_TEMPEST_FULL=1
++          # Test DVR works multinode
++          export DEVSTACK_GATE_NEUTRON_DVR=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          export DEVSTACK_GATE_TOPOLOGY="multinode"
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-tempest-dvr/post.yaml b/playbooks/legacy/neutron-tempest-dvr/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-dvr/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-tempest-dvr/run.yaml b/playbooks/legacy/neutron-tempest-dvr/run.yaml
+new file mode 100644
+index 0000000..9cb2275
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-dvr/run.yaml
+@@ -0,0 +1,44 @@
++- hosts: all
++  name: Autoconverted job legacy-tempest-dsvm-neutron-dvr from old job gate-tempest-dsvm-neutron-dvr-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_TEMPEST_FULL=1
++          export DEVSTACK_GATE_NEUTRON_DVR=1
++          export DEVSTACK_GATE_TLSPROXY=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-tempest-full/post.yaml b/playbooks/legacy/neutron-tempest-full/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-full/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-tempest-full/run.yaml b/playbooks/legacy/neutron-tempest-full/run.yaml
+new file mode 100644
+index 0000000..fad35a0
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-full/run.yaml
+@@ -0,0 +1,56 @@
++- hosts: all
++  name: Autoconverted job legacy-tempest-dsvm-neutron-full from old job gate-tempest-dsvm-neutron-full-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat << 'EOF' >>"/tmp/dg-local.conf"
++          [[local|localrc]]
++          ENABLE_FILE_INJECTION=True
++
++          EOF
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_TEMPEST_FULL=1
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_TLSPROXY=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-tempest-linuxbridge/post.yaml b/playbooks/legacy/neutron-tempest-linuxbridge/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-linuxbridge/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-tempest-linuxbridge/run.yaml b/playbooks/legacy/neutron-tempest-linuxbridge/run.yaml
+new file mode 100644
+index 0000000..2152e2e
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-linuxbridge/run.yaml
+@@ -0,0 +1,57 @@
++- hosts: all
++  name: Autoconverted job legacy-tempest-dsvm-neutron-linuxbridge from old job gate-tempest-dsvm-neutron-linuxbridge-ubuntu-xenial
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat << 'EOF' >>"/tmp/dg-local.conf"
++          [[local|localrc]]
++          Q_AGENT=linuxbridge
++          PHYSICAL_NETWORK=default
++
++          EOF
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_TEMPEST_FULL=1
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_TLSPROXY=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-tempest-multinode-full/post.yaml b/playbooks/legacy/neutron-tempest-multinode-full/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-multinode-full/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-tempest-multinode-full/run.yaml b/playbooks/legacy/neutron-tempest-multinode-full/run.yaml
+new file mode 100644
+index 0000000..a8972f5
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-multinode-full/run.yaml
+@@ -0,0 +1,64 @@
++- hosts: primary
++  name: Autoconverted job legacy-tempest-dsvm-neutron-multinode-full from old job
++    gate-tempest-dsvm-neutron-multinode-full-ubuntu-xenial-nv
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat << 'EOF' >>"/tmp/dg-local.conf"
++          [[local|localrc]]
++          NOVA_VNC_ENABLED=true
++          VNCSERVER_LISTEN=0.0.0.0
++          VNCSERVER_PROXYCLIENT_ADDRESS=$HOST_IP
++
++          EOF
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_NEUTRON=1
++          export DEVSTACK_GATE_CONFIGDRIVE=0
++          export DEVSTACK_GATE_TEMPEST_FULL=1
++          export DEVSTACK_GATE_TLSPROXY=1
++          # Default to non DVR
++          export DEVSTACK_GATE_NEUTRON_DVR=0
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++          export DEVSTACK_GATE_TOPOLOGY="multinode"
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+diff --git a/playbooks/legacy/neutron-tempest-ovsfw/post.yaml b/playbooks/legacy/neutron-tempest-ovsfw/post.yaml
+new file mode 100644
+index 0000000..e07f551
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-ovsfw/post.yaml
+@@ -0,0 +1,15 @@
++- hosts: primary
++  tasks:
++
++    - name: Copy files from {{ ansible_user_dir }}/workspace/ on node
++      synchronize:
++        src: '{{ ansible_user_dir }}/workspace/'
++        dest: '{{ zuul.executor.log_root }}'
++        mode: pull
++        copy_links: true
++        verify_host: true
++        rsync_opts:
++          - --include=/logs/**
++          - --include=*/
++          - --exclude=*
++          - --prune-empty-dirs
+diff --git a/playbooks/legacy/neutron-tempest-ovsfw/run.yaml b/playbooks/legacy/neutron-tempest-ovsfw/run.yaml
+new file mode 100644
+index 0000000..ac2dc19
+--- /dev/null
++++ b/playbooks/legacy/neutron-tempest-ovsfw/run.yaml
+@@ -0,0 +1,48 @@
++- hosts: all
++  name: Autoconverted job legacy-tempest-dsvm-neutron-ovsfw from old job gate-tempest-dsvm-neutron-ovsfw-ubuntu-xenial-nv
++  tasks:
++
++    - name: Ensure legacy workspace directory
++      file:
++        path: '{{ ansible_user_dir }}/workspace'
++        state: directory
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          cat > clonemap.yaml << EOF
++          clonemap:
++            - name: openstack-infra/devstack-gate
++              dest: devstack-gate
++          EOF
++          /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
++              git://git.openstack.org \
++              openstack-infra/devstack-gate
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
++
++    - shell:
++        cmd: |
++          set -e
++          set -x
++          export PYTHONUNBUFFERED=true
++          export DEVSTACK_GATE_TEMPEST=1
++          export DEVSTACK_GATE_TEMPEST_FULL=1
++          export DEVSTACK_GATE_NEUTRON=1
++          export BRANCH_OVERRIDE=default
++          if [ "$BRANCH_OVERRIDE" != "default" ] ; then
++              export OVERRIDE_ZUUL_BRANCH=$BRANCH_OVERRIDE
++          fi
++
++          function gate_hook {
++              bash -xe $BASE/new/neutron/neutron/tests/contrib/gate_hook.sh full-ovsfw
++          }
++          export -f gate_hook
++
++          cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh
++          ./safe-devstack-vm-gate-wrap.sh
++        executable: /bin/bash
++        chdir: '{{ ansible_user_dir }}/workspace'
++      environment: '{{ zuul | zuul_legacy_vars }}'
+-- 
+2.7.4
+

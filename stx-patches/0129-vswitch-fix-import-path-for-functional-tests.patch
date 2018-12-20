@@ -1,0 +1,31 @@
+From 38cfed388d82a71e668efb43b61e5396a285a831 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 19 Jan 2018 09:49:06 -0600
+Subject: [PATCH 129/155] vswitch: fix import path for functional tests
+
+Adjusting for code moved during Pike rebase
+---
+ neutron/tests/functional/vswitch/test_vswitch_interface.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/tests/functional/vswitch/test_vswitch_interface.py b/neutron/tests/functional/vswitch/test_vswitch_interface.py
+index ad0dc91..81df847 100644
+--- a/neutron/tests/functional/vswitch/test_vswitch_interface.py
++++ b/neutron/tests/functional/vswitch/test_vswitch_interface.py
+@@ -25,12 +25,12 @@ import uuid
+ import fixtures
+ import testtools
+ 
+-from neutron.agent.common import config
+ from neutron.agent.linux import interface as linux_interface
+ from neutron.agent.linux import ip_lib
+ from neutron.agent.vswitch import api
+ from neutron.agent.vswitch import interface
+ from neutron.common import constants as n_const
++from neutron.conf.agent import common as config
+ 
+ 
+ class FakeNetwork(object):
+-- 
+2.7.4
+

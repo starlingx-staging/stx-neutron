@@ -1,0 +1,363 @@
+From c28fd0b3cf935c1855803badbc8dff3f194f96cf Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Mon, 25 Sep 2017 13:10:43 -0400
+Subject: [PATCH 057/155] US102722: Remove vlan-subnet code from neutron agent
+
+This commit removes code relating to vlan subnets from neutron agents.
+This code is no longer eeded now that we no longer support setting
+vlan ID for an individual subnet.  This should be replaced by configuring
+port trunks where necessary.
+
+Conflicts:
+	neutron/plugins/wrs/agent/avs/dvr.py
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 173 +++++----------------------------
+ neutron/plugins/wrs/agent/avs/dvr.py   |  16 +--
+ 2 files changed, 30 insertions(+), 159 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index f059c3c..6436894 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -189,31 +189,6 @@ def is_avs_port(device_owner):
+     return False
+ 
+ 
+-def is_vlan_capable_port(device_owner):
+-    """
+-    Determine whether a device is capable of VLAN interfaces.  Only devices
+-    directly related to VM instances are capable of VLAN interfaces.  All DHCP
+-    ports and router interfaces attach only to a single layer2 segment
+-    therefore they always have an untagged interface regardless of whether
+-    their layer2 segment maps to a VLAN subnet.  This information is used to
+-    determine which layer2 segments to attach when a port is detected.
+-
+-    * For VM ports we always attach the network segment, any vlan subnet
+-      segments, and any trunk subport segments regardless of whether the VM has
+-      an IP address on any of those segments.
+-    * For DHCP ports and Router interfaces we examine the list of IP addresses
+-      on the port and determine which subnet is active (there can only be
+-      one).  We use that subnet's VLAN to determine which layer2 segment to
+-      attach but do so as an untagged interface as the DHCP and Router
+-      implementations are unaware of VLAN interfaces.
+-    """
+-    if device_owner.startswith('compute:'):
+-        return True
+-    elif device_owner.startswith('trunk:'):
+-        return True
+-    return False
+-
+-
+ class VSwitchBaseRpcCallbacksMixin(object):
+ 
+     def port_update(self, context, **kwargs):
+@@ -351,43 +326,12 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         RPC request handler to service subnet create operations from plugin.
+         """
+         LOG.debug("RPC subnet_create received {}".format(kwargs))
+-        subnet = kwargs.get('subnet')
+-
+-        # subnets without a vlan do not need a seperate network segment
+-        if not subnet['vlan_id']:
+-            return
+-
+-        # obtain the ports that may need to be updated
+-        virtual_ports = self.vswitch_mgr.get_virtual_port_list()
+-        for port_uuid, port in six.iteritems(virtual_ports):
+-            self.mark_port_for_refresh(port_uuid)
+ 
+     def subnet_delete(self, context, **kwargs):
+         """
+         RPC request handler to service subnet delete operations from plugin.
+         """
+         LOG.debug("RPC subnet_delete received {}".format(kwargs))
+-        subnet = kwargs.get('subnet')
+-
+-        # subnets without a vlan do not have a seperate network segment
+-        if not subnet['vlan_id']:
+-            return
+-
+-        network_uuid = self.vswitch_mgr.get_network_uuid(
+-            subnet['network_id'], vlan_id=subnet['vlan_id'])
+-        try:
+-            # Do not delete interfaces in use for pnet connectivity testing
+-            in_use_interfaces = self._pnet_connectivity_interface_uuids()
+-            self.vswitch_mgr.delete_network(network_uuid, in_use_interfaces)
+-            self.virtual_networks.pop(network_uuid, None)
+-            segment = self.segment_cache.pop(network_uuid, None)
+-            self.providernet_cache.pop(self.get_providernet_key(segment), None)
+-
+-        except manager.VSwitchManagerError as e:
+-            # network may not exist if subnet is not associated with a
+-            # vlan or if there are no guest ports attached to this network
+-            LOG.debug("Failed to delete subnet network: "
+-                      "{}, {}".format(network_uuid, e))
+ 
+     def _fdb_resolve_interface(self, segment):
+         """
+@@ -951,42 +895,14 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             # Extend with VXLAN specific fields
+             self._extend_port_vxlan_details(port_details, provider_details)
+ 
+-    def get_subnets_by_vlan(self, port_details):
+-        """
+-        Reorganize the list of subnets by vlan id
+-        """
+-        subnets = port_details.get('subnets', [])
+-        device_owner = port_details['device_owner']
+-        if not is_vlan_capable_port(device_owner):
+-            # Only VM ports get attached to all possible subnets; other types
+-            # (e.g., DHCP) get attached only to those subnets for which they
+-            # have an IP address.
+-            fixed_ips = port_details.get('fixed_ips', [])
+-        else:
+-            fixed_ips = None
+-        vlan_subnets = collections.defaultdict(list)
+-        fixed_subnet_ids = [ip['subnet_id'] for ip in fixed_ips or []]
+-        for s in subnets:
+-            vlan_id = s['subnet'].get('vlan_id', 0)
+-            if fixed_ips is None or s['subnet']['id'] in fixed_subnet_ids:
+-                vlan_subnets[vlan_id].append(s)
+-        return collections.OrderedDict(sorted(vlan_subnets.items()))
+-
+-    def _get_network_info(self, port_details, vlan_id):
++    def _get_network_info(self, port_details):
+         """
+         Determine which network this port should be attached to.  The normal
+         case is that the network is specified by the neutron server based on
+         which tenant network the device was attached to.
+         """
+         network = port_details.get('network')
+-        device_owner = port_details.get('device_owner')
+-        if device_owner.startswith('trunk:'):
+-            vlan_id = 0
+-        network_name = self.vswitch_mgr.get_network_name(
+-            network['id'], vlan_id=vlan_id)
+-        network_uuid = self.vswitch_mgr.get_network_uuid(
+-            network['id'], vlan_id=vlan_id)
+-        return network_uuid, network_name
++        return network['id'], network['name']
+ 
+     def _get_provider_mapping(self, physical_network):
+         return self.interface_mappings[physical_network]
+@@ -1022,7 +938,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         self._extend_port_details(details)
+ 
+         # Setup the network segment
+-        network_uuid, network_name = self._get_network_info(details, vlan_id)
++        network_uuid, network_name = self._get_network_info(details)
+         if self.manage_network_for_device(details):
+             self._setup_network(network_uuid, network_name, details)
+         else:
+@@ -1039,18 +955,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+                                 network_name, network_uuid))
+                 return
+ 
+-        if not is_vlan_capable_port(device_owner):
+-            # Only VM ports require a VLAN interface; other types (e.g., DHCP)
+-            # get attached directly to the VLAN network from their port
+-            # interface.
+-            vlan_id = 0
+-
+-        # Setup the tenant interface
+-        if port_uuid == details['port_id']:
+-            iface_uuid = self.vswitch_mgr.get_interface_uuid(
+-                port_uuid, vlan_id=vlan_id)
+-        else:
+-            iface_uuid = details['port_id']  # subport
++        # Setup the tenant interface for a trunk
++        iface_uuid = details['port_id']  # subport
+         instance = self.interfaces.get(iface_uuid)
+         if not instance and vlan_id:
+             self.vswitch_mgr.add_vlan_interface(
+@@ -1129,7 +1035,17 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         trunk_id = port_details.get('_trunk_id', 0)
+         return self.trunk_details.get(trunk_id)
+ 
+-    def get_ports_on_dvr_subnet(self, subnet_uuid, vlan_id=None):
++    @staticmethod
++    def get_fixed_subnet_ids(port_details):
++        """Return the list of subnet ids for which this port has an IP."""
++        fixed_ips = port_details.get('fixed_ips', [])
++        subnets = port_details.get('subnets', [])
++        subnet_ids = [s['subnet']['id'] for s in subnets]
++        fixed_subnet_list = [ip['subnet_id'] for ip in fixed_ips
++                             if ip['subnet_id'] in subnet_ids]
++        return fixed_subnet_list
++
++    def get_ports_on_dvr_subnet(self, subnet_uuid):
+         """This is a replacement for get_ports_on_host_by_subnet() that looks
+         at local data instead of needing to invoke a server RPC. Since the
+         vlan-transparent feature was enabled the port details include the
+@@ -1138,16 +1054,10 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         """
+         ports = set()
+         for port_uuid, details in six.iteritems(self.port_details):
+-            fixed_subnet_list = self.get_fixed_subnet_ids(details, vlan_id)
++            fixed_subnet_list = self.get_fixed_subnet_ids(details)
+             if subnet_uuid not in fixed_subnet_list:
+                 continue
+-            if vlan_id and details['device_owner'].startswith('compute:'):
+-                # TODO(alegacy): Remove with guest VLAN subnets
+-                interface_uuid = self.vswitch_mgr.get_interface_uuid(
+-                    port_uuid, vlan_id)
+-                ports.add(interface_uuid)
+-            else:
+-                ports.add(port_uuid)
++            ports.add(port_uuid)
+         return ports
+ 
+     def handle_updated_port(self, port, port_details):
+@@ -1160,9 +1070,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         that the base ethernet interface is created.
+         """
+         port_uuid = port['uuid']
+-        device_owner = port_details['device_owner']
+         vlans = set()
+-        vlan_ids = set()
+         LOG.debug("handle_updated_port for {}".format(port_uuid))
+ 
+         # Lock the port immediately if it is in the incorrect state
+@@ -1170,22 +1078,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             self.vswitch_mgr.lock_port(port_uuid)
+             port['admin-state'] = "down"  # update cached state
+ 
+-        if is_vlan_capable_port(device_owner):
+-            # Setup the untagged interface
+-            self.setup_interface(port, port_details)
+-
+-        # Setup the port for any VLAN subnets.
+-        # TODO(alegacy): when VLAN subnets are no longer supported this can go
+-        # back to being a simple call to setup_interface()
+-        vlan_subnets = self.get_subnets_by_vlan(port_details)
+-        for vlan_id, subnets in six.iteritems(vlan_subnets):
+-            if is_vlan_capable_port(device_owner) and not vlan_id:
+-                continue  # already handled in the first setup_interface
+-            details = copy.deepcopy(port_details)
+-            details.update(subnets[0])
+-            details['subnets'] = subnets
+-            vlans.add(self.setup_interface(port, details, vlan_id=vlan_id))
+-            vlan_ids.add(vlan_id)
++        # Setup the untagged interface
++        self.setup_interface(port, port_details)
+ 
+         # Setup the port for any trunk that may be overlaid.
+         trunk_details = self.get_trunk_details(port_uuid)
+@@ -1195,8 +1089,6 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             for subport in trunk_details.sub_ports if trunk_details else []:
+                 details = self.get_port_details(subport.port_id)
+                 vlan_id = subport.segmentation_id
+-                if vlan_id in vlan_ids:
+-                    continue
+                 vlans.add(self.setup_interface(port, details, vlan_id=vlan_id))
+                 # Report that the subport is UP.  This is not currently done in
+                 # OVS or Linuxbridge, but our customers will definitely
+@@ -1305,20 +1197,14 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             return
+ 
+         network_ids = set()
+-        # Handle vlan subnets first.
+-        # TODO(alegacy): when vlan subnets are no longer supported this can be
+-        # replaced with the network_id in the port_details.
+-        vlan_subnets = self.get_subnets_by_vlan(port_details)
+-        for vlan_id, subnets in six.iteritems(vlan_subnets):
+-            network_uuid, _ = self._get_network_info(port_details, vlan_id)
+-            network_ids.add(network_uuid)
++        network_ids.add(port_details.get('network_id'))
+ 
+         # Handle trunk subports.
+         for subport in trunk_details.sub_ports if trunk_details else []:
+             self.interface_details.pop(subport.port_id, None)
+             details = self.port_details.pop(subport.port_id, None)
+             if details:
+-                network_uuid, _ = self._get_network_info(details, None)
++                network_uuid, _ = self._get_network_info(details)
+                 network_ids.add(network_uuid)
+ 
+         # Prune the list of networks down to those that still exist
+@@ -1412,16 +1298,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         """
+         Process a new router interface attaching it to a network if necessary
+         """
+-        # TODO(alegacy): when VLAN subnets are no longer supported this can go
+-        # back to being a simple call to setup_interface()
+-        vlan_subnets = self.get_subnets_by_vlan(port_details)
+-        assert(len(vlan_subnets) == 1)
+-
+-        for vlan_id, subnets in six.iteritems(vlan_subnets):
+-            details = copy.deepcopy(port_details)
+-            details.update(subnets[0])
+-            details['subnets'] = subnets
+-            self.setup_interface(interface_uuid, details, vlan_id=vlan_id)
++        self.setup_interface(interface_uuid, port_details)
+ 
+     def handle_removed_interface(self, port_uuid):
+         """
+@@ -2177,7 +2054,7 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         # Feature not supported in SDN mode so always return no data
+         return None
+ 
+-    def _get_network_info(self, port_details, vlan_id=None):
++    def _get_network_info(self, port_details):
+         """
+         Determine which network this port should be attached to.  The normal
+         case is that the network is specified by the neutron server based on
+@@ -2191,7 +2068,7 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         if device_owner in DEVICES_ON_EXTERNAL_NETWORKS:
+             if cfg.CONF.SDN.manage_external_networks:
+                 return super(VSwitchSdnNeutronAgent, self)._get_network_info(
+-                    port_details, vlan_id=vlan_id)
++                    port_details)
+             else:
+                 network_name = cfg.CONF.SDN.external_bridge_name
+                 network_uuid = self.vswitch_mgr.get_openflow_bridge_uuid(
+diff --git a/neutron/plugins/wrs/agent/avs/dvr.py b/neutron/plugins/wrs/agent/avs/dvr.py
+index 2806352..bef1eca 100644
+--- a/neutron/plugins/wrs/agent/avs/dvr.py
++++ b/neutron/plugins/wrs/agent/avs/dvr.py
+@@ -49,9 +49,6 @@ class LocalDVRSubnetMapping(object):
+     def get_subnet_info(self):
+         return self.subnet
+ 
+-    def get_vlan_id(self):
+-        return self.subnet.get('vlan_id', 0)
+-
+     def set_dvr_owned(self, owned):
+         self.dvr_owned = owned
+ 
+@@ -62,18 +59,16 @@ class LocalDVRSubnetMapping(object):
+         """
+         Track which interfaces belong to which DVR subnet.
+         """
+-        LOG.info("DVR: adding interface {} to subnet {} vlan {}".format(
+-            interface_uuid, self.subnet['id'], self.get_vlan_id()))
++        LOG.info("DVR: adding interface {} to subnet {}".format(
++            interface_uuid, self.subnet['id']))
+         self.interfaces.add(interface_uuid)
+ 
+     def remove_interface(self, interface_uuid):
+         """
+         Track which ports belong to which DVR subnet.
+         """
+-        LOG.info("DVR: removing interface {} from "
+-                 "subnet {} vlan {}".format(
+-                     interface_uuid, self.subnet['id'],
+-                     self.get_vlan_id()))
++        LOG.info("DVR: removing interface {} from subnet {}".format(
++            interface_uuid, self.subnet['id']))
+         self.interfaces.discard(interface_uuid)
+ 
+ 
+@@ -137,8 +132,7 @@ class VswitchDVRNeutronAgent(object):
+         return list(ldm.interfaces)
+ 
+     def _get_local_interfaces_on_host_by_subnet(self, subnet):
+-        local_ports = self.agent.get_ports_on_dvr_subnet(
+-            subnet['id'], vlan_id=subnet['vlan_id'])
++        local_ports = self.agent.get_ports_on_dvr_subnet(subnet['id'])
+         LOG.info("DVR: subnet {} local ports {}".format(
+             subnet['id'], local_ports))
+         return local_ports
+-- 
+2.7.4
+

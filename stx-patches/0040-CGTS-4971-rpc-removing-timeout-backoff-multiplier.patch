@@ -1,0 +1,81 @@
+From 2e4ca0007d2b291fe5ba6a155692b716912edf4b Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 11 Aug 2016 09:33:12 -0400
+Subject: [PATCH 040/155] CGTS-4971: rpc: removing timeout backoff multiplier
+
+Removing the multiplication factor of 10 to avoid being blocked for 600 seconds
+while waiting for a controller swact to finish.  10 minutes is a long time to
+be without a working DHCP service.
+
+Conflicts:
+	neutron/tests/unit/common/test_rpc.py
+---
+ neutron/common/rpc.py                 |  6 +++++-
+ neutron/tests/unit/common/test_rpc.py | 10 +++++-----
+ 2 files changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/neutron/common/rpc.py b/neutron/common/rpc.py
+index 3386fec..8f0381f 100644
+--- a/neutron/common/rpc.py
++++ b/neutron/common/rpc.py
+@@ -135,7 +135,11 @@ class _BackingOffContextWrapper(_ContextWrapper):
+ 
+     @classmethod
+     def get_max_timeout(cls):
+-        return cls._max_timeout or _get_default_method_timeout() * 10
++        # NOTE(alegacy): removing the multiplication factor of 10 to avoid
++        # being blocked for 600 seconds while waiting for a controller swact to
++        # finish.  10 minutes is a long time to be without a working DHCP
++        # service.
++        return cls._max_timeout or _get_default_method_timeout() * 1
+ 
+     @classmethod
+     def set_max_timeout(cls, max_timeout):
+diff --git a/neutron/tests/unit/common/test_rpc.py b/neutron/tests/unit/common/test_rpc.py
+index dc4bfc4..7911a6d 100644
+--- a/neutron/tests/unit/common/test_rpc.py
++++ b/neutron/tests/unit/common/test_rpc.py
+@@ -368,14 +368,14 @@ class TimeoutTestCase(base.DietTestCase):
+ 
+     def test_method_timeout_increases_on_timeout_exception(self):
+         rpc._BackingOffContextWrapper._METHOD_TIMEOUTS['method_1'] = 1
+-        for i in range(5):
++        for i in range(4):
+             with testtools.ExpectedException(messaging.MessagingTimeout):
+                 self.client.call(self.call_context, 'method_1')
+ 
+         # we only care to check the timeouts sent to the transport
+         timeouts = [call[1]['timeout']
+                     for call in rpc.TRANSPORT._send.call_args_list]
+-        self.assertEqual([1, 2, 4, 8, 16], timeouts)
++        self.assertEqual([1, 2, 4, 8], timeouts)
+ 
+     def test_method_timeout_10x_config_ceiling(self):
+         rpc.TRANSPORT.conf.rpc_response_timeout = 10
+@@ -384,12 +384,12 @@ class TimeoutTestCase(base.DietTestCase):
+             with testtools.ExpectedException(messaging.MessagingTimeout):
+                 self.client.call(self.call_context, 'method_1')
+         self.assertEqual(
+-            10 * rpc.TRANSPORT.conf.rpc_response_timeout,
++            1 * rpc.TRANSPORT.conf.rpc_response_timeout,
+             rpc._BackingOffContextWrapper._METHOD_TIMEOUTS['method_1'])
+         with testtools.ExpectedException(messaging.MessagingTimeout):
+             self.client.call(self.call_context, 'method_1')
+         self.assertEqual(
+-            10 * rpc.TRANSPORT.conf.rpc_response_timeout,
++            1 * rpc.TRANSPORT.conf.rpc_response_timeout,
+             rpc._BackingOffContextWrapper._METHOD_TIMEOUTS['method_1'])
+ 
+     def test_timeout_unchanged_on_other_exception(self):
+@@ -460,7 +460,7 @@ class TimeoutTestCase(base.DietTestCase):
+     def test_set_max_timeout_overrides_default_timeout(self):
+         rpc.TRANSPORT.conf.rpc_response_timeout = 10
+         self.assertEqual(
+-            10 * 10, rpc._BackingOffContextWrapper.get_max_timeout())
++            10, rpc._BackingOffContextWrapper.get_max_timeout())
+         rpc._BackingOffContextWrapper.set_max_timeout(10)
+         self.assertEqual(10, rpc._BackingOffContextWrapper.get_max_timeout())
+ 
+-- 
+2.7.4
+

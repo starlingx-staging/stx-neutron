@@ -1,0 +1,340 @@
+From cdbfc625870763e35799ce87c83cadbbc8336838 Mon Sep 17 00:00:00 2001
+From: Kam Nasim <kam.nasim@windriver.com>
+Date: Tue, 7 Jun 2016 23:23:35 -0400
+Subject: [PATCH 017/155] US67155: SDN ODL-specific configuration
+
+This feature entails the following work items:
+- Host extension driver changes to be able to bind data-external to FLAT
+provider network
+
+- ML2 connection monitoring and auditing
+
+Conflicts:
+	neutron/plugins/ml2/common/exceptions.py
+	neutron/plugins/ml2/driver_api.py
+	neutron/plugins/ml2/managers.py
+	neutron/plugins/ml2/plugin.py
+
+Conflicts:
+	neutron/plugins/ml2/driver_api.py
+	neutron/scheduler/l3_host_agent_scheduler.py
+---
+ neutron/db/hosts_db.py                       | 14 ++++++---
+ neutron/plugins/ml2/common/exceptions.py     | 24 +++++++++++++++
+ neutron/plugins/ml2/managers.py              | 22 +++++++++++++-
+ neutron/plugins/ml2/plugin.py                | 45 ++++++++++++++++++++++++++++
+ neutron/plugins/wrs/drivers/fm.py            | 44 +++++++++++++++++++++++++++
+ neutron/scheduler/l3_host_agent_scheduler.py |  8 ++---
+ 6 files changed, 148 insertions(+), 9 deletions(-)
+
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 20f1c2a..222ff7f 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -48,9 +48,10 @@ from neutron_lib.plugins import directory
+ LOG = logging.getLogger(__name__)
+ 
+ DATA_NETWORK = "data"
++DATA_EXTERNAL_NETWORK = "data-external"
+ 
+ # data interface types to be considered when scheduling resources
+-DATA_NETWORK_TYPES = [DATA_NETWORK]
++DATA_NETWORK_TYPES = [DATA_NETWORK, DATA_EXTERNAL_NETWORK]
+ 
+ PCI_PASSTHROUGH = "pci-passthrough"
+ PCI_SRIOV_PASSTHROUGH = "pci-sriov"
+@@ -252,6 +253,8 @@ class HostDbMixin(ext_host.HostPluginBase):
+         with context.session.begin(subtransactions=True):
+             # Find all providernets that are currently marked as DOWN and are
+             # bound to a host that is UP.
++            # Only do this for 'data' and 'data-external' networktypes since
++            # only limited state information is available for the pci nts
+             providernets = self._get_providernet_networktype(
+                 context, DATA_NETWORK_TYPES)
+             data = {'status': constants.PROVIDERNET_ACTIVE}
+@@ -274,13 +277,16 @@ class HostDbMixin(ext_host.HostPluginBase):
+ 
+             # Update providernet states for providernets without at least one
+             # binding to a host that is UP.
++            # Only do this for 'data' and 'data-external' networktypes since
++            # only limited state information is available for the pci nts
+             providernets = (
+                 context.session.query(providernet_db.ProviderNet)
+                 .outerjoin(HostInterfaceProviderNetBinding,
+                       HostInterfaceProviderNetBinding.providernet_id ==
+                       providernet_db.ProviderNet.id)
+                 .outerjoin(HostInterface,
+-                           and_((HostInterface.network_type == DATA_NETWORK),
++                           and_((HostInterface.network_type.
++                                 in_(DATA_NETWORK_TYPES)),
+                                 (HostInterface.id ==
+                                  HostInterfaceProviderNetBinding.
+                                  interface_id)))
+@@ -560,8 +566,8 @@ class HostDbMixin(ext_host.HostPluginBase):
+     def _validate_interface_network_type(self, context, interface):
+         interface.setdefault('network_type', DATA_NETWORK)
+         network_type = interface['network_type']
+-        if network_type not in [DATA_NETWORK, PCI_PASSTHROUGH,
+-            PCI_SRIOV_PASSTHROUGH]:
++        if network_type not in [DATA_NETWORK, DATA_EXTERNAL_NETWORK,
++            PCI_PASSTHROUGH, PCI_SRIOV_PASSTHROUGH]:
+             raise ext_host.HostInvalidInterfaceNetworkType(
+                 value=network_type)
+ 
+diff --git a/neutron/plugins/ml2/common/exceptions.py b/neutron/plugins/ml2/common/exceptions.py
+index 106d427..b80c983 100644
+--- a/neutron/plugins/ml2/common/exceptions.py
++++ b/neutron/plugins/ml2/common/exceptions.py
+@@ -45,3 +45,27 @@ class ExtensionDriverNotFound(exceptions.InvalidConfigurationOption):
+ class UnknownNetworkType(exceptions.NeutronException):
+     """Network with unknown type."""
+     message = _("Unknown network type %(network_type)s.")
++
++
++# Pre-defined Audit Failures
++MECH_DRIVER_AUDIT_FAILURE_REASON_CONN = \
++    "ML2 Driver Agent non-reachable"
++
++MECH_DRIVER_AUDIT_FAILURE_REASON_RESPONSE = \
++    "ML2 Driver Agent reachable but non-responsive"
++
++MECH_DRIVER_AUDIT_FAILURE_REASON_AUTH = \
++    "ML2 Driver Agent authentication failure"
++
++MECH_DRIVER_AUDIT_FAILURE_REASON_DBSYNC = \
++    "ML2 Driver Agent is unable to sync Neutron database"
++
++
++class MechanismDriverAuditFailure(exceptions.NeutronException):
++    """Mechanism driver auditing failed."""
++    message = _("(\"%(driver)s\", \"%(reason)s\")")
++
++
++class MechanismDriverAuditSuccess(exceptions.NeutronException):
++    """Mechanism driver auditing succeeded."""
++    message = _("%(driver)s")
+diff --git a/neutron/plugins/ml2/managers.py b/neutron/plugins/ml2/managers.py
+index 5dcfe6e..e4ad71d 100644
+--- a/neutron/plugins/ml2/managers.py
++++ b/neutron/plugins/ml2/managers.py
+@@ -563,7 +563,14 @@ class MechanismManager(stevedore.named.NamedExtensionManager):
+         errors = []
+         for driver in self.ordered_mech_drivers:
+             try:
+-                getattr(driver.obj, method_name)(context)
++                if hasattr(driver.obj, method_name):
++                    getattr(driver.obj, method_name)(context)
++            except (ml2_exc.MechanismDriverAuditSuccess,
++                    ml2_exc.MechanismDriverAuditFailure):
++                with excutils.save_and_reraise_exception():
++                    LOG.info("Mechanism Driver Audit '%(name)s' in "
++                             "%(method)s",
++                             {'name': driver.name, 'method': method_name})
+             except Exception as e:
+                 if raise_db_retriable and db_api.is_retriable(e):
+                     with excutils.save_and_reraise_exception():
+@@ -1009,6 +1016,19 @@ class MechanismManager(stevedore.named.NamedExtensionManager):
+             workers += driver.obj.get_workers()
+         return workers
+ 
++    def audit(self, context):
++        """Audit all mechanism drivers for proper operation.
++
++        :raises: neutron.plugins.ml2.common.MechanismDriverAuditFailure
++        if any mechanism driver auditing call fails.
++
++        Called within the database transaction. If a mechanism driver
++        raises an exception, then a MechanismDriverAuditFailure is propogated
++        to the caller, triggering a rollback. There is no guarantee
++        that all mechanism drivers are called in this case.
++        """
++        self._call_on_drivers("audit", context)
++
+ 
+ class ExtensionManager(stevedore.named.NamedExtensionManager):
+     """Manage extension drivers using drivers."""
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index ca14cbf..d9f701e 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -20,6 +20,7 @@
+ # of an applicable Wind River license agreement.
+ #
+ 
++from ast import literal_eval
+ import copy
+ import re
+ 
+@@ -45,6 +46,7 @@ from neutron_lib.exceptions import port_security as psec_exc
+ from neutron_lib.plugins import constants as plugin_constants
+ from neutron_lib.plugins import directory
+ from neutron_lib.plugins.ml2 import api
++from neutron_lib.utils import net as net_utils
+ from oslo_config import cfg
+ from oslo_db import exception as os_db_exception
+ from oslo_log import helpers as log_helpers
+@@ -215,6 +217,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         security_group=sg_models.SecurityGroup,
+         security_group_rule=sg_models.SecurityGroupRule)
+     def __init__(self):
++        self._ensure_neutron_state_path()
+         # First load drivers, then initialize DB, then initialize drivers
+         self.type_manager = managers.TypeManager()
+         self.extension_manager = managers.ExtensionManager()
+@@ -228,12 +231,19 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         self.add_agent_status_check_worker(self.agent_health_check)
+         self.add_agent_status_check_worker(self.audit_agent_state)
+         self.add_workers(self.mechanism_manager.get_workers())
++        self._start_mechanism_driver_audit()
+         if cfg.CONF.pnet_connectivity.pnet_audit_enabled:
+             self._start_pnet_connectivity_audit()
+             self.start_pnet_notify_listener()
+         self._verify_service_plugins_requirements()
+         LOG.info("Modular L2 Plugin initialization complete")
+ 
++    def _ensure_neutron_state_path(self):
++        """Ensure Neutron State path exists as the ML2 Plugin requires it."""
++        state_path = \
++            cfg.CONF.state_path
++        utils.ensure_dir(state_path)
++
+     def _setup_rpc(self):
+         """Initialize components to support agent communication."""
+         self.endpoints = [
+@@ -248,6 +258,15 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             self.pnet_connectivity_rpc_callback,
+         ]
+ 
++    def _start_mechanism_driver_audit(self):
++        # Schedule tests to run at agent audit interval
++        audit_interval = cfg.CONF.periodic_interval
++        if audit_interval:
++            self.mech_audit_scheduler = \
++                loopingcall.FixedIntervalLoopingCall(
++                    self.audit_mechanism_driver)
++            self.mech_audit_scheduler.start(interval=audit_interval)
++
+     def _start_pnet_connectivity_audit(self):
+         # Schedule tests to be run ever audit interval
+         audit_interval = \
+@@ -371,6 +390,32 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 if self.type_manager.network_matches_filters(network, filters)
+                 ]
+ 
++    def audit_mechanism_driver(self):
++        context = n_ctx.get_admin_context()
++        mech_context = driver_context.MechanismDriverContext(self, context)
++        hostname = net_utils.get_hostname()
++        try:
++            self.mechanism_manager.audit(mech_context)
++        except ml2_exc.MechanismDriverAuditFailure as e:
++            # the Audit failure message is in the form of a tuple, isolate
++            # the driver and the failure reason.
++            driver_name, reason = literal_eval(e.msg)
++            LOG.error("{}: audit failed: {}".format(driver_name, reason))
++            # clear pending ML2 alarm for this driver as a different audit
++            # failure may be seen this time. This saves us from caching
++            # the last audit failure.
++            self.fm_driver.report_ml2_driver_fault(
++                hostname, driver_name, reason)
++        except ml2_exc.MechanismDriverAuditSuccess as e:
++            # the Audit success message only contains the driver
++            driver_name = e.msg
++            LOG.info("{}: audit passed".format(driver_name))
++            self.fm_driver.clear_ml2_driver_fault(hostname, driver_name)
++        except Exception as e:
++            # Catch all exceptions to avoid terminating the greenthread
++            LOG.exception("Unexpected exception in mechanism "
++                          "driver audit, {}".format(e))
++
+     def schedule_providernet_connectivity_tests(self):
+         context = n_ctx.get_admin_context()
+         self._schedule_sequential_providernet_audits(context)
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index c66ac2b..d73f3be 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -99,6 +99,18 @@ class DefaultFmDriver(fm.FmDriver):
+                                     agent_id)
+ 
+     @staticmethod
++    def _get_ml2_driver_entity_type_id():
++        return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                              fm_constants.FM_ENTITY_TYPE_ML2DRIVER)
++
++    @staticmethod
++    def _get_ml2_driver_entity_instance_id(hostname, driver):
++        return "{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                    hostname,
++                                    fm_constants.FM_ENTITY_TYPE_ML2DRIVER,
++                                    driver)
++
++    @staticmethod
+     def _get_fault_severity(severity):
+         """Map a fault driver severity to an FM API severity"""
+         map = {fm.FM_SEVERITY_CRITICAL:
+@@ -271,3 +283,35 @@ class DefaultFmDriver(fm.FmDriver):
+                                                                 agent_id)
+         self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_AGENT,
+                                 entity_instance_id)
++
++    def report_ml2_driver_fault(self, hostname, driver, reason):
++        """
++        Generate a fault management alarm condition for ML2 driver
++        audit failure
++        """
++        entity_type_id = self._get_ml2_driver_entity_type_id()
++        entity_instance_id = self._get_ml2_driver_entity_instance_id(hostname,
++                                                                    driver)
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_ML2_DRIVER,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_constants.FM_ALARM_SEVERITY_MAJOR,
++            reason_text=reason,
++            alarm_type=fm_constants.FM_ALARM_TYPE_3,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
++            proposed_repair_action=(
++                _("Monitor and if condition persists, "
++                  "contact next level of support.")),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_ml2_driver_fault(self, hostname, driver):
++        """
++        Clear a fault management alarm condition for agent alive
++        """
++        entity_instance_id = self._get_ml2_driver_entity_instance_id(hostname,
++                                                                    driver)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_ML2_DRIVER,
++                                entity_instance_id)
+diff --git a/neutron/scheduler/l3_host_agent_scheduler.py b/neutron/scheduler/l3_host_agent_scheduler.py
+index b9a8bf5..e27218b 100644
+--- a/neutron/scheduler/l3_host_agent_scheduler.py
++++ b/neutron/scheduler/l3_host_agent_scheduler.py
+@@ -97,8 +97,8 @@ class HostBasedScheduler(l3_agent_scheduler.AZLeastRoutersScheduler):
+                           hosts_db.HostInterfaceProviderNetBinding.
+                           interface_id))
+                    .filter(hosts_db.HostInterface.host_id == host_id)
+-                   .filter(hosts_db.HostInterface.network_type ==
+-                           hosts_db.DATA_NETWORK)
++                   .filter(hosts_db.HostInterface.network_type.
++                           in_(hosts_db.DATA_NETWORK_TYPES))
+                    .outerjoin(l3agent_model.RouterL3AgentBinding,
+                               (l3agent_model.RouterL3AgentBinding
+                                .router_id == l3_model.Router.id)))
+@@ -160,8 +160,8 @@ class HostBasedScheduler(l3_agent_scheduler.AZLeastRoutersScheduler):
+                              (hosts_db.Host.availability ==
+                               n_const.HOST_UP)))
+                   .join(hosts_db.HostInterface,
+-                        and_((hosts_db.HostInterface.network_type ==
+-                              hosts_db.DATA_NETWORK),
++                        and_((hosts_db.HostInterface.network_type.
++                              in_(hosts_db.DATA_NETWORK_TYPES)),
+                              (hosts_db.HostInterface.host_id ==
+                               hosts_db.Host.id)))
+                   .join(hosts_db.HostInterfaceProviderNetBinding,
+-- 
+2.7.4
+

@@ -1,0 +1,67 @@
+From e5712fe67d9871b207e09fa8d462cb5acaa6d45d Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 10 Dec 2015 11:51:45 -0500
+Subject: [PATCH 038/155] CGTS-3284: dhcp: sort subnet list before generating
+ dnsmasq config
+
+The dnsmasq option files rely on tag values to associate DHCP options with
+their corresponding subnets.  Those tags are defined on the dnsmasq command
+line.  It is critical that the tag value assigned to a given subnet at the
+dnsmasq command line match the tag value referenced in the dnsmasq opts file.
+If a mismatch occurs the DHCP server will give options for subnetA to hosts on
+subnetB.
+
+This seems to be happening because of how dhcp_rpc.py::_group_by_network_id
+would behave if the list of subnets coming from the database was ordered
+different or contained different values.
+
+Conflicts:
+	neutron/agent/linux/dhcp.py
+---
+ neutron/agent/linux/dhcp.py                 |  6 ++++--
+ neutron/tests/unit/agent/linux/test_dhcp.py | 10 +++++-----
+ 2 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/neutron/agent/linux/dhcp.py b/neutron/agent/linux/dhcp.py
+index b6fb2d9..e4d7b12 100644
+--- a/neutron/agent/linux/dhcp.py
++++ b/neutron/agent/linux/dhcp.py
+@@ -231,8 +231,10 @@ class DhcpLocalProcess(DhcpBase):
+         Return a list of DHCP enabled subnets on the current network and
+         vlan
+         """
+-        return [s for s in self._get_all_subnets(self.network) if
+-                s.enable_dhcp and getattr(s, wrs_net.VLAN, 0) == self.vlan_id]
++        subnets = [s for s in self._get_all_subnets(self.network) if
++                   s.enable_dhcp and
++                   getattr(s, wrs_net.VLAN, 0) == self.vlan_id]
++        return sorted(subnets, key=lambda s: netaddr.IPNetwork(s.cidr))
+ 
+     def _enable_dhcp(self):
+         """check if there is a subnet within the network with dhcp enabled."""
+diff --git a/neutron/tests/unit/agent/linux/test_dhcp.py b/neutron/tests/unit/agent/linux/test_dhcp.py
+index f823ac3..442312b 100644
+--- a/neutron/tests/unit/agent/linux/test_dhcp.py
++++ b/neutron/tests/unit/agent/linux/test_dhcp.py
+@@ -2274,13 +2274,13 @@ class TestDnsmasq(TestBase):
+             'host-192-168-0-1.openstacklocal.,192.168.0.1\n').lstrip()
+         exp_opt_name = '/dhcp/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/opts'
+         exp_opt_data = (
+-            'tag:tag0,option6:domain-search,openstacklocal\n'
+-            'tag:tag1,option:dns-server,8.8.8.8\n'
+-            'tag:tag1,option:classless-static-route,20.0.0.1/24,20.0.0.1,'
++            'tag:tag0,option:dns-server,8.8.8.8\n'
++            'tag:tag0,option:classless-static-route,20.0.0.1/24,20.0.0.1,'
+             '169.254.169.254/32,192.168.0.1,0.0.0.0/0,192.168.0.1\n'
+-            'tag:tag1,249,20.0.0.1/24,20.0.0.1,169.254.169.254/32,'
++            'tag:tag0,249,20.0.0.1/24,20.0.0.1,169.254.169.254/32,'
+             '192.168.0.1,0.0.0.0/0,192.168.0.1\n'
+-            'tag:tag1,option:router,192.168.0.1\n'
++            'tag:tag0,option:router,192.168.0.1\n'
++            'tag:tag1,option6:domain-search,openstacklocal\n'
+             'tag:hhhhhhhh-hhhh-hhhh-hhhh-hhhhhhhhhhhh,'
+             'option6:dns-server,ffea:3ba5:a17a:4ba3::100').lstrip()
+ 
+-- 
+2.7.4
+

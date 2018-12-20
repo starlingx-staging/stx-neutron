@@ -1,0 +1,26 @@
+From 856eabc3c74e3d46e5c43c0df73d51262b52ba9b Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 28 Nov 2017 08:54:28 -0600
+Subject: [PATCH 080/155] fixup! US94388: Remove bgp agents if bgp is disabled.
+
+---
+ neutron/plugins/ml2/plugin.py | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index ec433c6..5b1f8d5 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -422,8 +422,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+ 
+     def is_bgp_enabled(self):
+         if not hasattr(self, 'bgp_enabled'):
+-            service_plugins = directory.get_service_plugins()
+-            self.bgp_enabled = 'bgp' in service_plugins
++            self.bgp_enabled = bool(directory.get_plugin(alias='bgp'))
+         return self.bgp_enabled
+ 
+     def run_providernet_connectivity_tests(self):
+-- 
+2.7.4
+

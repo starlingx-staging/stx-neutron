@@ -1,0 +1,89 @@
+From 64e87d6554c5e74ef3cac45982c61acd805fe2c5 Mon Sep 17 00:00:00 2001
+From: Miguel Lavalle <malavall@us.ibm.com>
+Date: Tue, 20 Jun 2017 23:25:24 +0000
+Subject: [PATCH 097/155] Move segment deletion back to PRECOMMIT_DELETE
+
+This essentially reverts commit 12d24abba75ab3b926edbac389437bacc23914dd.
+
+Making the callback _delete_segments_for_network respond to
+BEFORE_DELETE network event has created some bugs. In one of them,
+it is not possible to delete a routed network, because the segments
+cannot be deleted due to the fact that the associated subnets still
+exist.
+
+Making _delete_segments_for_network respond to PRECOMMIT_DELETE
+introduces a StaleDataError with the standard attributes of the
+deleted segments. To work around that, network_db is expired and
+read again after notifying the PRECOMMIT_DELETE event in
+delete_network in the DB core plug-in.
+
+This also fixes an issue where we could delete the segment ID
+of the l3-ha network when deleting a router, leaving all other
+routers non-functioning.  Moving this to PRECOMMIT_DELETE fixes
+it since it is done after we have checked that the network is
+not in use and can be deleted.
+
+Closes-Bug: #1697324
+Closes-Bug: #1732543
+
+Change-Id: I7c3c4654f183b317647a28d599a538fe460db68f
+---
+ neutron/db/db_base_plugin_v2.py               |  5 +++++
+ neutron/services/segments/db.py               |  2 +-
+ neutron/tests/unit/extensions/test_segment.py | 12 ++++++++++++
+ 3 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/db/db_base_plugin_v2.py b/neutron/db/db_base_plugin_v2.py
+index bdb7e60..2d7d5bc 100644
+--- a/neutron/db/db_base_plugin_v2.py
++++ b/neutron/db/db_base_plugin_v2.py
+@@ -465,6 +465,11 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
+                 network = self._make_network_dict(network_db, context=context)
+                 registry.notify(resources.NETWORK, events.PRECOMMIT_DELETE,
+                                 self, context=context, network_id=id)
++                # We expire network_db here because precommit deletion
++                # might have left the relationship stale, for example,
++                # if we deleted a segment.
++                context.session.expire(network_db)
++                network_db = self._get_network(context, id)
+                 context.session.delete(network_db)
+         registry.notify(resources.NETWORK, events.AFTER_DELETE,
+                         self, context=context, network=network)
+diff --git a/neutron/services/segments/db.py b/neutron/services/segments/db.py
+index 99f8bba..06e897d 100644
+--- a/neutron/services/segments/db.py
++++ b/neutron/services/segments/db.py
+@@ -316,6 +316,6 @@ def subscribe():
+                        resources.SEGMENT, events.PRECOMMIT_CREATE)
+     registry.subscribe(_delete_segments_for_network,
+                        resources.NETWORK,
+-                       events.BEFORE_DELETE)
++                       events.PRECOMMIT_DELETE)
+ 
+ subscribe()
+diff --git a/neutron/tests/unit/extensions/test_segment.py b/neutron/tests/unit/extensions/test_segment.py
+index dd38dd3..73430bf 100644
+--- a/neutron/tests/unit/extensions/test_segment.py
++++ b/neutron/tests/unit/extensions/test_segment.py
+@@ -365,6 +365,18 @@ class TestSegment(SegmentTestCase):
+             self._update('segments', segment['segment']['id'], segment,
+                          expected_code=webob.exc.HTTPClientError.code)
+ 
++    def test_segment_notification_on_delete_network(self):
++        with mock.patch.object(db, '_delete_segments_for_network') as dsn:
++            db.subscribe()
++            with self.network() as network:
++                network = network['network']
++                self._delete('networks', network['id'])
++        dsn.assert_called_with(resources.NETWORK,
++                               events.PRECOMMIT_DELETE,
++                               mock.ANY,
++                               context=mock.ANY,
++                               network_id=mock.ANY)
++
+ 
+ class TestSegmentML2(SegmentTestCase):
+     def setUp(self):
+-- 
+2.7.4
+

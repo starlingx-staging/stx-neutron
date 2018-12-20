@@ -1,0 +1,67 @@
+From c54d804792f10b7f505de6794274c4df4768f6f0 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 10 Aug 2017 10:05:39 -0500
+Subject: [PATCH 034/155] CGTS-7240: trunk: include trunk presence in port
+ details
+
+To eliminate unnecessary trunk RPC calls from the agent this changes the
+get_device_details RPC to return a bool indicating whether the port is a trunk
+port.  This allows the agent to only query the trunk details when it knows that
+some exist.  This is because the trunk RPC calls are expensive and slow (which
+seems like it is because they use the new DB objects RPC push/pull mechanism).
+
+I wanted to include the full "trunk_details" in the port details so that no RPC
+call is necessary but it does not include the trunk admin_state_up attribute;
+therefore the agent would have to query anyway.
+---
+ neutron/plugins/ml2/rpc.py             |  3 ++-
+ neutron/plugins/wrs/agent/avs/agent.py | 10 +++++-----
+ 2 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/neutron/plugins/ml2/rpc.py b/neutron/plugins/ml2/rpc.py
+index 2ebb3c4..62739de 100644
+--- a/neutron/plugins/ml2/rpc.py
++++ b/neutron/plugins/ml2/rpc.py
+@@ -214,7 +214,8 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
+                  'port_security_enabled': port.get(psec.PORTSECURITY, True),
+                  'qos_policy_id': port.get(qos_consts.QOS_POLICY_ID),
+                  'network_qos_policy_id': network_qos_policy_id,
+-                 'profile': port[portbindings.PROFILE]}
++                 'profile': port[portbindings.PROFILE],
++                 'trunk_port': bool('trunk_details' in port)}
+         LOG.debug("Returning: %s", entry)
+         return entry
+ 
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 30ef7fe..83426a3 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1112,12 +1112,12 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+     def get_trunk_details(self, port_uuid):
+         """
+         Retrieve the trunk detail info.  This references cached data if it
+-        exists rather than accessing the DB unnecessary.  If the port is marked
+-        as updated by an RPC call from the server then the data is refreshed
+-        because the '_trunk_id' attribute will be removed.
++        exists rather than accessing the DB unnecessarily.  If the port is
++        marked as updated by an RPC call from the server then the data is
++        refreshed because the '_trunk_id' attribute will be removed.
+         """
+         port_details = self.port_details[port_uuid]
+-        if '_trunk_id' not in port_details:
++        if port_details['trunk_port'] and '_trunk_id' not in port_details:
+             trunk_details = self.trunk_plugin_rpc.get_trunk_details(
+                     self.context, port_uuid)
+             trunk_id = trunk_details['id'] if trunk_details else 0
+@@ -1126,7 +1126,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+                     port_uuid, trunk_details))
+                 self.trunk_details[trunk_id] = trunk_details
+             port_details['_trunk_id'] = trunk_id
+-        trunk_id = port_details['_trunk_id']
++        trunk_id = port_details.get('_trunk_id', 0)
+         return self.trunk_details.get(trunk_id)
+ 
+     def get_ports_on_dvr_subnet(self, subnet_uuid, vlan_id=None):
+-- 
+2.7.4
+

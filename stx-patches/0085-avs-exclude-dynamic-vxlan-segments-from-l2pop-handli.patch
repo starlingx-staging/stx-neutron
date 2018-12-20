@@ -1,0 +1,66 @@
+From 7b628c8151e41391c0ae03ff37c108d9707ed2f6 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 31 Aug 2017 13:15:03 -0500
+Subject: [PATCH 085/155] avs: exclude dynamic vxlan segments from l2pop
+ handling
+
+Until now the l2pop fdb handlers have been provisioning AVS for both
+static and dynamic VXLAN provider networks.   To avoid confusion and
+possibly issues with entries not moving because they are marked as
+static we are going to prevent this from happening on dynamic networks.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index fe60996..5d006cd 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -460,6 +460,17 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                     ip_handler(interface_uuid, p.ip_address,
+                                p.mac_address, agent_ip)
+ 
++    def _is_static_vxlan_segment(self, network_id, segment):
++        if 'segment_id' in segment:
++            # fix l2pop data
++            segment['segmentation_id'] = segment['segment_id']
++        providernet_key = self.get_providernet_key(segment)
++        details = self.providernet_cache.get(providernet_key)
++        if details and details['type'] == 'vxlan':
++            if details['vxlan']['mode'] in L2POP_VXLAN_MODES:
++                return True
++        return False
++
+     def fdb_add(self, context, fdb_entries):
+         """
+         Handle new FDB entries published to this agent (or all agents).
+@@ -472,6 +483,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 LOG.debug("skipping FDB add on missing network {}, fdb: {}".
+                           format(network_id, fdb_entries))
+                 continue
++            if not self._is_static_vxlan_segment(network_id, fdb_entries):
++                continue
+             self._process_fdb_for_network(network_id, fdb_entries,
+                                           self._fdb_add_entry,
+                                           self._fdb_ip_add_entry)
+@@ -486,6 +499,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 LOG.debug("skipping FDB delete on missing network {}, fdb: {}".
+                           format(network_id, fdb_entries))
+                 continue
++            if not self._is_static_vxlan_segment(network_id, fdb_entries):
++                continue
+             self._process_fdb_for_network(network_id, fdb_entries,
+                                           self._fdb_delete_entry,
+                                           self._fdb_ip_delete_entry,
+@@ -496,6 +511,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         Handle new FDB entries for a given network_id.
+         """
+         segment = self.segment_cache[network_id]  # not available in ip_chg
++        if not self._is_static_vxlan_segment(network_id, segment):
++            return
+         interface_uuid = self._fdb_resolve_interface(segment)
+         LOG.debug("processing VTEP IP endpoints for interface {} on "
+                   "network {}".format(interface_uuid, network_id))
+-- 
+2.7.4
+

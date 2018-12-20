@@ -1,0 +1,74 @@
+From 9b46ceeaed4c409fb6fea5273656b2fc090cf858 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 10 Nov 2017 05:30:21 -0600
+Subject: [PATCH 068/155] CGTS-7771: avr: only handle snat ports if owner
+
+The AVR agent is not respecting the ownership of SNAT ports during router
+update operations.  It is causing it to hang on to SNAT ports until the 5
+minute audit comes around and detects the AVS SNAT ports as stale and removes
+them.
+
+Conflicts:
+	neutron/plugins/wrs/agent/avr/agent.py
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 30 +++++++++++++++++-------------
+ 1 file changed, 17 insertions(+), 13 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index f445bc1..eab8433 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -694,15 +694,19 @@ class AVRAgentManager(manager.Manager):
+         for port in ports:
+             self._add_snat_port(router, port)
+ 
++    def _get_snat_ports(self, router, force=False):
++        if self._is_gateway_owner(router) or force:
++            return dict((port['id'], port) for port in
++                        router.get(n_const.SNAT_ROUTER_INTF_KEY, []))
++        return {}
++
+     def _update_snat_ports(self, router):
+         router_id = router.get('id')
+         existing_router = self.routers.get(router_id)
+ 
+-        current_ports = {port['id']: port for port in
+-                         router.get(n_const.SNAT_ROUTER_INTF_KEY, [])}
+-        existing_ports = {port['id']: port for port in
+-                          existing_router.get(
+-                              n_const.SNAT_ROUTER_INTF_KEY, [])}
++        current_ports = self._get_snat_ports(router)
++        existing_ports = self._get_snat_ports(existing_router)
++        configured_ports = self._get_snat_ports(router, force=True)
+ 
+         current_set = set(current_ports)
+         existing_set = set(existing_ports)
+@@ -710,17 +714,17 @@ class AVRAgentManager(manager.Manager):
+         added = current_set - existing_set
+         removed = existing_set - current_set
+ 
++        for port_id in removed:
++            self._delete_snat_port(existing_router, existing_ports[port_id])
++
+         if len(removed) > 0:
+-            # The snat default route may be configured as the interface
+-            # being removed, therefore replace the route with an interface
+-            # that is still remaining before the interface is deleted
+-            updated = current_set & existing_set
+-            for port_id in updated:
+-                self._update_snat_route(router, current_ports[port_id])
++            # The snat default route may have been configured to point to an
++            # interface that is being removed, therefore replace the route
++            # with an interface that is still configured.
++            for port_id in configured_ports:
++                self._update_snat_route(router, configured_ports[port_id])
+                 break  # only need one
+ 
+-        for port_id in removed:
+-            self._delete_snat_port(router, existing_ports[port_id])
+         for port_id in added:
+             self._add_snat_port(router, current_ports[port_id])
+ 
+-- 
+2.7.4
+

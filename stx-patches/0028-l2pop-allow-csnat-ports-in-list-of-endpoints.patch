@@ -1,0 +1,67 @@
+From 9671feb714385204b766d132d2c807e8b5071522 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 28 Jul 2017 11:45:43 -0500
+Subject: [PATCH 028/155] l2pop: allow csnat ports in list of endpoints
+
+Not quite sure why upstream is not impacted by this issue, but we need to have
+CSNAT ports included in the list of ports that the l2pop driver handles.
+Without this it is not possible for a VM on one node to reach the CSNAT port
+because the MAC address of the CSNAT port is not included in the static FDB
+entries.  Without this our vswitch drops the outgoing packet since that's what
+it does with packets to unknown destinations while in static mode.
+---
+ neutron/plugins/ml2/drivers/l2pop/db.py                 | 3 +--
+ neutron/tests/unit/plugins/ml2/drivers/l2pop/test_db.py | 9 ++++++---
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/neutron/plugins/ml2/drivers/l2pop/db.py b/neutron/plugins/ml2/drivers/l2pop/db.py
+index 19926ef..ce2f61a 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/db.py
++++ b/neutron/plugins/ml2/drivers/l2pop/db.py
+@@ -24,8 +24,7 @@ from neutron.db import models_v2
+ from neutron.plugins.ml2 import models as ml2_models
+ 
+ 
+-HA_ROUTER_PORTS = (const.DEVICE_OWNER_HA_REPLICATED_INT,
+-                   const.DEVICE_OWNER_ROUTER_SNAT)
++HA_ROUTER_PORTS = (const.DEVICE_OWNER_HA_REPLICATED_INT,)
+ 
+ 
+ def get_agent_ip_by_host(session, agent_host, physical_network=None):
+diff --git a/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_db.py b/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_db.py
+index 2209770..2490228 100644
+--- a/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_db.py
++++ b/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_db.py
+@@ -180,7 +180,8 @@ class TestL2PopulationDBTestCase(testlib_api.SqlTestCase):
+             self.ctx.session, TEST_NETWORK_ID)
+         self.assertEqual(0, len(fdb_network_ports))
+ 
+-    def test__get_ha_router_interface_ids_with_ha_dvr_snat_port(self):
++    # TODO(alegacy): disabling because we need CSNAT port in FDB
++    def notest__get_ha_router_interface_ids_with_ha_dvr_snat_port(self):
+         helpers.register_dhcp_agent()
+         helpers.register_l3_agent()
+         helpers.register_ovs_agent()
+@@ -229,7 +230,8 @@ class TestL2PopulationDBTestCase(testlib_api.SqlTestCase):
+             self.ctx.session, TEST_NETWORK_ID)
+         self.assertEqual(1, len(fdb_network_ports))
+ 
+-    def test_active_network_ports_with_ha_dvr_snat_port(self):
++    # TODO(alegacy): disabling because we need CSNAT port in FDB
++    def notest_active_network_ports_with_ha_dvr_snat_port(self):
+         # test to get HA agents hosting HA+DVR snat port
+         helpers.register_dhcp_agent()
+         helpers.register_l3_agent()
+@@ -263,7 +265,8 @@ class TestL2PopulationDBTestCase(testlib_api.SqlTestCase):
+             self.ctx.session, HOST_2, TEST_NETWORK_ID)
+         self.assertEqual(0, port_count)
+ 
+-    def test_active_port_count_with_ha_dvr_snat_port(self):
++    # TODO(alegacy): disabling because we need CSNAT port in FDB
++    def notest_active_port_count_with_ha_dvr_snat_port(self):
+         helpers.register_dhcp_agent()
+         helpers.register_l3_agent()
+         helpers.register_ovs_agent()
+-- 
+2.7.4
+

@@ -1,0 +1,85 @@
+From 8bfee8b37814c668ac9146d7977ef76ec5889a42 Mon Sep 17 00:00:00 2001
+From: Brian Haley <bhaley@redhat.com>
+Date: Thu, 30 Nov 2017 16:47:43 -0500
+Subject: [PATCH 106/155] Fix HA router initialization exception
+
+When an HA router initialization fails early, it can lead to:
+
+ AttributeError: 'HaRouter' object has no attribute 'process_monitor'
+
+Add init of 'self.process_monitor' in RouterInfo init code in
+case we try and cleanup early.
+
+Change-Id: Iddeaeef13adee10f7b130e3f9e584b6e9f037030
+Closes-bug: #1735557
+(cherry picked from commit c62d54d0c21fc4a760d2ac6501f9493137c5eb8a)
+---
+ neutron/agent/l3/ha_router.py             |  3 ++-
+ neutron/agent/l3/router_info.py           |  1 +
+ neutron/tests/unit/agent/l3/test_agent.py | 20 ++++++++++++++++++++
+ 3 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/agent/l3/ha_router.py b/neutron/agent/l3/ha_router.py
+index 061f35a..23c753d 100644
+--- a/neutron/agent/l3/ha_router.py
++++ b/neutron/agent/l3/ha_router.py
+@@ -439,7 +439,8 @@ class HaRouter(router.RouterInfo):
+                                prefix=router.EXTERNAL_DEV_PREFIX)
+ 
+     def delete(self):
+-        self.destroy_state_change_monitor(self.process_monitor)
++        if self.process_monitor:
++            self.destroy_state_change_monitor(self.process_monitor)
+         self.disable_keepalived()
+         self.ha_network_removed()
+         super(HaRouter, self).delete()
+diff --git a/neutron/agent/l3/router_info.py b/neutron/agent/l3/router_info.py
+index 1a9cf15..f578a9e 100644
+--- a/neutron/agent/l3/router_info.py
++++ b/neutron/agent/l3/router_info.py
+@@ -76,6 +76,7 @@ class RouterInfo(object):
+         self.routes = []
+         self.agent_conf = agent_conf
+         self.driver = interface_driver
++        self.process_monitor = None
+         # radvd is a neutron.agent.linux.ra.DaemonMonitor
+         self.radvd = None
+ 
+diff --git a/neutron/tests/unit/agent/l3/test_agent.py b/neutron/tests/unit/agent/l3/test_agent.py
+index e2b6632..9852bbb 100644
+--- a/neutron/tests/unit/agent/l3/test_agent.py
++++ b/neutron/tests/unit/agent/l3/test_agent.py
+@@ -34,6 +34,7 @@ from testtools import matchers
+ from neutron.agent.l3 import agent as l3_agent
+ from neutron.agent.l3 import dvr_edge_router as dvr_router
+ from neutron.agent.l3 import dvr_snat_ns
++from neutron.agent.l3 import ha_router
+ from neutron.agent.l3 import legacy_router
+ from neutron.agent.l3 import link_local_allocator as lla
+ from neutron.agent.l3 import namespace_manager
+@@ -3515,3 +3516,22 @@ class TestBasicRouterOperations(BasicRouterOperationsFramework):
+             ri._create_dvr_gateway(ex_gw_port, interface_name)
+             self._verify_address_scopes_iptables_rule(
+                 ri.snat_iptables_manager)
++
++    @mock.patch.object(l3router.RouterInfo, 'delete')
++    @mock.patch.object(ha_router.HaRouter, 'destroy_state_change_monitor')
++    def test_delete_ha_router_initialize_fails(self, mock_dscm, mock_delete):
++        router = l3_test_common.prepare_router_data(enable_ha=True)
++        router[lib_constants.HA_INTERFACE_KEY] = None
++        agent = l3_agent.L3NATAgent(HOSTNAME, self.conf)
++        # an early failure of an HA router initiailization shouldn't try
++        # and cleanup a state change monitor process that was never spawned.
++        # Cannot use self.assertRaises(Exception, ...) as that causes an H202
++        # pep8 failure.
++        try:
++            agent._router_added(router['id'], router)
++            raise Exception("agent._router_added() should have raised an "
++                            "exception")
++        except Exception:
++            pass
++        self.assertTrue(mock_delete.called)
++        self.assertFalse(mock_dscm.called)
+-- 
+2.7.4
+

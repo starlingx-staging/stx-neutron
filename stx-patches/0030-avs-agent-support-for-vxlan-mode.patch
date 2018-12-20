@@ -1,0 +1,96 @@
+From 9e5306cc034e8ec1443bef3e49e22cd4b8d7171c Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 27 Jul 2017 12:46:58 -0500
+Subject: [PATCH 030/155] avs: agent support for vxlan mode
+
+Adds support to the neutron-avs-agent to be able to pass the "vtep-mode"
+attribute down to AVS.  The "vtep-mode" attribute is set based on the vxlan
+"mode" attribute in the DB.  While in "static" mode it is expected that the
+l2population mechanism driver is loaded on the server and passes down static
+endpoints via RPC.
+---
+ neutron/agent/vswitch/manager.py                       | 17 +++++++++++++++--
+ neutron/tests/functional/vswitch/test_vswitch_agent.py |  5 +++--
+ 2 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index b80800b..22bf4ae 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -228,7 +228,7 @@ class VSwitchManager(object):
+                 "Failed to add vlan interface {}, {}".format(interface, e))
+ 
+     def add_vxlan_interface(self, uuid, vxlan_id, group, port, ttl, mtu,
+-                            lower_uuid):
++                            lower_uuid, vtep_mode):
+         """
+         Create new vxlan interface.
+         """
+@@ -241,6 +241,7 @@ class VSwitchManager(object):
+             'uuid': uuid,
+             'vxlan-id': vxlan_id,
+             'lower-uuid': lower_uuid,
++            'vtep-mode': vtep_mode
+         }
+         try:
+             self.api.add_interface(interface)
+@@ -361,6 +362,16 @@ class VSwitchManager(object):
+                                 lower_iface['uuid'])
+         return iface_uuid
+ 
++    def _convert_vxlan_mode_to_vtep_mode(self, vxlan_mode):
++        if vxlan_mode == n_const.PROVIDERNET_VXLAN_DYNAMIC:
++            return "multicast"
++        elif vxlan_mode == n_const.PROVIDERNET_VXLAN_STATIC:
++            return "unicast"
++        elif vxlan_mode is None:
++            return "multicast"
++        raise VSwitchManagerError("Unsupported VXLAN mode: {}".format(
++            vxlan_mode))
++
+     def _setup_vxlan_provider_interface(self, lower_iface, data):
+         """
+         Attach the network to a VLAN interface which is first created atop the
+@@ -375,13 +386,15 @@ class VSwitchManager(object):
+             msg = "Missing MTU for vxlan provider interface: {}".format(data)
+             raise VSwitchManagerError(msg)
+ 
++        vtep_mode = self._convert_vxlan_mode_to_vtep_mode(vxlan.get('mode'))
+         self.add_vxlan_interface(iface_uuid,
+                                  vxlan_id,
+                                  vxlan['group'],
+                                  vxlan['port'],
+                                  vxlan['ttl'],
+                                  mtu,
+-                                 lower_iface['uuid'])
++                                 lower_iface['uuid'],
++                                 vtep_mode)
+         return iface_uuid
+ 
+     def setup_provider_interface(self, lower_uuid, data):
+diff --git a/neutron/tests/functional/vswitch/test_vswitch_agent.py b/neutron/tests/functional/vswitch/test_vswitch_agent.py
+index 72f151e..4629072 100644
+--- a/neutron/tests/functional/vswitch/test_vswitch_agent.py
++++ b/neutron/tests/functional/vswitch/test_vswitch_agent.py
+@@ -14,7 +14,7 @@
+ #    under the License.
+ 
+ #
+-# Copyright (c) 2013-2015 Wind River Systems, Inc.
++# Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -172,7 +172,8 @@ class TestVSwitchManager(testtools.TestCase):
+         self.network['network_type'] = 'vxlan'
+         self.network['vxlan'] = {'group': '239.0.0.9',
+                                  'port': 4789,
+-                                 'ttl': 1}
++                                 'ttl': 1,
++                                 'mode': 'dynamic'}
+         self.network['mtu'] = (int(self.network['mtu']) -
+                                q_constants.VXLAN_MTU_OVERHEAD)
+         self.add_network(self.network)
+-- 
+2.7.4
+

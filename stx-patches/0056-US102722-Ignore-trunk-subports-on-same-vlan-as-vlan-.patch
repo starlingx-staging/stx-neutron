@@ -1,0 +1,44 @@
+From 3eed837ebd236e6b1959ea88d9ab5322c9eef6b9 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Thu, 21 Sep 2017 12:32:07 -0400
+Subject: [PATCH 056/155] US102722: Ignore trunk subports on same vlan as
+ vlan-subnet ports
+
+This commit adds code to ignore trunk subports where they share their
+segmentation_id with a vlan subnet of their parent port.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 83426a3..f059c3c 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1162,6 +1162,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         port_uuid = port['uuid']
+         device_owner = port_details['device_owner']
+         vlans = set()
++        vlan_ids = set()
+         LOG.debug("handle_updated_port for {}".format(port_uuid))
+ 
+         # Lock the port immediately if it is in the incorrect state
+@@ -1184,6 +1185,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             details.update(subnets[0])
+             details['subnets'] = subnets
+             vlans.add(self.setup_interface(port, details, vlan_id=vlan_id))
++            vlan_ids.add(vlan_id)
+ 
+         # Setup the port for any trunk that may be overlaid.
+         trunk_details = self.get_trunk_details(port_uuid)
+@@ -1193,6 +1195,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             for subport in trunk_details.sub_ports if trunk_details else []:
+                 details = self.get_port_details(subport.port_id)
+                 vlan_id = subport.segmentation_id
++                if vlan_id in vlan_ids:
++                    continue
+                 vlans.add(self.setup_interface(port, details, vlan_id=vlan_id))
+                 # Report that the subport is UP.  This is not currently done in
+                 # OVS or Linuxbridge, but our customers will definitely
+-- 
+2.7.4
+

@@ -1,0 +1,26 @@
+From a59fb9cbb9c45150dc3b2efcb9d3708b9a66872a Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Wed, 11 Oct 2017 15:09:38 -0400
+Subject: [PATCH 061/155] US102722: Ignore pre-migration data during migration
+ of vlan subnets
+
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index f0ee056..55f6a9f 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -374,7 +374,7 @@ class AVRAgentManager(manager.Manager):
+                                  .format(_interface))
+ 
+     def _sanitize_router(self, router):
+-        self._sanitize_duplicate_interfaces_r4(router)
++        self._sanitize_duplicate_interfaces_r5(router)
+         if not router.get('distributed', False):
+             return router
+         if not self._is_gateway_owner(router):
+-- 
+2.7.4
+

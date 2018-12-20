@@ -1,0 +1,89 @@
+From 41eb334d8cf9c172f4f16f87f91cb2eb354a7854 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 19 Jan 2018 15:07:30 -0500
+Subject: [PATCH 133/155] CGTS-8476: sanitize csnat interfaces when sanitizing
+ router
+
+This commit adds removing duplicate csnat interfaces when sanitizing a router.
+This is necessary to avoid duplicate responses to a ping from external gateway
+to instance, through dvr on vlan-tagged subnet, while upgrading from R4 to R5,
+at which time there are both the router interfaces on the vlan-tagged network,
+and the router interfaces on the new network that replaces the vlan-tagged
+subnet
+
+This commit should be patched back to R4 to enable upgrades.
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 32 +++++++++++++++++++++++---------
+ 1 file changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index 0efc762..9e0448b 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -339,23 +339,30 @@ class AVRAgentManager(manager.Manager):
+         subnets that have been created to migrate away from using vlan-tagged
+         subnets.
+         """
+-        _interfaces = router.get('_interfaces', [])
++        _interfaces = router.get(constants.INTERFACE_KEY, [])
++        _snat_router_interfaces = router.get(n_const.SNAT_ROUTER_INTF_KEY, [])
++        all_interfaces = list(_interfaces) + list(_snat_router_interfaces)
+         subnets_with_vlans = []
+-        for _interface in _interfaces:
++        for _interface in all_interfaces:
+             subnets = _interface.get('subnets', [])
+             for subnet in subnets:
+                 if subnet.get('wrs-net:vlan_id', 0) > 0:
+                     subnets_with_vlans.append(subnet.get('cidr'))
+         # Make copy of list to iterate through, so can be removed from original
+-        for _interface in list(_interfaces):
++        for _interface in all_interfaces:
+             subnets = _interface.get('subnets', [])
+             for subnet in subnets:
+                 if subnet.get('wrs-net:vlan_id', 0) == 0:
+                     if subnet.get('cidr') in subnets_with_vlans:
+                         if _interface in _interfaces:
+                             _interfaces.remove(_interface)
+-                            LOG.info("AVR ignoring r5 interface: {}"
+-                                     .format(_interface))
++                        elif _interface in _snat_router_interfaces:
++                            _snat_router_interfaces.remove(_interface)
++                        else:
++                            continue
++                        LOG.info("AVR ignoring r5 {} interface: {}"
++                                 .format(_interface.get('device_owner'),
++                                         _interface.get('id')))
+ 
+     def _sanitize_duplicate_interfaces_r5(self, router):
+         """
+@@ -363,16 +370,23 @@ class AVRAgentManager(manager.Manager):
+         subnets, as they have been replaced by newly-created subnets in order
+         to migrate away from using vlan-tagged subnets.
+         """
+-        _interfaces = router.get('_interfaces', [])
++        _interfaces = router.get(constants.INTERFACE_KEY, [])
++        _snat_router_interfaces = router.get(n_const.SNAT_ROUTER_INTF_KEY, [])
++        all_interfaces = list(_interfaces) + list(_snat_router_interfaces)
+         # Make copy of list to iterate through, so can be removed from original
+-        for _interface in list(_interfaces):
++        for _interface in all_interfaces:
+             subnets = _interface.get('subnets', [])
+             for subnet in subnets:
+                 if subnet.get('wrs-net:vlan_id', 0) > 0:
+                     if _interface in _interfaces:
+                         _interfaces.remove(_interface)
+-                        LOG.info("AVR ignoring r4 interface: {}"
+-                                 .format(_interface))
++                    elif _interface in _snat_router_interfaces:
++                        _snat_router_interfaces.remove(_interface)
++                    else:
++                        continue
++                    LOG.info("AVR ignoring r4 {} interface: {}"
++                             .format(_interface.get('device_owner'),
++                                     _interface.get('id')))
+ 
+     def _sanitize_router(self, router):
+         self._sanitize_duplicate_interfaces_r5(router)
+-- 
+2.7.4
+

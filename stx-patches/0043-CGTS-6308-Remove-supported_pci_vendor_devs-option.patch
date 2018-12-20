@@ -1,0 +1,47 @@
+From 702862d425b88eeab12eba21b4a88b5dabc5e39d Mon Sep 17 00:00:00 2001
+From: Steven Webster <steven.webster@windriver.com>
+Date: Wed, 8 Feb 2017 10:17:33 -0500
+Subject: [PATCH 043/155] CGTS-6308: Remove supported_pci_vendor_devs option
+
+Fix for CGTS-6308: Unable to launch PCI passthrough VM Instance
+
+This commit backports the upstream commit e8fd250, removing the
+supported_pci_vendor_devs option.
+
+This option was depreciated in Newton and removed entirely in Ocata.
+
+Currently, neutron validates the pci vendor and product id.  However, this
+check is already done by the nova-scheduler when it selects a suitable
+hypervisor.  More precisely, the compute node validates this through the
+pci_passthrough_whitelist option in nova.conf.  Therefore this check in
+neutron is redundant.
+
+Conflicts:
+	neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py
+	neutron/tests/unit/plugins/ml2/drivers/mech_sriov/mech_driver/test_mech_sriov_nic_switch.py
+
+Conflicts:
+	neutron/opts.py
+	neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py
+	neutron/tests/unit/plugins/ml2/drivers/mech_sriov/mech_driver/test_mech_sriov_nic_switch.py
+---
+ neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py b/neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py
+index b6e9a1d..44eb9c4 100644
+--- a/neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py
+@@ -71,6 +71,9 @@ class SriovNicSwitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
+     def get_mappings(self, agent):
+         return agent['configurations'].get('device_mappings', {})
+ 
++    def initialize(self):
++        pass
++
+     def bind_port(self, context):
+         LOG.debug("Attempting to bind port %(port)s on "
+                   "network %(network)s",
+-- 
+2.7.4
+

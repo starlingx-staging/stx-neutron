@@ -1,0 +1,50 @@
+From 6f387bcabbe86df87ac9f1724b05d60192fedaee Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 26 Apr 2017 09:14:05 -0400
+Subject: [PATCH 046/155] CGTS-6800: agentschedulers: concurrent port delete on
+ unscheduling
+
+When a network is removed from an agent the plugin will loop over all of the
+ports owned by DHCP agents and update their device_id to the reserved value.
+In some scenarios it appears to be possible that an agent releases its port at
+the same time as this loop is running.  This leads to a failure as the call to
+update_port() fails to find the target port.
+
+This commit catches the PortNotFound exception as an expected error under this
+type of concurrent access scenario and logs it as a warning and continues.
+
+Conflicts:
+	neutron/db/agentschedulers_db.py
+---
+ neutron/db/agentschedulers_db.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/db/agentschedulers_db.py b/neutron/db/agentschedulers_db.py
+index a4503c2..63af445 100644
+--- a/neutron/db/agentschedulers_db.py
++++ b/neutron/db/agentschedulers_db.py
+@@ -27,6 +27,7 @@ import time
+ 
+ from neutron_lib import constants
+ from neutron_lib import context as ncontext
++from neutron_lib import exceptions as n_exc
+ from oslo_config import cfg
+ from oslo_log import log as logging
+ import oslo_messaging
+@@ -459,7 +460,12 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         for port in ports:
+             if port['device_id'].startswith(device_id):
+                 port['device_id'] = n_const.DEVICE_ID_RESERVED_DHCP_PORT
+-                self.update_port(context, port['id'], dict(port=port))
++                try:
++                    self.update_port(context, port['id'], dict(port=port))
++                except n_exc.PortNotFound:
++                    LOG.warning("Port %(port)s deleted concurrently "
++                                "by agent",
++                                {'port': port['id']})
+         with context.session.begin():
+             context.session.delete(binding)
+         LOG.warning("Unbinding network %(network)s from agent %(agent)s",
+-- 
+2.7.4
+

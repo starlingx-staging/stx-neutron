@@ -1,0 +1,77 @@
+From bcb110cc77fd9722cf2fd165c975e24f262c7986 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 4 Sep 2015 08:02:43 -0400
+Subject: [PATCH 036/155] CGTS-2466: synchronize agent scheduling operations
+ across workers
+
+Agent scheduling operations for routers and DHCP servers can be initiated from
+the API or from the RPC workers.  The neutron-server has multiple child
+processes handling different API and RPC worker requests simultaneously.  This
+creates the possibility of a race condition between determining if a resource
+needs scheduling and actually scheduling that resource.  This leads to
+resources being scheduled multiple times if two operations occur at the exact
+same time.
+
+In some cases, the DB table constraints protect against multiple agent bindings
+but in other cases multiple bindings are allowed by the DB because they are
+valid in some situtations (i.e., HA router configurations).  In the cases where
+multiple bindings are allowed the unscheduling code does not handle that case
+properly because they assume that only 1 binding exists and fail
+otherwise. That is a separate issue and needs to be dealt with upstream.  Since
+we do not support any conditions that would require multiple bindings this
+update is not addressing that issue for now.
+
+This commit adds inter-process synchronization locks on all router and DHCP
+top-level scheduling operations to ensure that decisions about scheduling a
+resource are atomic.
+
+Conflicts:
+	neutron/db/l3_agentschedulers_db.py
+	neutron/scheduler/l3_agent_scheduler.py
+
+Conflicts:
+	neutron/db/l3_agentschedulers_db.py
+---
+ neutron/db/agentschedulers_db.py    | 2 ++
+ neutron/db/l3_agentschedulers_db.py | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/neutron/db/agentschedulers_db.py b/neutron/db/agentschedulers_db.py
+index b8b20b9..a4503c2 100644
+--- a/neutron/db/agentschedulers_db.py
++++ b/neutron/db/agentschedulers_db.py
+@@ -521,11 +521,13 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         else:
+             return {'agents': []}
+ 
++    @utils.synchronized('schedule-networks', external=True)
+     def schedule_network(self, context, created_network):
+         if self.network_scheduler:
+             return self.network_scheduler.schedule(
+                 self, context, created_network)
+ 
++    @utils.synchronized('auto-schedule-networks', external=True)
+     def auto_schedule_networks(self, context, host):
+         if self.network_scheduler:
+             self.network_scheduler.auto_schedule_networks(self, context, host)
+diff --git a/neutron/db/l3_agentschedulers_db.py b/neutron/db/l3_agentschedulers_db.py
+index dbfcd9b..ca1542d 100644
+--- a/neutron/db/l3_agentschedulers_db.py
++++ b/neutron/db/l3_agentschedulers_db.py
+@@ -498,11 +498,13 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+             candidates.append(l3_agent)
+         return candidates
+ 
++    @n_utils.synchronized('auto-schedule-routers', external=True)
+     def auto_schedule_routers(self, context, host, router_ids=None):
+         if self.router_scheduler:
+             self.router_scheduler.auto_schedule_routers(
+                 self, context, host, router_ids)
+ 
++    @n_utils.synchronized('schedule-router', external=True)
+     def schedule_router(self, context, router, candidates=None):
+         if self.router_scheduler:
+             return self.router_scheduler.schedule(
+-- 
+2.7.4
+

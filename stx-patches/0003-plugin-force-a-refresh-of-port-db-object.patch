@@ -1,0 +1,37 @@
+From 0b7c63ad7610f6641e5c3142c95791cd42247976 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 27 May 2016 09:05:09 -0400
+Subject: [PATCH 003/155] plugin: force a refresh of port db object
+
+When the allowed address pairs db objects are created for a port nothing is
+refreshing the parent port db object.  This means that accessing that attribute
+like 'port_db.allowed_address_pairs' will only work if it is being accessed for
+the first time *after* the allowed address pair objects have been created.  If
+something causes that object to populate that field before the address pairs
+objects are created then it will also report an empty list.
+---
+ neutron/plugins/ml2/plugin.py | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 3b78d05..112215a 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -1197,6 +1197,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 resources.PORT, events.PRECOMMIT_CREATE, self, **kwargs)
+             self.mechanism_manager.create_port_precommit(mech_context)
+             self._setup_dhcp_agent_provisioning_component(context, result)
++            # TODO(alegacy): this refresh is needed because otherwise the
++            # allowed_address_pairs attribute of the DB object will not be
++            # automatically updated if anything causes the DB object to be
++            # re-read before this point. This is needed because the VLAN code
++            # is re-reading the port object and causing the
++            # allowed_address_pairs to be returned as an empty list.
++            context.session.add(port_db)
++            context.session.refresh(port_db)
+ 
+         resource_extend.apply_funcs('ports', result, port_db)
+         return result, mech_context
+-- 
+2.7.4
+

@@ -1,0 +1,203 @@
+From c0bdc3dec3b75a0346a3d59c5f4a4f9e14ce1139 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Mon, 12 Mar 2018 13:26:59 -0500
+Subject: [PATCH 146/155] CGTS-9200: avs: remove stale FDB records for local
+ ports
+
+The agent currently ignores any FDB updates for local ports because it assumes
+that the dynamic learning mechanisms in AVS will deal with traffic from that
+port.  It assumes that previous FDB records were cleaned up by RPC events but
+that is not the case when a VM moved from another node that was not able to
+send a delete event before dying/shutting down.
+
+To guard against such a condition the agent will perform a delete operation for
+any updates that are received as a result of its own actions (i.e., when does a
+update_device_up() an FDB_ADD event is echoed back down to it).
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 86 ++++++++++++++++++++++------------
+ 1 file changed, 55 insertions(+), 31 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index e31cad8..d1c03bf 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -159,6 +159,9 @@ AVS_VIRTUAL_PORT_TYPES = [constants.DEVICE_OWNER_DHCP, ]
+ DEVICES_ON_EXTERNAL_NETWORKS = [constants.DEVICE_OWNER_ROUTER_GW,
+                                 constants.DEVICE_OWNER_AGENT_GW]
+ 
++# FDB operations
++FDB_ADD = "add"
++FDB_REMOVE = "remove"
+ 
+ FLOODING_ENTRY_MAC = '00:00:00:00:00:00'
+ 
+@@ -339,7 +342,7 @@ class VSwitchFDBCache(object):
+     def device_installed(self, interface_uuid, mac_address, gateway_ip):
+         device = self.get_device(interface_uuid, mac_address)
+         if device:
+-            return bool(device['gateway_ip'] == gateway_ip)
++            return bool(not gateway_ip or device['gateway_ip'] == gateway_ip)
+ 
+     def get_devices(self, interface_uuid):
+         cache = self.cache[interface_uuid]
+@@ -388,7 +391,7 @@ class VSwitchFDBCache(object):
+         device = self.get_ip_device(interface_uuid, ip_address)
+         if device:
+             return bool(device['mac_address'] == mac_address and
+-                        device['gateway_ip'] == gateway_ip)
++                        (not gateway_ip or device['gateway_ip'] == gateway_ip))
+ 
+     def get_ip_devices(self, interface_uuid):
+         cache = self.cache[interface_uuid]
+@@ -518,7 +521,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         if self.fdb_cache.ip_device_installed(
+                 interface_uuid, ip_address, mac_address, agent_ip):
+             return
+-        LOG.info("adding VTEP IP endpoint for {}:{} via {} over {}".
++        LOG.info("adding VTEP IP endpoint for {}/{} via {} over {}".
+                  format(mac_address, ip_address, agent_ip, interface_uuid))
+         self.vswitch_mgr.add_vtep_ip_endpoint(
+             interface_uuid, ip_address, mac_address, agent_ip)
+@@ -531,12 +534,16 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             return  # let the layer2 handler deal with this
+         if not self.fdb_cache.ip_device_installed(
+                 interface_uuid, ip_address, mac_address, agent_ip):
+-            LOG.warning("not removing VTEP IP endpoint for {}:{} "
+-                        "via {} over {}".format(
+-                            mac_address, ip_address, agent_ip, interface_uuid))
++            if self.fdb_cache.get_ip_device(interface_uuid, ip_address):
++                # Only log if we have this entry but via a different gwy
++                LOG.warning("not removing VTEP IP endpoint {}/{} "
++                            "via {} over {}".format(
++                                mac_address, ip_address, agent_ip or '*',
++                                interface_uuid))
+             return
+-        LOG.info("removing VTEP IP endpoint for {}:{} via {} over {}".
+-                 format(mac_address, ip_address, agent_ip, interface_uuid))
++        LOG.info("removing VTEP IP endpoint for {}/{} via {} over {}".
++                 format(mac_address, ip_address, agent_ip or '*',
++                        interface_uuid))
+         self.vswitch_mgr.delete_vtep_ip_endpoint(
+             interface_uuid, ip_address)
+         self.fdb_cache.remove_ip_device(interface_uuid, ip_address)
+@@ -582,6 +589,9 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         """
+         Handle removal of one FDB entry.
+         """
++        if mac_address == FLOODING_ENTRY_MAC and not agent_ip:
++            # NOTE(alegacy): ignore wildcard agent_ip delete operations
++            return
+         if mac_address == FLOODING_ENTRY_MAC:
+             if not self.fdb_cache.get_gateway(interface_uuid, agent_ip):
+                 return
+@@ -602,12 +612,12 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 # could delete a valid entry.
+                 if self.fdb_cache.get_device(interface_uuid, mac_address):
+                     # Only log if we have this entry but via a different gwy
+-                    LOG.warning("not removing VTEP endpoint for "
+-                                "{} via {} over {}".
+-                                format(mac_address, agent_ip, interface_uuid))
++                    LOG.warning("not removing VTEP endpoint {} via {} over {}".
++                                format(mac_address, agent_ip or '*',
++                                       interface_uuid))
+                 return
+             LOG.info("removing VTEP endpoint for {} via {} over {}".
+-                     format(mac_address, agent_ip, interface_uuid))
++                     format(mac_address, agent_ip or '*', interface_uuid))
+             self.vswitch_mgr.delete_vtep_endpoint(interface_uuid, mac_address)
+             self.fdb_cache.remove_device(interface_uuid, mac_address)
+ 
+@@ -656,7 +666,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         current = set([d['ip_address'] for d in cached])
+         stale = previous - current
+         for ip_address in stale:
+-            LOG.info("removing stale VTEP IP endpoint for {}:{} over {}".
++            LOG.info("removing stale VTEP IP endpoint for {}/{} over {}".
+                      format(d['mac_address'], d['ip_address'], interface_uuid))
+             self.vswitch_mgr.delete_vtep_ip_endpoint(
+                 interface_uuid, ip_address)
+@@ -685,8 +695,13 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+     def _trigger_fdb_audit_for_network(self, interface_uuid):
+         self.fdb_audits[interface_uuid] = True
+ 
+-    def _process_fdb_for_network(self, network_id, fdb_entries,
+-                                 fdb_handler, ip_handler, reverse=False):
++    def get_fdb_handlers(self):
++        return {FDB_ADD: {"mac": self._fdb_add_entry,
++                          "ip": self._fdb_ip_add_entry},
++                FDB_REMOVE: {"mac": self._fdb_delete_entry,
++                             "ip": self._fdb_ip_delete_entry}}
++
++    def _process_fdb_for_network(self, network_id, fdb_entries, operation):
+         """
+         Handle new FDB entries for a given network_id.
+         """
+@@ -698,19 +713,33 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         for agent_ips, ports in six.iteritems(port_entries):
+             if self._is_local_agent_ip(
+                     fdb_entries['physical_network'], agent_ips):
+-                continue
+-            agent_ip = self._select_local_agent_ip(
+-                fdb_entries['physical_network'], agent_ips)
+-            if not agent_ip:
+-                LOG.warning("no compatible address to reach {}".format(
+-                    agent_ips))
+-                continue
++                # If the device is now present on the local vswitch we want
++                # to make sure that we do not have any stale records that are
++                # pointing to another compute node for these MAC/IP pairs.
++                # This can happen in some cases where the previous agent dies
++                # before it can do a proper "update_device_down()" to signal
++                # that the port is no longer present on that node.
++                handlers = self.get_fdb_handlers()[FDB_REMOVE]
++                reverse = True
++                agent_ip = None
++                LOG.debug("attempting to remove stale FDB records for "
++                          "local devices: {}".format(ports))
++            else:
++                handlers = self.get_fdb_handlers()[operation]
++                reverse = True if operation == FDB_REMOVE else False
++                agent_ip = self._select_local_agent_ip(
++                    fdb_entries['physical_network'], agent_ips)
++                if not agent_ip:
++                    LOG.warning("no compatible address to reach {}".format(
++                        agent_ips))
++                    continue
++
+             sorted_ports = sorted(copy.deepcopy(ports),
+                                   key=lambda x: x.mac_address,
+                                   reverse=reverse)
+             for p in sorted_ports:
+-                fdb_handler(interface_uuid, p.mac_address, agent_ip)
+-                ip_handler(
++                handlers['mac'](interface_uuid, p.mac_address, agent_ip)
++                handlers['ip'](
+                     interface_uuid, p.ip_address, p.mac_address, agent_ip)
+ 
+         if fdb_entries.get('audit'):
+@@ -743,9 +772,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 continue
+             if not self._is_static_vxlan_segment(network_id, fdb_entries):
+                 continue
+-            self._process_fdb_for_network(network_id, fdb_entries,
+-                                          self._fdb_add_entry,
+-                                          self._fdb_ip_add_entry)
++            self._process_fdb_for_network(network_id, fdb_entries, FDB_ADD)
+ 
+     @utils.synchronized('avs-fdb-cache')
+     def fdb_remove(self, context, fdb_entries):
+@@ -762,10 +789,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 continue
+             if not self._is_static_vxlan_segment(network_id, fdb_entries):
+                 continue
+-            self._process_fdb_for_network(network_id, fdb_entries,
+-                                          self._fdb_delete_entry,
+-                                          self._fdb_ip_delete_entry,
+-                                          reverse=True)
++            self._process_fdb_for_network(network_id, fdb_entries, FDB_REMOVE)
+ 
+     def _process_ip_change_for_network(self, network_id, ip_changes):
+         """
+-- 
+2.7.4
+

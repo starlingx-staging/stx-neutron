@@ -1,0 +1,44 @@
+From ae9c08c4826b31694341acadb7edfcc16a5505da Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 23 Feb 2018 14:13:17 -0600
+Subject: [PATCH 139/155] avs: remove handling of external networks for sdn
+
+A previous update removed most of the code related to SDN external
+networks but there is still a flag remaining that can interfere
+with correct processing if it is not set properly.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 11 ++---------
+ 1 file changed, 2 insertions(+), 9 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 8828cbc..325bb4c 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -126,12 +126,6 @@ vxlan_opts = [
+ ]
+ 
+ sdn_opts = [
+-    cfg.BoolOpt('manage_external_networks',
+-                default=False,
+-                help=_("Defines whether to manage the creation of the "
+-                       "external network bridge or to defer this task to the "
+-                       "SDN controller.  The integration bridge is always "
+-                       "managed by the SDN controller.")),
+     cfg.StrOpt('integration_bridge_name',
+                default='br-int',
+                help=_("Defines the default integration bridge name")),
+@@ -2480,9 +2474,8 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         return current_networks
+ 
+     def manage_network_for_device(self, port_details):
+-        device_owner = port_details['device_owner']
+-        if device_owner in DEVICES_ON_EXTERNAL_NETWORKS:
+-            return cfg.CONF.SDN.manage_external_networks
++        # SDN no longer support both br-int and br-ex therefore all networks
++        # are managed by the SDN controller.
+         return False
+ 
+     def handle_removed_port(self, uuid):
+-- 
+2.7.4
+

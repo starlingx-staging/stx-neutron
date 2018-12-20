@@ -1,0 +1,1328 @@
+From 05aed14fa879c832db71a6b59f98344002e83dec Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 22 Jul 2016 11:47:12 -0400
+Subject: [PATCH 019/155] US75599: Introduce rescheduling of routers and DHCP
+ servers
+
+This commit introduces rescheduling of routers and DHCP servers when
+the distribution is unbalanced past a certain threshold.  This has the
+benefit of balancing host port allocations for DHCP servers, and CPU
+usage for routers.
+
+CGCS-6820: DHCP servers are not balanced after lock/unlock compute hosts
+
+The networks handled by a particular DHCP agent can become unbalanced after
+a compute host is locked / unlocked when 3 compute nodes or more are present.
+
+This seems to have been introduced between R3/R4 when the
+_can_dhcp_agent_host_network was changed to use the upstream
+filter_hosts_with_network_access.  Previously, a custom query to the agents
+database was used.
+
+The older custom query included a check on the availability of the compute
+hosting the agent.  The redistribute_networks algorithm depends on this to
+essentially 'ignore' a locked host when determining the agent with the least
+amount of networks.
+
+This change simply adds an 'available' check back to the
+_can_dhcp_agent_host_network function.
+
+Conflicts:
+	neutron/db/agents_db.py
+	neutron/db/agentschedulers_db.py
+	neutron/db/l3_agentschedulers_db.py
+	neutron/scheduler/dhcp_agent_scheduler.py
+	neutron/scheduler/l3_agent_scheduler.py
+	neutron/services/segments/plugin.py
+	neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+---
+ neutron/agent/dhcp/agent.py                        |  13 +-
+ neutron/db/agents_db.py                            |   4 +
+ neutron/db/agentschedulers_db.py                   | 189 +++++++-
+ neutron/db/hosts_db.py                             |  36 +-
+ neutron/db/l3_agentschedulers_db.py                |  92 ++++
+ neutron/scheduler/dhcp_agent_scheduler.py          |  20 +-
+ neutron/scheduler/l3_agent_scheduler.py            |  10 +-
+ neutron/services/segments/plugin.py                |   4 +
+ .../tests/unit/plugins/wrs/test_agent_scheduler.py | 517 +++++++++++++++++----
+ .../tests/unit/plugins/wrs/test_extension_host.py  |  20 +
+ neutron/tests/unit/plugins/wrs/test_wrs_plugin.py  |   6 +-
+ .../unit/scheduler/test_l3_agent_scheduler.py      |   2 +-
+ 12 files changed, 798 insertions(+), 115 deletions(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index 7734665..d3a0ac3 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -812,20 +812,31 @@ class NetworkCache(object):
+                 if port.id == port_id:
+                     return port
+ 
++    def _get_dhcp_enabled_vlans_count(self, network):
++        """
++        Return a count of network vlans with dhcp enabled.
++        The primary network with vlan None is also included in the count.
++        """
++        return len(set([getattr(s, wrs_net.VLAN, 0)
++                        for s in network.subnets if s.enable_dhcp]))
++
+     def get_state(self):
+         net_ids = self.get_network_ids()
+         num_nets = len(net_ids)
+         num_subnets = 0
+         num_ports = 0
++        num_vlan_subnets = 0
+         for net_id in net_ids:
+             network = self.get_network_by_id(net_id)
+             non_local_subnets = getattr(network, 'non_local_subnets', [])
+             num_subnets += len(network.subnets)
+             num_subnets += len(non_local_subnets)
+             num_ports += len(network.ports)
++            num_vlan_subnets += self._get_dhcp_enabled_vlans_count(network)
+         return {'networks': num_nets,
+                 'subnets': num_subnets,
+-                'ports': num_ports}
++                'ports': num_ports,
++                'vlan_segments': num_vlan_subnets}
+ 
+ 
+ class DhcpAgentWithStateReport(DhcpAgent):
+diff --git a/neutron/db/agents_db.py b/neutron/db/agents_db.py
+index 673bca9..e3cd341 100644
+--- a/neutron/db/agents_db.py
++++ b/neutron/db/agents_db.py
+@@ -55,6 +55,10 @@ from neutron.extensions import availability_zone as az_ext
+ LOG = logging.getLogger(__name__)
+ 
+ AGENT_OPTS = [
++    cfg.IntOpt('agent_down_time', default=75,
++               help=_("Seconds to regard the agent is down; should be at "
++                      "least twice report_interval, to be sure the "
++                      "agent is down for good.")),
+     cfg.StrOpt('dhcp_load_type', default='networks',
+                choices=['networks', 'subnets', 'ports'],
+                help=_('Representing the resource type whose load is being '
+diff --git a/neutron/db/agentschedulers_db.py b/neutron/db/agentschedulers_db.py
+index 299bb6c..b8b20b9 100644
+--- a/neutron/db/agentschedulers_db.py
++++ b/neutron/db/agentschedulers_db.py
+@@ -44,6 +44,7 @@ from neutron.db.models import agent as agent_model
+ from neutron.db.network_dhcp_agent_binding import models as ndab_model
+ from neutron.extensions import agent as ext_agent
+ from neutron.extensions import dhcpagentscheduler
++from neutron.extensions import wrs_net
+ from neutron import worker as neutron_worker
+ 
+ 
+@@ -54,6 +55,11 @@ AGENTS_SCHEDULER_OPTS = [
+                default='neutron.scheduler.'
+                        'dhcp_agent_scheduler.WeightScheduler',
+                help=_('Driver to use for scheduling network to DHCP agent')),
++    cfg.IntOpt('network_reschedule_threshold',
++               default=1,
++               help=_('Threshold that when current network distribution has '
++                      'one DHCP agent with this many more networks than '
++                      'another DHCP agent, then rescheduling is needed')),
+     cfg.BoolOpt('network_auto_schedule', default=True,
+                 help=_('Allow auto scheduling networks to DHCP agent.')),
+     cfg.BoolOpt('allow_automatic_dhcp_failover', default=True,
+@@ -456,6 +462,8 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+                 self.update_port(context, port['id'], dict(port=port))
+         with context.session.begin():
+             context.session.delete(binding)
++        LOG.warning("Unbinding network %(network)s from agent %(agent)s",
++                    {'network': network_id, 'agent': id})
+ 
+         if not notify:
+             return
+@@ -522,6 +530,32 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         if self.network_scheduler:
+             self.network_scheduler.auto_schedule_networks(self, context, host)
+ 
++    def _relocate_network(self, context, agent_id, network):
++        LOG.debug("relocating network {}".format(network['id']))
++        try:
++            self.remove_network_from_dhcp_agent(context,
++                                                agent_id,
++                                                network['id'])
++        except dhcpagentscheduler.NetworkNotHostedByDhcpAgent:
++            # measures against concurrent operation
++            LOG.warning("Network %(net)s already removed from DHCP "
++                        "agent %(agent)s",
++                        {"net": network['id'],
++                         "agent": agent_id})
++            return []
++
++        agents = self.schedule_network(context, network)
++        dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
++        if not agents:
++            LOG.warning(("Relocation of network {} has failed").format(
++                network['id']))
++            return []
++        elif dhcp_notifier:
++            for agent in agents:
++                dhcp_notifier.network_added_to_agent(
++                    context, network['id'], agent['host'])
++        return agents
++
+     def relocate_networks(self, context, agent_id):
+         """Remove networks from given agent and attempt to reschedule to a
+         different agent.  This function assumes that it whatever condition led
+@@ -533,19 +567,148 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         result = self.list_networks_on_dhcp_agent(context, agent_id)
+         networks = result.get('networks')
+         for network in networks:
+-            LOG.debug("relocating network {}".format(network['id']))
+-            self.remove_network_from_dhcp_agent(context,
+-                                                agent_id,
+-                                                network['id'])
+-            agents = self.schedule_network(context, network)
+-            dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
+-            if not agents:
+-                LOG.warning(("Relocation of network {} has failed").format(
+-                    network['id']))
+-            elif dhcp_notifier:
+-                for agent in agents:
+-                    dhcp_notifier.network_added_to_agent(
+-                        context, network['id'], agent['host'])
++            self._relocate_network(context, agent_id, network)
++
++    def _can_dhcp_agent_host_network(self, context, agent, network_id):
++        """Return true if the agent specified can host the network.
++
++        :returns: True if given DHCP agent can host the given network id
++        """
++        if not self.is_host_available(context, agent['host']):
++            return False
++
++        candidate_hosts = self.filter_hosts_with_network_access(
++            context, network_id, [agent['host']])
++        return bool(candidate_hosts)
++
++    def _count_net_vlan_segments(self, networks):
++        count = 0
++        for network in networks:
++            count += network['dhcp_vlan_segments']
++        return count
++
++    def redistribute_networks(self, context,
++                              _meets_network_rescheduling_threshold):
++        """Redistribute to a more optimal network distribution"""
++        # Don't reschedule if more than one DHCP agent per DHCP server
++        if cfg.CONF.dhcp_agents_per_network > 1:
++            LOG.warning("DHCP agent redistribution disabled because "
++                        "dhcp_agents_per_network is greater than 1")
++            return
++        start_time = time.time()
++        filters = {'agent_type': [constants.AGENT_TYPE_DHCP]}
++        agents = self.get_agents(context, filters)
++        networks_on_agents = []
++        rescheduled_networks = []
++        network_vlans = {}
++
++        # Count vlan segments on networks
++        subnet_filters = {"enable_dhcp": [True]}
++        for subnet in self.get_subnets(context, filters=subnet_filters):
++            network_id = subnet['network_id']
++            vlan_id = subnet.get(wrs_net.VLAN, 0)
++            if network_id not in network_vlans:
++                network_vlans[network_id] = set()
++            network_vlans[network_id].add(vlan_id)
++        # Create a list of tuples (agent_id, [network_id_0, ..., network_id_n])
++        for agent in agents:
++            result = self.list_networks_on_dhcp_agent(context, agent['id'])
++            for network in result['networks']:
++                network_id = network['id']
++                vlan_segments = len(network_vlans.get(network_id, []))
++                network['dhcp_vlan_segments'] = vlan_segments
++            networks_on_agents.append((agent, result))
++        db_completion_time = time.time()
++
++        found_match = None
++        # Loop through agents to try redistributing on all but the last agent
++        while len(networks_on_agents) > 1 or found_match:
++            # Sort by number of networks during first run,
++            # and re-sort the list if any networks are relocated
++            networks_on_agents.sort(
++                key=(lambda x: self._count_net_vlan_segments(x[1]['networks']))
++            )
++
++            # If arriving here either during first run, or after going through
++            # without any relocations, then pop the agent with most networks,
++            # and try redistributing its networks.
++            if not found_match:
++                busiest_agent_networks = networks_on_agents.pop()
++            found_match = None
++            networks_on_busiest_agent = self._count_net_vlan_segments(
++                busiest_agent_networks[1]['networks']
++            )
++
++            # Iterate through list of DHCP agents sorted in ascending order
++            # by the number of networks they are hosting
++            for agent_networks in networks_on_agents:
++                minimum_networks = self._count_net_vlan_segments(
++                    agent_networks[1]['networks']
++                )
++                # Stop trying to reschedule from the busiest agent, if there is
++                # no possibility to reschedule to the agent of the current
++                # iteration. Because the list of agents is sorted by number
++                # of networks, if the agent of the current iteration doesn't
++                # meet the rescheduling threshold from the busiest agent, then
++                # no agent will.
++                if not _meets_network_rescheduling_threshold(
++                        networks_on_busiest_agent, minimum_networks):
++                    break
++
++                # Sort based on number of vlan segments, so that network with
++                # most vlan segments is rescheduled first.
++                busiest_agent_networks[1]['networks'].sort(
++                    key=(lambda x: self._count_net_vlan_segments([x])),
++                    reverse=True
++                )
++
++                # Loop through networks on busiest agent, and see if it can be
++                # rescheduled to the agent of the current iteration.  This is
++                # only to check if rescheduling is possible; if it can be
++                # rescheduled, then it will still use the default scheduler to
++                # schedule it.
++                for network in busiest_agent_networks[1]['networks']:
++                    # Reschedule network at most once per run. This will
++                    # minimize the downtime of the network's DHCP service,
++                    # as well as linearly bound the number of relocations.
++                    if network['id'] in rescheduled_networks:
++                        continue
++
++                    # In the case of multiple vlans on network, check that it
++                    # still meets the rescheduling threshold
++                    vlan_subnets = self._count_net_vlan_segments([network])
++                    if not _meets_network_rescheduling_threshold(
++                        networks_on_busiest_agent - vlan_subnets + 1,
++                        minimum_networks):
++                        continue
++
++                    if self._can_dhcp_agent_host_network(context,
++                                                         agent_networks[0],
++                                                         network['id']):
++                        rescheduled_networks.append(network['id'])
++                        new_agents = self._relocate_network(
++                            context, busiest_agent_networks[0]['id'], network
++                        )
++                        for new_agent in new_agents:
++                            for networks_on_agent in networks_on_agents:
++                                agent = networks_on_agent[0]
++                                if agent['host'] == new_agent['host']:
++                                    networks_on_agent[1]['networks'].append(
++                                        network
++                                    )
++                        found_match = network
++                        break
++                if found_match:
++                    busiest_agent_networks[1]['networks'].remove(found_match)
++                    break
++        end_time = time.time()
++
++        LOG.warning("redistribute_networks took %(total_time)d seconds to "
++                    "relocate %(count)d networks including "
++                    "%(db_access_time)d seconds accessing DB",
++                    {'total_time': (end_time - start_time),
++                     'count': len(rescheduled_networks),
++                     'db_access_time': (db_completion_time - start_time)})
+ 
+ 
+ class AZDhcpAgentSchedulerDbMixin(DhcpAgentSchedulerDbMixin,
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 222ff7f..d77ae0c 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -27,6 +27,7 @@ import six
+ from neutron_lib import constants as lib_constants
+ from neutron_lib import context
+ from neutron_lib.db import model_base
++from oslo_config import cfg
+ from oslo_log import log as logging
+ from oslo_utils import timeutils
+ from oslo_utils import uuidutils
+@@ -731,6 +732,7 @@ class HostSchedulerDbMixin(HostDbMixin):
+         previous_agents = self.agents
+         admin_context = context.get_admin_context()
+         self.agents = {a['id']: a for a in self.get_agents(admin_context)}
++        new_alive_topics = set()
+         host_availability = {}
+         for uuid, agent in six.iteritems(self.agents):
+             hostname = agent['host']
+@@ -758,15 +760,12 @@ class HostSchedulerDbMixin(HostDbMixin):
+                 # Clear fault if agent is alive
+                 if agent['alive']:
+                     self.clear_agent_fault(agent)
++                    new_alive_topics.add(agent['topic'])
+                 # Only report fault if agent's host is online
+-                elif self.host_driver.is_host_available(admin_context,
+-                                                        agent['host']):
+-                    self.report_agent_fault(agent)
+-                # If agent dies while host is down, delay updating list of
+-                # agents until after the host comes online, so that audit
+-                # can correctly assess change in agent state at that point.
+                 else:
+-                    self.agents[uuid] = previous
++                    self.report_agent_fault(agent)
++        for new_alive_topic in new_alive_topics:
++            self._redistribute_for_new_agent(admin_context, new_alive_topic)
+ 
+     def report_agent_fault(self, agent):
+         """
+@@ -781,3 +780,26 @@ class HostSchedulerDbMixin(HostDbMixin):
+         """
+         LOG.debug("Clear agent fault: {}".format(agent['id']))
+         self.fm_driver.clear_agent_fault(agent['host'], agent['id'])
++
++    def _redistribute_for_new_agent(self, context, topic):
++        """
++        Attempt to reschedule DHCP servers or routers if new agent comes up
++        """
++        network_reschedule_threshold = cfg.CONF.network_reschedule_threshold
++        router_reschedule_threshold = cfg.CONF.router_reschedule_threshold
++        try:
++            if topic == topics.DHCP_AGENT:
++                plugin = directory.get_plugin()
++                plugin.redistribute_networks(
++                    context,
++                    (lambda a, b: a > b + network_reschedule_threshold))
++            elif topic == topics.L3_AGENT:
++                plugin = directory.get_plugin(plugin_constants.L3)
++                if utils.is_extension_supported(
++                        plugin, lib_constants.L3_AGENT_SCHEDULER_EXT_ALIAS):
++                    plugin.redistribute_routers(
++                        context,
++                        (lambda a, b: a > b + router_reschedule_threshold))
++        except Exception as e:
++            LOG.error("{} redistribution failed, {}".format(topic, e))
++            return
+diff --git a/neutron/db/l3_agentschedulers_db.py b/neutron/db/l3_agentschedulers_db.py
+index ab10cb2..dbfcd9b 100644
+--- a/neutron/db/l3_agentschedulers_db.py
++++ b/neutron/db/l3_agentschedulers_db.py
+@@ -20,12 +20,15 @@
+ # of an applicable Wind River license agreement.
+ #
+ 
++import time
++
+ from neutron_lib import constants
+ from neutron_lib.plugins import constants as plugin_constants
+ from neutron_lib.plugins import directory
+ from oslo_config import cfg
+ from oslo_db import exception as db_exc
+ from oslo_log import log as logging
++
+ import oslo_messaging
+ from sqlalchemy import or_
+ 
+@@ -53,6 +56,11 @@ L3_AGENTS_SCHEDULER_OPTS = [
+                        'LeastRoutersScheduler',
+                help=_('Driver to use for scheduling '
+                       'router to a default L3 agent')),
++    cfg.IntOpt('router_reschedule_threshold',
++               default=1,
++               help=_('Threshold that when current router distribution has '
++                      'one L3 agent with this many more routers than another '
++                      'L3 agent, then rescheduling is needed')),
+     cfg.BoolOpt('router_auto_schedule', default=True,
+                 help=_('Allow auto scheduling of routers to L3 agent.')),
+     cfg.BoolOpt('allow_automatic_l3agent_failover', default=False,
+@@ -251,6 +259,10 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+     def _unbind_router(self, context, router_id, agent_id):
+         rb_obj.RouterL3AgentBinding.delete_objects(
+                 context, router_id=router_id, l3_agent_id=agent_id)
++        LOG.warning("Unbinding router %(router)s from agent "
++                    "%(agent)s",
++                    {'router': router_id,
++                     'agent': agent_id})
+ 
+     def _unschedule_router(self, context, router_id, agents_ids):
+         with context.session.begin(subtransactions=True):
+@@ -278,6 +290,7 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+ 
+         self._notify_agents_router_rescheduled(context, router_id,
+                                                cur_agents, new_agents)
++        return new_agents
+ 
+     def _notify_agents_router_rescheduled(self, context, router_id,
+                                           old_agents, new_agents):
+@@ -546,6 +559,85 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+ 
+         return -1
+ 
++    def redistribute_routers(self, context,
++                             _meets_router_rescheduling_threshold):
++        """Redistribute to a more optimal router distribution"""
++        start_time = time.time()
++        filters = {'agent_type': [constants.AGENT_TYPE_L3]}
++        agents = self.get_agents(context, filters)
++        routers_on_agents = []
++        rescheduled_routers = []
++        # Create a list of tuples (agent_id, [router_id_0, ..., router_id_n])
++        for agent in agents:
++            result = self.list_routers_on_l3_agent(context, agent['id'])
++            routers_on_agents.append((agent['id'], result))
++        db_completion_time = time.time()
++
++        found_match = None
++        # Loop through agents to try redistributing on all but the last agent
++        while len(routers_on_agents) > 1 or found_match:
++            # Sort by number of routers during first run,
++            # and re-sort the list if any routers are relocated
++            routers_on_agents.sort(key=(lambda x: len(x[1]['routers'])))
++
++            # If arriving here either during first run, or after going through
++            # without any relocations, then pop the agent with most routers,
++            # and try redistributing its routers.
++            if not found_match:
++                busiest_agent_routers = routers_on_agents.pop()
++            found_match = None
++            routers_on_busiest_agent = len(busiest_agent_routers[1]['routers'])
++
++            # Loop through list of agents sorted by routers they are hosting
++            for agent_routers in routers_on_agents:
++                minimum_routers = len(agent_routers[1]['routers'])
++                # Stop trying to reschedule from the busiest agent, if there is
++                # no possibility to reschedule to the agent of the current
++                # iteration. Because the list of agents is sorted by number
++                # of routers, if the agent of the current iteration doesn't
++                # meet the rescheduling threshold from the busiest agent, then
++                # no agent will.
++                if not _meets_router_rescheduling_threshold(
++                        routers_on_busiest_agent, minimum_routers):
++                    break
++
++                # Loop through routers on busiest agent, and see if it can be
++                # rescheduled to the agent of the current iteration.  This is
++                # only to check if rescheduling is possible; if it can be
++                # rescheduled, then it will still use the default scheduler to
++                # schedule it.
++                for router in busiest_agent_routers[1]['routers']:
++                    # Reschedule router at most once per run. This will
++                    # minimize the downtime of the routing service,
++                    # as well as linearly bound the number of relocations.
++                    if router['id'] in rescheduled_routers:
++                        continue
++                    if self.can_l3_agent_host_router(context, agent_routers[0],
++                                                     router['id']):
++                        rescheduled_routers.append(router['id'])
++                        new_agents = self.reschedule_router(
++                            context, router['id']
++                        )
++                        for new_agent in new_agents:
++                            for routers_on_agent in routers_on_agents:
++                                if routers_on_agent[0] == new_agent['id']:
++                                    routers_on_agent[1]['routers'].append(
++                                        router
++                                    )
++                        found_match = router
++                        break
++                if found_match:
++                    busiest_agent_routers[1]['routers'].remove(found_match)
++                    break
++        end_time = time.time()
++
++        LOG.warning("redistribute_routers took %(total_time)d seconds to "
++                    "relocate %(count)d routers including "
++                    "%(db_access_time)d seconds accessing DB",
++                    {'total_time': (end_time - start_time),
++                     'count': len(rescheduled_routers),
++                     'db_access_time': (db_completion_time - start_time)})
++
+ 
+ class AZL3AgentSchedulerDbMixin(L3AgentSchedulerDbMixin,
+                                 router_az.RouterAvailabilityZonePluginBase):
+diff --git a/neutron/scheduler/dhcp_agent_scheduler.py b/neutron/scheduler/dhcp_agent_scheduler.py
+index 3cad9fc..3c55dd2 100644
+--- a/neutron/scheduler/dhcp_agent_scheduler.py
++++ b/neutron/scheduler/dhcp_agent_scheduler.py
+@@ -44,6 +44,15 @@ LOG = logging.getLogger(__name__)
+ 
+ class AutoScheduler(object):
+ 
++    def get_dhcp_subnets_for_host(self, plugin, context, host, fields):
++        """
++        This is the superclass version of this method.  It treats all networks
++        as equal and capable of being on any host specified in the parameter
++        list.  Subclasses can override this and constrain the list of networks
++        that can be considered for a given host.
++        """
++        return plugin.get_subnets(context, fields=fields)
++
+     def auto_schedule_networks(self, plugin, context, host):
+         """Schedule non-hosted networks to the DHCP agent on the specified
+            host.
+@@ -53,7 +62,8 @@ class AutoScheduler(object):
+         bindings_to_add = []
+         with context.session.begin(subtransactions=True):
+             fields = ['network_id', 'enable_dhcp', 'segment_id']
+-            subnets = plugin.get_subnets(context, fields=fields)
++            subnets = self.get_dhcp_subnets_for_host(
++                plugin, context, host, fields=fields)
+             net_ids = {}
+             net_segment_ids = collections.defaultdict(set)
+             for s in subnets:
+@@ -201,10 +211,10 @@ class DhcpFilter(base_resource_filter.BaseResourceFilter):
+                 # it's totally ok, someone just did our job!
+                 bound_agents.remove(agent)
+                 LOG.info('Agent %s already present', agent_id)
+-            LOG.debug('Network %(network_id)s is scheduled to be '
+-                      'hosted by DHCP agent %(agent_id)s',
+-                      {'network_id': network_id,
+-                       'agent_id': agent_id})
++            LOG.warning('Network %(network_id)s is scheduled to be '
++                        'hosted by DHCP agent %(agent_id)s',
++                        {'network_id': network_id,
++                         'agent_id': agent_id})
+         super(DhcpFilter, self).bind(context, bound_agents, network_id)
+ 
+     def filter_agents(self, plugin, context, network):
+diff --git a/neutron/scheduler/l3_agent_scheduler.py b/neutron/scheduler/l3_agent_scheduler.py
+index ee5b54f..52c1946 100644
+--- a/neutron/scheduler/l3_agent_scheduler.py
++++ b/neutron/scheduler/l3_agent_scheduler.py
+@@ -235,11 +235,11 @@ class L3Scheduler(object):
+                 context, l3_agent_id=agent_id,
+                 router_id=router_id, binding_index=binding_index)
+             binding.create()
+-            LOG.debug('Router %(router_id)s is scheduled to L3 agent '
+-                      '%(agent_id)s with binding_index %(binding_index)d',
+-                      {'router_id': router_id,
+-                       'agent_id': agent_id,
+-                       'binding_index': binding_index})
++            LOG.warning('Router %(router_id)s is scheduled to L3 agent '
++                        '%(agent_id)s with binding_index %(binding_index)d',
++                        {'router_id': router_id,
++                         'agent_id': agent_id,
++                         'binding_index': binding_index})
+             return binding
+         except db_exc.DBReferenceError:
+             LOG.debug('Router %s has already been removed '
+diff --git a/neutron/services/segments/plugin.py b/neutron/services/segments/plugin.py
+index 99871f9..5cd62ba 100644
+--- a/neutron/services/segments/plugin.py
++++ b/neutron/services/segments/plugin.py
+@@ -61,6 +61,10 @@ class Plugin(db.SegmentDbMixin, segment.SegmentPluginBase):
+ 
+     def __init__(self):
+         self.nova_updater = NovaSegmentNotifier()
++        # TODO(alegacy): this was inserted here to allow unit tests to pass
++        # because the CallbackManager is overridden at the start of each test
++        # and the subscriptions are lost.
++        db.subscribe()
+ 
+     @staticmethod
+     @resource_extend.extends([net_def.COLLECTION_NAME])
+diff --git a/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py b/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+index e907b43..8c70ef1 100644
+--- a/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
++++ b/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+@@ -20,7 +20,10 @@
+ # of an applicable Wind River license agreement.
+ #
+ 
++import collections
+ import copy
++import datetime
++import math
+ import uuid
+ 
+ import six
+@@ -62,7 +65,11 @@ HOST4 = {'name': 'compute-3',
+          'id': '89bfbe7a-c416-4c32-ae65-bc390fa0a908',
+          'availability': n_const.HOST_DOWN}
+ 
+-HOSTS = (HOST1, HOST2, HOST3, HOST4)
++HOST5 = {'name': 'compute-4',
++         'id': '81c8fbd6-4512-4d83-9b86-c1ab90bbb587',
++         'availability': n_const.HOST_DOWN}
++
++HOSTS = (HOST1, HOST2, HOST3, HOST4, HOST5)
+ 
+ PNET1 = {'name': 'vlan-pnet0',
+          'type': n_const.PROVIDERNET_VLAN,
+@@ -85,7 +92,11 @@ PNET5 = {'name': 'flat-sriov-pnet1',
+          'type': n_const.PROVIDERNET_FLAT,
+          'description': 'flat test provider network for sriov networks'}
+ 
+-PNETS = (PNET1, PNET2, PNET3, PNET4, PNET5)
++PNET6 = {'name': 'flat-pnet2',
++         'type': n_const.PROVIDERNET_FLAT,
++         'description': 'flat test provider network'}
++
++PNETS = (PNET1, PNET2, PNET3, PNET4, PNET5, PNET6)
+ 
+ PNET1_RANGE1 = {'name': 'vlan-pnet0-0',
+                 'description': 'vlan range1',
+@@ -107,7 +118,8 @@ PNET_RANGES = {'vlan-pnet0': [PNET1_RANGE1],
+ PNET_BINDINGS = {'compute-0': ['vlan-pnet0', 'vlan-pnet1', 'flat-pnet0'],
+                  'compute-1': ['vlan-pnet0', 'vlan-pnet1', 'flat-pnet0'],
+                  'compute-2': ['vlan-pnet0', 'vlan-pnet1'],
+-                 'compute-3': ['flat-sriov-pnet1']}
++                 'compute-3': ['flat-sriov-pnet1'],
++                 'compute-4': ['flat-pnet2']}
+ 
+ INTERFACE1 = {'uuid': str(uuid.uuid4()),
+               'mtu': n_const.DEFAULT_MTU,
+@@ -133,10 +145,17 @@ INTERFACE4 = {'uuid': str(uuid.uuid4()),
+               'network_type': 'pci-sriov',
+               'providernets': ','.join(PNET_BINDINGS['compute-3'])}
+ 
++INTERFACE5 = {'uuid': str(uuid.uuid4()),
++              'mtu': n_const.DEFAULT_MTU,
++              'vlans': '4001',
++              'network_type': 'data',
++              'providernets': ','.join(PNET_BINDINGS['compute-4'])}
++
+ INTERFACES = {'compute-0': INTERFACE1,
+               'compute-1': INTERFACE2,
+               'compute-2': INTERFACE3,
+-              'compute-3': INTERFACE4}
++              'compute-3': INTERFACE4,
++              'compute-4': INTERFACE5}
+ 
+ NET1 = {'name': 'tenant-net0',
+         'provider__physical_network': 'vlan-pnet0',
+@@ -159,7 +178,15 @@ NET5 = {'name': 'tenant-net3',
+         'provider__physical_network': 'flat-sriov-pnet1',
+         'provider__network_type': n_const.PROVIDERNET_FLAT}
+ 
+-NETS = (NET1, NET2, NET3, NET4, NET5)
++NET6 = {'name': 'tenant-net4',
++        'provider__physical_network': 'flat-pnet2',
++        'provider__network_type': n_const.PROVIDERNET_FLAT}
++
++NET7 = {'name': 'tenant-net5',
++        'provider__physical_network': 'vlan-pnet0',
++        'provider__network_type': n_const.PROVIDERNET_VLAN}
++
++NETS = (NET1, NET2, NET3, NET4, NET5, NET6, NET7)
+ 
+ SUBNET1 = {'name': 'tenant-subnet0',
+            'cidr': '192.168.1.0/24',
+@@ -191,11 +218,50 @@ SUBNET5 = {'name': 'tenant-subnet4',
+            'enable_dhcp': True,
+            'gateway': '192.168.5.1'}
+ 
++SUBNET6 = {'name': 'tenant-subnet5',
++           'cidr': '192.168.6.0/24',
++           'shared': False,
++           'enable_dhcp': True,
++           'gateway': '192.168.6.1'}
++
++SUBNET7 = {'name': 'tenant-subnet6',
++           'cidr': '192.168.7.0/24',
++           'shared': False,
++           'enable_dhcp': True,
++           'gateway': '192.168.7.1'}
++
++SUBNET8 = {'name': 'tenant-subnet7',
++           'cidr': '192.168.8.0/24',
++           'shared': False,
++           'enable_dhcp': True,
++           'gateway': '192.168.8.1'}
++
++SUBNET9 = {'name': 'tenant-subnet8',
++           'cidr': '192.168.9.0/24',
++           'shared': False,
++           'enable_dhcp': True,
++           'gateway': '192.168.9.1'}
++
++SUBNET10 = {'name': 'tenant-subnet9',
++           'cidr': '192.168.10.0/24',
++           'shared': False,
++           'enable_dhcp': True,
++           'gateway': '192.168.10.1'}
++
++SUBNET11 = {'name': 'tenant-subnet10',
++           'cidr': '192.168.11.0/24',
++           'shared': False,
++           'enable_dhcp': True,
++           'gateway': '192.168.11.1'}
++
++
+ SUBNETS = {'tenant-net0': [SUBNET1],
+            'tenant-net1': [SUBNET2],
+            'external-net0': [SUBNET3],
+            'tenant-net2': [SUBNET4],
+-           'tenant-net3': [SUBNET5]}
++           'tenant-net3': [SUBNET5],
++           'tenant-net4': [SUBNET6],
++           'tenant-net5': [SUBNET7, SUBNET8, SUBNET9, SUBNET10]}
+ 
+ L3_AGENT_TEMPLATE = {
+     'binary': 'neutron-l3-agent',
+@@ -300,13 +366,13 @@ class WrsAgentSchedulerTestCase(test_extension_pnet.ProvidernetTestCaseMixin,
+     def _create_subnets_for_network(self, data, subnets):
+         network = data['network']
+         for subnet in subnets[network['name']]:
+-            arg_list = ('enable_dhcp')
++            arg_list = ('enable_dhcp', 'arg_list')
+             args = dict((k, v) for k, v in six.iteritems(subnet)
+                         if k in arg_list)
+-            data = self._make_subnet(self.fmt, data,
+-                                     subnet['gateway'],
+-                                     subnet['cidr'], **args)
+-            self._subnets[subnet['name']] = data['subnet']
++            subnet_data = self._make_subnet(self.fmt, data,
++                                            subnet['gateway'],
++                                            subnet['cidr'], **args)
++            self._subnets[subnet['name']] = subnet_data['subnet']
+ 
+     def _create_test_networks(self, networks, subnets):
+         for net in networks:
+@@ -374,12 +440,118 @@ class WrsAgentSchedulerTestCase(test_extension_pnet.ProvidernetTestCaseMixin,
+         self._delete_test_networks()
+         super(WrsAgentSchedulerTestCase, self)._cleanup_test_dependencies()
+ 
++    def _test_router_rescheduling_validate_result(
++            self, agent_ids, initial_expected_distribution,
++            final_expected_distribution, reschedule_threshold=1,
++            max_time=None):
++        # Count routers and check they match expected distribution
++        agent_count = len(agent_ids)
++
++        agent_routers_count = []
++        for i in range(agent_count):
++            agent_routers_count.append(
++                len(self._l3_plugin.list_routers_on_l3_agent(
++                    self.adminContext, agent_ids[i]
++                )['routers'])
++            )
++        self.assertEqual(agent_routers_count, initial_expected_distribution)
++
++        reschedule_start_time = datetime.datetime.now()
++        reschedule_function = (lambda a, b: a > b + reschedule_threshold)
++        self._l3_plugin.redistribute_routers(self.adminContext,
++                                             reschedule_function)
++        reschedule_end_time = datetime.datetime.now()
++        reschedule_total_time = (reschedule_end_time - reschedule_start_time)
++        # Validate maximum time not exceeded
++        if max_time:
++            self.assertLessEqual(reschedule_total_time.seconds, max_time)
++
++        # Count routers and check they match new expected distribution
++        agent_routers_count = []
++        for i in range(agent_count):
++            agent_routers_count.append(
++                len(self._l3_plugin.list_routers_on_l3_agent(
++                    self.adminContext, agent_ids[i]
++                )['routers'])
++            )
++        self.assertEqual(sorted(agent_routers_count),
++                         sorted(final_expected_distribution))
++
++    def _test_router_rescheduling_by_count(self, router_count, agent_count,
++                                           max_time=None, second_zone_count=0):
++        """Runs rescheduling test with specified number of routers and agents.
++           Maximum number of agents is 3 due to hosts that have interfaces on
++           providernet vlan-pnet0.
++        """
++
++        # Define expected results
++        initial_expected_distribution = [0] * agent_count
++        initial_expected_distribution[0] = router_count
++        redistributed_value = int(math.floor(router_count / agent_count))
++        final_expected_distribution = [redistributed_value] * agent_count
++        assigned_routers = redistributed_value * agent_count
++        for i in range(router_count - assigned_routers):
++            final_expected_distribution[i] += 1
++        if second_zone_count:
++            initial_expected_distribution.append(second_zone_count)
++            final_expected_distribution.append(second_zone_count)
++
++        # Set up routers and networks
++        generic_subnets = []
++        generic_routers = []
++        network_data = {'network': self._get_network(NET1['name'])}
++        for i in range(router_count + second_zone_count):
++            if i == router_count:
++                network_data = {'network': self._get_network(NET6['name'])}
++            subnet_name = "generic-subnet-%d" % i
++            tenant_id = "generic-tenant-%d" % i
++            generic_subnet = {'name': subnet_name,
++            'cidr': "172.16.%d.0/24" % i,
++            'gateway': "172.16.%d.1" % i}
++            data = self._make_subnet(self.fmt, network_data,
++                                     generic_subnet['gateway'],
++                                     generic_subnet['cidr'],
++                                     tenant_id=tenant_id,
++                                     enable_dhcp=False)
++            generic_subnets.append(data['subnet'])
++            router_name = "generic-router-%d" % i
++            generic_router = self._make_router(self.fmt, tenant_id,
++                                               router_name)
++            generic_routers.append(generic_router)
++            self._router_interface_action(
++                'add', generic_router['router']['id'],
++                generic_subnets[i]['id'], None)
++
++        # Set up agents and auto-schedule routers
++        for i in range(agent_count):
++            self._register_l3_agent(HOSTS[i]['name'])
++            self._l3_plugin.auto_schedule_routers(self.adminContext,
++                                                  HOSTS[i]['name'], None)
++        if second_zone_count:
++            self._register_l3_agent(HOST5['name'])
++            self._l3_plugin.auto_schedule_routers(self.adminContext,
++                                                  HOST5['name'], None)
++
++        # Validate that rescheduling with this setup works
++        agents = self._list_l3_agents()['agents']
++        agent_ids = [agent['id'] for agent in agents]
++        self._test_router_rescheduling_validate_result(
++            agent_ids, initial_expected_distribution,
++            final_expected_distribution, 1, max_time
++        )
++
++        # Clean up routers
++        for i in range(router_count + second_zone_count):
++            self._router_interface_action(
++                'remove', generic_routers[i]['router']['id'],
++                generic_subnets[i]['id'], None)
++
+ 
+ class WrsL3AgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+ 
+     def test_router_without_interfaces(self):
+         self._register_l3_agents(HOSTS)
+-        data = self._list_agents()
++        data = self._list_l3_agents()
+         self.assertEqual(len(data['agents']), len(HOSTS))
+         with self.router(name='router1',
+                          tenant_id=self._tenant_id) as r1:
+@@ -390,7 +562,7 @@ class WrsL3AgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+ 
+     def test_router_with_isolated_host(self):
+         self._register_l3_agents(HOSTS)
+-        data = self._list_agents()
++        data = self._list_l3_agents()
+         self.assertEqual(len(data['agents']), len(HOSTS))
+         with self.router(name='router1',
+                          tenant_id=self._tenant_id) as r1:
+@@ -426,7 +598,7 @@ class WrsL3AgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+ 
+     def test_router_with_multiple_interfaces(self):
+         self._register_l3_agents(HOSTS)
+-        data = self._list_agents()
++        data = self._list_l3_agents()
+         self.assertEqual(len(data['agents']), len(HOSTS))
+         with self.router(name='router1',
+                          tenant_id=self._tenant_id) as r1:
+@@ -460,7 +632,7 @@ class WrsL3AgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+ 
+     def test_router_rescheduled_on_locked_host(self):
+         self._register_l3_agents(HOSTS)
+-        data = self._list_agents()
++        data = self._list_l3_agents()
+         self.assertEqual(len(data['agents']), len(HOSTS))
+         with self.router(name='router1',
+                          tenant_id=self._tenant_id) as r1:
+@@ -494,70 +666,253 @@ class WrsL3AgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+                 'remove', r1['router']['id'],
+                 self._get_subnet_id(SUBNET2['name']), None)
+ 
++    def test_redistribute_routers_trivial(self):
++        with self.router(name='router1',
++                         tenant_id='test-tenant') as r1:
++            self._router_interface_action(
++                'add', r1['router']['id'],
++                self._get_subnet_id(SUBNET1['name']), None)
++            with self.router(name='router2',
++                             tenant_id='test-tenant') as r2:
++                self._router_interface_action(
++                    'add', r2['router']['id'],
++                    self._get_subnet_id(SUBNET2['name']), None)
++
++                # Set up and auto-schedule routers
++                self._register_l3_agent(HOST1['name'])
++                self._register_l3_agent(HOST2['name'])
++                agents = self._list_l3_agents()['agents']
++                self._l3_plugin.auto_schedule_routers(self.adminContext,
++                                                   HOST1['name'], None)
++                self._l3_plugin.auto_schedule_routers(self.adminContext,
++                                                   HOST2['name'], None)
++
++                # Validate that rescheduling with this setup works
++                agent_ids = [agent['id'] for agent in agents]
++                self._test_router_rescheduling_validate_result(agent_ids,
++                                                               [2, 0],
++                                                               [1, 1], 1)
++
++                self._router_interface_action(
++                    'remove', r2['router']['id'],
++                    self._get_subnet_id(SUBNET2['name']), None)
++            self._router_interface_action(
++                'remove', r1['router']['id'],
++                self._get_subnet_id(SUBNET1['name']), None)
+ 
+-# TODO(alegacy): these tests are disabled because the code was replaced
+-# with similar upstream behaviour.  Need to determine if upstream test
+-# coverage is sufficient or if these needs to be rewritten.
+-#
+-#class WrsDhcpAgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+-#
+-#    def test_get_dhcp_networks_for_host_with_no_networks(self):
+-#        # Check which dhcp networks can be scheduled on this host
+-#        data = self._dhcp_scheduler.get_dhcp_networks_for_host(
+-#            self._plugin, self.adminContext, HOST4['name'])
+-#        ids = data.keys()
+-#        # Should not be any networks available for this agent as HOST4 is
+-#        # only associated with pci-sriov data interfaces and those interface
+-#        # types are excluded by the scheduler
+-#        self.assertEqual(len(ids), 0)
+-#
+-#    def test_get_dhcp_networks_for_host(self):
+-#        # Check which dhcp networks can be scheduled on this host
+-#        data = self._dhcp_scheduler.get_dhcp_networks_for_host(
+-#            self._plugin, self.adminContext, HOST1['name'])
+-#        ids = data.keys()
+-#        # Should only be the first 2 networks that can be scheduled on this
+-#        # host node.
+-#        self.assertEqual(len(ids), 2)
+-#
+-#    def test_get_agents_for_network_without_agents(self):
+-#        data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-#            self._plugin, self.adminContext,
+-#            self._get_network(NET1['name']))
+-#        # Should not have any candidate agents since there are no agents
+-#        self.assertEqual(len(data), 0)
+-#
+-#    def test_get_agents_for_network(self):
+-#        self._register_dhcp_agents(HOSTS)
+-#        data = self._list_agents()
+-#        self.assertEqual(len(data['agents']), len(HOSTS))
+-#        # Get the list of agents that can support this network
+-#        data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-#            self._plugin, self.adminContext,
+-#            self._get_network(NET1['name']))
+-#        # It should be schedulable on the first 3 nodes
+-#        self.assertEqual(len(data), 3)
+-#
+-#    def test_get_agents_for_network_isolated(self):
+-#        self._register_dhcp_agents(HOSTS)
+-#        data = self._list_agents()
+-#        self.assertEqual(len(data['agents']), len(HOSTS))
+-#        # Get the list of agents that can support this network
+-#        data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-#            self._plugin, self.adminContext,
+-#            self._get_network(NET4['name']))
+-#        # It should not be schedulable on any nodes
+-#        self.assertEqual(len(data), 0)
+-#
+-#    def test_get_agents_for_network_sriov(self):
+-#        self._register_dhcp_agents(HOSTS)
+-#        data = self._list_agents()
+-#        self.assertEqual(len(data['agents']), len(HOSTS))
+-#        # Get the list of agents that can support this network
+-#        data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-#            self._plugin, self.adminContext,
+-#            self._get_network(NET5['name']))
+-#        # It should not be schedulable on any nodes because NET5 is
+-#        # associated only with pci-sriov data interfaces and the scheduler
+-#        # should be excluding these from the choices.
+-#        self.assertEqual(len(data), 0)
++    def test_redistribute_routers_invalid_agent(self):
++        with self.router(name='router1',
++                         tenant_id='test-tenant') as r1:
++            self._router_interface_action(
++                'add', r1['router']['id'],
++                self._get_subnet_id(SUBNET1['name']), None)
++            with self.router(name='router2',
++                             tenant_id='test-tenant') as r2:
++                self._router_interface_action(
++                    'add', r2['router']['id'],
++                    self._get_subnet_id(SUBNET2['name']), None)
++
++                # Set up and auto-schedule routers
++                self._register_l3_agent(HOST1['name'])
++                # HOST4 can not host router
++                self._register_l3_agent(HOST4['name'])
++                agents = self._list_l3_agents()['agents']
++                self._l3_plugin.auto_schedule_routers(self.adminContext,
++                                                   HOST1['name'], None)
++                self._l3_plugin.auto_schedule_routers(self.adminContext,
++                                                   HOST4['name'], None)
++
++                # Validate that rescheduling with this setup works
++                agent_ids = [agent['id'] for agent in agents]
++                self._test_router_rescheduling_validate_result(agent_ids,
++                                                               [2, 0],
++                                                               [2, 0], 1)
++
++                self._router_interface_action(
++                    'remove', r2['router']['id'],
++                    self._get_subnet_id(SUBNET2['name']), None)
++            self._router_interface_action(
++                'remove', r1['router']['id'],
++                self._get_subnet_id(SUBNET1['name']), None)
++
++    def test_redistribute_routers_none(self):
++        router_count = 5
++        agent_count = 1
++        self._test_router_rescheduling_by_count(router_count, agent_count, 1)
++
++    def test_redistribute_routers_few(self):
++        router_count = 5
++        agent_count = 2
++        self._test_router_rescheduling_by_count(router_count, agent_count)
++
++    def test_redistribute_routers_large_office(self):
++        router_count = 10
++        agent_count = 3
++        self._test_router_rescheduling_by_count(router_count, agent_count,
++                                                second_zone_count=9)
++
++    # TODO(alegacy): disabled because it is timing out in unit tests
++    def notest_redistribute_routers_many(self):
++        router_count = 30
++        agent_count = 3
++        self._test_router_rescheduling_by_count(router_count, agent_count, 30)
++
++
++class WrsDhcpAgentSchedulerTestCase(WrsAgentSchedulerTestCase):
++    # TODO(alegacy): these tests are disabled because the code was replaced
++    # with similar upstream behaviour.  Need to determine if upstream test
++    # coverage is sufficient or if these needs to be rewritten.
++    #
++    #
++    #def test_get_dhcp_networks_for_host_with_no_networks(self):
++    #    # Check which dhcp networks can be scheduled on this host
++    #    data = self._dhcp_scheduler.get_dhcp_networks_for_host(
++    #        self._plugin, self.adminContext, HOST4['name'])
++    #    ids = data.keys()
++    #    # Should not be any networks available for this agent as HOST4 is
++    #    # only associated with pci-sriov data interfaces and those interface
++    #    # types are excluded by the scheduler
++    #    self.assertEqual(len(ids), 0)
++    #
++    #def test_get_dhcp_networks_for_host(self):
++    #    # Check which dhcp networks can be scheduled on this host
++    #    data = self._dhcp_scheduler.get_dhcp_networks_for_host(
++    #        self._plugin, self.adminContext, HOST1['name'])
++    #    ids = data.keys()
++    #    # Should only be the first 2 networks that can be scheduled on this
++    #    # host node.
++    #    self.assertEqual(len(ids), 2)
++    #
++    #def test_get_agents_for_network_without_agents(self):
++    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
++    #        self._plugin, self.adminContext,
++    #        self._get_network(NET1['name']))
++    #    # Should not have any candidate agents since there are no agents
++    #    self.assertEqual(len(data), 0)
++    #
++    #def test_get_agents_for_network(self):
++    #    self._register_dhcp_agents(HOSTS)
++    #    data = self._list_dhcp_agents()
++    #    self.assertEqual(len(data['agents']), len(HOSTS))
++    #    # Get the list of agents that can support this network
++    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
++    #        self._plugin, self.adminContext,
++    #        self._get_network(NET1['name']))
++    #    # It should be schedulable on the first 3 nodes
++    #    self.assertEqual(len(data), 3)
++    #
++    #def test_get_agents_for_network_isolated(self):
++    #    self._register_dhcp_agents(HOSTS)
++    #    data = self._list_dhcp_agents()
++    #    self.assertEqual(len(data['agents']), len(HOSTS))
++    #    # Get the list of agents that can support this network
++    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
++    #        self._plugin, self.adminContext,
++    #        self._get_network(NET4['name']))
++    #    # It should not be schedulable on any nodes
++    #    self.assertEqual(len(data), 0)
++    #
++    #def test_get_agents_for_network_sriov(self):
++    #    self._register_dhcp_agents(HOSTS)
++    #    data = self._list_dhcp_agents()
++    #    self.assertEqual(len(data['agents']), len(HOSTS))
++    #    # Get the list of agents that can support this network
++    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
++    #        self._plugin, self.adminContext,
++    #        self._get_network(NET5['name']))
++    #    # It should not be schedulable on any nodes because NET5 is
++    #    # associated only with pci-sriov data interfaces and the scheduler
++    #    # should be excluding these from the choices.
++    #    self.assertEqual(len(data), 0)
++    def _get_agent_network_counts(self):
++        counts = []
++        agents = self._list_dhcp_agents()['agents']
++        for agent in agents:
++            networks = self._plugin.list_networks_on_dhcp_agent(
++                self.adminContext, agent['id'])['networks']
++            counts.append((agent['host'], len(networks)))
++        return collections.OrderedDict(
++            sorted(counts, reverse=True, key=lambda x: x[1]))
++
++    def _assertAgentNetworkCounts(self, a, b):
++        a_counts = sorted(a.values())
++        b_counts = sorted(b.values())
++        self.assertEqual(a_counts, b_counts)
++
++    def test_autoschedule_networks(self):
++        self._register_dhcp_agent(HOST1['name'])
++        self._plugin.auto_schedule_networks(self.adminContext, HOST1['name'])
++        counts = self._get_agent_network_counts()
++        expected = {'compute-0': 3}
++        self._assertAgentNetworkCounts(expected, counts)
++
++    def test_redistribute_networks(self):
++        self._register_dhcp_agents(HOSTS)
++        self._plugin.auto_schedule_networks(self.adminContext, HOST1['name'])
++        self._plugin.redistribute_networks(self.adminContext,
++                                           (lambda a, b: a > b + 1))
++        counts = self._get_agent_network_counts()
++        expected = {'compute-0': 1,
++                    'compute-1': 1,
++                    'compute-2': 1,
++                    'compute-3': 0,
++                    'compute-4': 0}
++        self._assertAgentNetworkCounts(expected, counts)
++
++    def test_redistribute_networks_with_threshold_1(self):
++        self._register_dhcp_agents(HOSTS)
++        self._plugin.auto_schedule_networks(self.adminContext, HOST1['name'])
++        self._plugin.redistribute_networks(self.adminContext,
++                                           (lambda a, b: a > b + 1))
++        counts = self._get_agent_network_counts()
++        expected = {'compute-0': 1,
++                    'compute-1': 1,
++                    'compute-2': 1,
++                    'compute-3': 0,
++                    'compute-4': 0}
++        self._assertAgentNetworkCounts(expected, counts)
++
++    def test_redistribute_networks_with_threshold_2(self):
++        self._register_dhcp_agents(HOSTS)
++        self._plugin.auto_schedule_networks(self.adminContext, HOST1['name'])
++        self._plugin.redistribute_networks(self.adminContext,
++                                           (lambda a, b: a > b + 2))
++        counts = self._get_agent_network_counts()
++        expected = {'compute-0': 2,
++                    'compute-1': 0,
++                    'compute-2': 1,
++                    'compute-3': 0,
++                    'compute-4': 0}
++        self._assertAgentNetworkCounts(expected, counts)
++
++    def test_redistribute_networks_invalid_agent(self):
++        self._register_dhcp_agent(HOST1['name'])
++        self._register_dhcp_agent(HOST4['name'])
++        self._plugin.auto_schedule_networks(self.adminContext, HOST1['name'])
++        self._plugin.redistribute_networks(self.adminContext,
++                                           (lambda a, b: a > b + 2))
++        counts = self._get_agent_network_counts()
++        expected = {'compute-0': 3, 'compute-3': 0}
++        self._assertAgentNetworkCounts(expected, counts)
++
++    def test_redistribute_networks_with_locked_host(self):
++        self._register_dhcp_agent(HOST1['name'])
++        self._register_dhcp_agent(HOST2['name'])
++        self._register_dhcp_agent(HOST3['name'])
++        # Start all the agents on the first host
++        self._plugin.auto_schedule_networks(self.adminContext, HOST1['name'])
++        # Lock the second host. The agent will still be seen but we
++        # want to confirm that it is being ignored when calculating the
++        # least busiest agents.
++        self._lock_test_host(HOST2['id'])
++        # The busiest network should get moved to the third host. The two
++        # single subnet networks should stay on the first host.
++        self._plugin.redistribute_networks(self.adminContext,
++                                           (lambda a, b: a > b + 1))
++        counts = self._get_agent_network_counts()
++        expected = {'compute-0': 2,
++                    'compute-1': 0,
++                    'compute-2': 1}
++        for k in sorted(counts.iterkeys()):
++            self.assertEqual(expected[k], counts[k])
++        self._assertAgentNetworkCounts(expected, counts)
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_host.py b/neutron/tests/unit/plugins/wrs/test_extension_host.py
+index 966d547..487d4dc 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_host.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_host.py
+@@ -25,9 +25,11 @@ import copy
+ import six
+ import webob.exc
+ 
++from neutron_lib.utils import helpers as lib_helpers
+ from oslo_log import log as logging
+ 
+ from neutron.common import constants
++from neutron.tests.common import helpers
+ from neutron.tests.unit.plugins.wrs import test_wrs_plugin
+ 
+ LOG = logging.getLogger(__name__)
+@@ -144,6 +146,23 @@ class HostTestCaseMixin(object):
+             self._delete('wrs-provider/providernets', pnet['id'])
+         self._pnets = []
+ 
++    def _register_avs_agent(self, host=None, mappings=None):
++        agent = helpers._get_l2_agent_dict(
++            host, constants.AGENT_TYPE_WRS_VSWITCH,
++            'neutron-avs-agent')
++        agent['configurations']['mappings'] = mappings
++        return helpers._register_agent(agent, self._plugin)
++
++    def _create_l2_agents(self):
++        for name, host in six.iteritems(self._hosts):
++            iface = self._interfaces[name]
++            mappings = ['%s:%s' % (p, iface['uuid'])
++                        for p in iface['providernets'].split(',')]
++            mappings_dict = lib_helpers.parse_mappings(mappings,
++                                                       unique_values=False)
++            self._register_avs_agent(
++                host=name, mappings=mappings_dict)
++
+     def _update_host_states(self):
+         for name, host in six.iteritems(self._hosts):
+             updates = {'availability': constants.HOST_UP}
+@@ -155,6 +174,7 @@ class HostTestCaseMixin(object):
+         self._create_test_hosts(hosts)
+         self._create_test_providernets(providernets, providernet_ranges)
+         self._create_test_interfaces(interfaces)
++        self._create_l2_agents()
+         self._update_host_states()
+ 
+     def _cleanup_test_dependencies(self):
+diff --git a/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py b/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+index 7078b42..97e7561 100644
+--- a/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
++++ b/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+@@ -39,13 +39,15 @@ PLUGIN_NAME = 'neutron.plugins.ml2.plugin.Ml2Plugin'
+ 
+ class WrsMl2PluginV2TestCase(test_plugin.NeutronDbPluginV2TestCase):
+ 
+-    _mechanism_drivers = ['logger', 'test']
++    _mechanism_drivers = ['vswitch', 'logger', 'test']
+ 
+     def setup_parent(self):
+         """Perform parent setup with the common plugin configuration class."""
+         l3_plugin = ('neutron.services.l3_router.l3_router_plugin.'
+                      'L3RouterPlugin')
+-        service_plugins = {'l3_plugin_name': l3_plugin}
++        service_plugins = {
++            'l3_plugin_name': l3_plugin,
++            'segments_plugin_name': 'neutron.services.segments.plugin.Plugin'}
+         # Ensure that the parent setup can be called without arguments
+         # by the common configuration setUp.
+         parent_setup = functools.partial(
+diff --git a/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py b/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
+index 59064f0..65e37d7 100644
+--- a/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
++++ b/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
+@@ -482,7 +482,7 @@ class L3SchedulerTestBaseMixin(object):
+         router = self._make_router(self.fmt,
+                                    tenant_id=uuidutils.generate_uuid(),
+                                    name='r1')
+-        with mock.patch.object(l3_agent_scheduler.LOG, 'debug') as flog:
++        with mock.patch.object(l3_agent_scheduler.LOG, 'warning') as flog:
+             self._test_schedule_bind_router(self.agent1, router)
+             self.assertEqual(1, flog.call_count)
+             args, kwargs = flog.call_args
+-- 
+2.7.4
+

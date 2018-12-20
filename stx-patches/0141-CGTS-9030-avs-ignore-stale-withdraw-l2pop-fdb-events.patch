@@ -1,0 +1,75 @@
+From d0509ec44d16eeb309170754eb75e6a1048d172b Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 1 Mar 2018 12:30:02 -0600
+Subject: [PATCH 141/155] CGTS-9030: avs: ignore stale withdraw l2pop fdb
+ events
+
+Because of how the update_device_up/_down RPC events are handled in the neutron
+server it is possible that l2pop notifications are generated even for
+non-authoritative hosts (i.e., agents that do not own a port).  When these
+events are handled out of order on the bgp or neutron-avs agents it could end
+up deleting an entry that should have been kept leading to communication
+failures.
+
+For example, if port A moves from compute-0 to compute-1 we had initially
+expected that we would only receive an "add" notification when the port arrived
+at compute-1, but we are actually getting a "delete" followed by an "add" where
+the delete specifies the IP of compute-0 and the add specifies the IP of
+compute-1 as the next-hop gateway IP address.  In the normal case when the
+"delete" precedes the add there is no issue but if they are handled out of
+order then the entry for A is removed altogether.  Instead, since the next-hop
+of A is now compute-1 the delete from next-hop compute-0 should be ignored.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 2f52ac0..333993f 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -529,7 +529,11 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                              mac_address, agent_ip):
+         if mac_address == FLOODING_ENTRY_MAC:
+             return  # let the layer2 handler deal with this
+-        if not self.fdb_cache.get_ip_device(interface_uuid, ip_address):
++        if not self.fdb_cache.ip_device_installed(
++                interface_uuid, ip_address, mac_address, agent_ip):
++            LOG.warning("not removing VTEP IP endpoint for {}:{} "
++                        "via {} over {}".format(
++                            mac_address, ip_address, agent_ip, interface_uuid))
+             return
+         LOG.info("removing VTEP IP endpoint for {}:{} via {} over {}".
+                  format(mac_address, ip_address, agent_ip, interface_uuid))
+@@ -564,6 +568,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+ 
+             if self.fdb_cache.device_installed(
+                     interface_uuid, mac_address, agent_ip):
++                LOG.debug("ignoring VTEP endpoint for {} via {} over {}".
++                          format(mac_address, agent_ip, interface_uuid))
+                 return
+             LOG.info("adding VTEP endpoint for {} via {} over {}".format(
+                 mac_address, agent_ip, interface_uuid))
+@@ -586,7 +592,19 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             self.fdb_cache.remove_gateway_devices(interface_uuid, agent_ip)
+             self.fdb_cache.remove_gateway(interface_uuid, agent_ip)
+         else:
+-            if not self.fdb_cache.get_device(interface_uuid, mac_address):
++            if not self.fdb_cache.device_installed(
++                    interface_uuid, mac_address, agent_ip):
++                # NOTE(alegacy): avoid removing entries from mismatched agent
++                # ip addresses.  The server sends down withdraw events when
++                # a port is deleted from a server regardless if that port has
++                # already been successfully installed on a different server
++                # therefore it is possible that a late withdraw notification
++                # could delete a valid entry.
++                if self.fdb_cache.get_device(interface_uuid, mac_address):
++                    # Only log if we have this entry but via a different gwy
++                    LOG.warning("not removing VTEP endpoint for "
++                                "{} via {} over {}".
++                                format(mac_address, agent_ip, interface_uuid))
+                 return
+             LOG.info("removing VTEP endpoint for {} via {} over {}".
+                      format(mac_address, agent_ip, interface_uuid))
+-- 
+2.7.4
+

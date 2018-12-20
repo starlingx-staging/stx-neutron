@@ -1,0 +1,489 @@
+From 9f926a5d2539b0b0451c50053244a8fa6c43bf3c Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Mon, 6 Nov 2017 07:30:45 -0600
+Subject: [PATCH 092/155] l3: add l2pop support for floatingip resources
+
+This commit adds l2pop support for floatingip resources.  They are advertised
+when the FIP status changes to "ACTIVE" and withdraw whenever the status is set
+to "DOWN" or the resource is deleted or disassociated.
+---
+ neutron/db/l3_db.py                                |  27 +-
+ neutron/plugins/ml2/drivers/l2pop/mech_driver.py   |  14 +-
+ neutron/services/l3_router/l3_router_plugin.py     |   2 +
+ .../services/l3_router/service_providers/l2pop.py  | 298 +++++++++++++++++++++
+ neutron/tests/unit/extensions/test_l3.py           |   4 +
+ 5 files changed, 336 insertions(+), 9 deletions(-)
+ create mode 100644 neutron/services/l3_router/service_providers/l2pop.py
+
+diff --git a/neutron/db/l3_db.py b/neutron/db/l3_db.py
+index 96b031c..3acd401 100644
+--- a/neutron/db/l3_db.py
++++ b/neutron/db/l3_db.py
+@@ -1240,6 +1240,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+ 
+     def _update_fip_assoc(self, context, fip, floatingip_db, external_port):
+         previous_router_id = floatingip_db.router_id
++        previous_port_id = floatingip_db.fixed_port_id
+         port_id, internal_ip_address, router_id = (
+             self._check_and_get_fip_assoc(context, fip, floatingip_db))
+         update = {'fixed_ip_address': internal_ip_address,
+@@ -1256,6 +1257,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+                 'floating_ip_address': floatingip_db.floating_ip_address,
+                 'floating_network_id': floatingip_db.floating_network_id,
+                 'floating_ip_id': floatingip_db.id,
++                'last_fixed_port_id': previous_port_id,
++                'status': floatingip_db.status,
+                 'context': context}
+ 
+     def _is_ipv4_network(self, context, net_id):
+@@ -1389,13 +1392,27 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+             context, id, floatingip)
+         return floatingip
+ 
++    def _notify_fip_status(self, context, floatingip_db, status):
++        args = {'fixed_ip_address': floatingip_db.fixed_ip_address,
++                'fixed_port_id': floatingip_db.fixed_port_id,
++                'router_id': floatingip_db.router_id,
++                'last_known_router_id': floatingip_db.last_known_router_id,
++                'floating_ip_address': floatingip_db.floating_ip_address,
++                'floating_network_id': floatingip_db.floating_network_id,
++                'floating_ip_id': floatingip_db.id,
++                'status': status,
++                'context': context}
++        registry.notify(resources.FLOATING_IP,
++                        events.AFTER_UPDATE,
++                        self.update_floatingip_status,
++                        **args)
++
+     @db_api.retry_if_session_inactive()
+     def update_floatingip_status(self, context, floatingip_id, status):
+         """Update operational status for floating IP in neutron DB."""
+-        fip_query = model_query.query_with_hooks(
+-            context, l3_models.FloatingIP).filter(
+-                l3_models.FloatingIP.id == floatingip_id)
+-        fip_query.update({'status': status}, synchronize_session=False)
++        floatingip_db = self._get_floatingip(context, floatingip_id)
++        floatingip_db.update({'status': status})
++        self._notify_fip_status(context, floatingip_db, status)
+ 
+     def _delete_floatingip(self, context, id):
+         floatingip = self._get_floatingip(context, id)
+@@ -1406,6 +1423,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+         # floating IP record once the port is deleted. We can't start
+         # a transaction first to remove it ourselves because the delete_port
+         # method will yield in its post-commit activities.
++        self._notify_fip_status(context, floatingip, constants.DOWN)
+         self._core_plugin.delete_port(context.elevated(),
+                                       floatingip['floating_port_id'],
+                                       l3_port_check=False)
+@@ -1528,6 +1546,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+         with context.session.begin(subtransactions=True):
+             for floating_ip in self._get_floatingips_by_port_id(
+                     context, port_id):
++                self._notify_fip_status(context, floating_ip, constants.DOWN)
+                 router_ids.add(floating_ip['router_id'])
+                 floating_ip.update({'fixed_port_id': None,
+                                     'fixed_ip_address': None,
+diff --git a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+index e6fa7c8..4674669 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+@@ -45,7 +45,8 @@ def register_fdb_extend_func(name, func):
+     l2pop_fdb_extend_funcs[name] = func
+ 
+ 
+-def run_fdb_extend_funcs(context, network_id, fdb_entries, source=None):
++def run_fdb_extend_funcs(context, network_id, fdb_entries, source=None,
++                         exclude_host=None):
+     for name, func in six.iteritems(l2pop_fdb_extend_funcs):
+         if source and name == source:
+             # Avoid data loops and do not provide data from a source back to
+@@ -53,7 +54,8 @@ def run_fdb_extend_funcs(context, network_id, fdb_entries, source=None):
+             # agent should not get its own data when it queries the fdb for
+             # a network).
+             continue
+-        fdb_entries = func(context, network_id, fdb_entries)
++        fdb_entries = func(context, network_id, fdb_entries,
++                           exclude_host=exclude_host)
+     return fdb_entries
+ 
+ 
+@@ -253,6 +255,7 @@ class L2populationMechanismDriver(api.MechanismDriver):
+ 
+     def _create_agent_fdb(self, context, agent, segment, network_id,
+                           source=None):
++        exclude_host = agent.host if agent else None
+         session = context.session
+         agent_fdb_entries = {network_id:
+                              {'segment_id': segment['segmentation_id'],
+@@ -271,7 +274,7 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         ports = agent_fdb_entries[network_id]['ports']
+         ports.update(self._get_tunnels(
+             fdb_network_ports + tunnel_network_ports,
+-            agent.host if agent else None,
++            exclude_host=exclude_host,
+             physical_network=physical_network))
+         for agent_ip, fdbs in ports.items():
+             for binding, agent in fdb_network_ports:
+@@ -282,9 +285,10 @@ class L2populationMechanismDriver(api.MechanismDriver):
+ 
+         return run_fdb_extend_funcs(context, network_id,
+                                     agent_fdb_entries,
+-                                    source=source)
++                                    source=source,
++                                    exclude_host=exclude_host)
+ 
+-    def _get_tunnels(self, tunnel_network_ports, exclude_host,
++    def _get_tunnels(self, tunnel_network_ports, exclude_host=None,
+                      physical_network=None):
+         agents = {}
+         for __, agent in tunnel_network_ports:
+diff --git a/neutron/services/l3_router/l3_router_plugin.py b/neutron/services/l3_router/l3_router_plugin.py
+index 89e0024..580aff4 100644
+--- a/neutron/services/l3_router/l3_router_plugin.py
++++ b/neutron/services/l3_router/l3_router_plugin.py
+@@ -41,6 +41,7 @@ from neutron.extensions import l3
+ from neutron.quota import resource_registry
+ from neutron import service
+ from neutron.services.l3_router.service_providers import driver_controller
++from neutron.services.l3_router.service_providers import l2pop
+ 
+ 
+ LOG = logging.getLogger(__name__)
+@@ -60,6 +61,7 @@ class L3RouterPlugin(service_base.ServicePluginBase,
+                      l3_host_db.L3HostSchedulerDbMixin,
+                      portforwardings_db.PortForwardingDbMixin,
+                      l3_hamode_db.L3_HA_NAT_db_mixin,
++                     l2pop.L3RouterL2PopMixin,
+                      l3_gwmode_db.L3_NAT_db_mixin,
+                      l3_dvr_ha_scheduler_db.L3_DVR_HA_scheduler_db_mixin,
+                      dns_db.DNSDbMixin):
+diff --git a/neutron/services/l3_router/service_providers/l2pop.py b/neutron/services/l3_router/service_providers/l2pop.py
+new file mode 100644
+index 0000000..e6cd3b2
+--- /dev/null
++++ b/neutron/services/l3_router/service_providers/l2pop.py
+@@ -0,0 +1,298 @@
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++# Copyright (c) 2017 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from neutron_lib.api.definitions import provider_net
++from neutron_lib import constants as lib_constants
++from neutron_lib.plugins import constants as p_const
++from neutron_lib.plugins import directory
++from oslo_log import log as logging
++from sqlalchemy import orm
++from sqlalchemy.sql import expression as sql
++
++from neutron.callbacks import events
++from neutron.callbacks import registry
++from neutron.callbacks import resources
++from neutron.db.models import agent as agent_models
++from neutron.db.models import l3 as l3_models
++from neutron.db.models import l3_attrs as l3_attrs_models
++from neutron.db import models_v2
++from neutron.plugins.common import constants
++from neutron.plugins.ml2.drivers.l2pop import mech_driver as l2pop_driver
++from neutron.plugins.ml2.drivers.l2pop.mech_driver import l2pop_db as l2pop_db
++from neutron.plugins.ml2.drivers.l2pop.mech_driver import l2pop_rpc as \
++    l2pop_rpc
++from neutron.plugins.ml2 import models as ml2_models
++
++LOG = logging.getLogger(__name__)
++
++
++class L3RouterL2PopMixin(object):
++
++    def __new__(cls):
++        new = super(L3RouterL2PopMixin, cls).__new__(cls)
++        new.subscribe_l2pop_callbacks()
++        return new
++
++    def subscribe_l2pop_callbacks(self):
++        registry.subscribe(
++            self._notify_fip_status_callback, resources.FLOATING_IP,
++            events.AFTER_UPDATE)
++        l2pop_driver.register_fdb_extend_func(
++            p_const.L3, self.l3_fdb_extend_func)
++
++    @property
++    def _core_plugin(self):
++        return directory.get_plugin()
++
++    @staticmethod
++    def _get_fip_fdb_entry(context, floating_ip_address, router_id):
++        """Returns FDB information for a single non-DVR FIP entry.
++
++        This special query is needed because there are instances where we
++        are notified of a FIP deletion after the FIP DB resource has already
++        been deleted therefore we cannot use the full query; instead we need
++        to use the known ip_address, router_id, and port_id values to
++        fill-in the missing information.
++        """
++        query = context.session.query(ml2_models.PortBinding.host,
++                                      models_v2.Port.mac_address)
++        query = (query.select_from(l3_models.Router)
++                 .join(l3_attrs_models.RouterExtraAttributes,
++                       l3_attrs_models.RouterExtraAttributes.router_id ==
++                       l3_models.Router.id)
++                 .join(models_v2.Port,
++                       models_v2.Port.device_id == l3_models.Router.id)
++                 .join(ml2_models.PortBinding,
++                       ml2_models.PortBinding.port_id == models_v2.Port.id)
++                 .filter(l3_models.Router.id == router_id)
++                 .filter(models_v2.Port.device_owner ==
++                         lib_constants.DEVICE_OWNER_ROUTER_GW)
++                 .filter(l3_attrs_models.RouterExtraAttributes.distributed ==
++                         sql.false()))
++        # return [(host, mac, ip)...]
++        return [(e[0], e[1], floating_ip_address) for e in query.all()]
++
++    @staticmethod
++    def _get_fip_fdb_entries(context, network_id, floatingip_id=None,
++                             exclude_host=None):
++        """Returns FDB information for all non-DVR FIP resources.
++
++        The DB queries for all FIP resources that are associated to non-DVR
++        routers and then returns a tuple describing which (host, mac_address,
++        ip_address) relates to each FIP resource.  The tuple describes the
++        MAC address of the gateway interface that is servicing that FIP
++        resource and on which node that gateway router resides.
++        """
++        query = context.session.query(ml2_models.PortBinding.host,
++                                      models_v2.Port.mac_address,
++                                      l3_models.FloatingIP.floating_ip_address)
++        query = (query.select_from(l3_models.FloatingIP)
++                 .join(l3_models.Router,
++                       l3_models.Router.id == l3_models.FloatingIP.router_id)
++                 .join(l3_attrs_models.RouterExtraAttributes,
++                       l3_attrs_models.RouterExtraAttributes.router_id ==
++                       l3_models.Router.id)
++                 .join(models_v2.Port,
++                       models_v2.Port.device_id == l3_models.Router.id)
++                 .join(ml2_models.PortBinding,
++                       ml2_models.PortBinding.port_id == models_v2.Port.id)
++                 .filter(models_v2.Port.device_owner ==
++                         lib_constants.DEVICE_OWNER_ROUTER_GW)
++                 .filter(l3_models.FloatingIP.floating_network_id ==
++                         network_id)
++                 .filter(l3_attrs_models.RouterExtraAttributes.distributed ==
++                         sql.false()))
++        if floatingip_id is not None:
++            query = query.filter(l3_models.FloatingIP.id == floatingip_id)
++        if exclude_host is not None:
++            query = query.filter(agent_models.Agent.host != exclude_host)
++        # return [(host, mac, ip)...]
++        return [(e[0], e[1], e[2]) for e in query.all()]
++
++    @staticmethod
++    def _get_fip_dvr_fdb_entry(context, floating_ip_address, fixed_port_id,
++                               router_id):
++        """Returns FDB information for a single non-DVR FIP entry.
++
++        This special query is needed because there are instances where we
++        are notified of a FIP deletion after the FIP DB resource has already
++        been deleted therefore we cannot use the full query; instead we need
++        to use the known ip_address, router_id, and port_id values to
++        fill-in the missing information.
++        """
++        agent_ports = orm.aliased(models_v2.Port, name='agent_ports')
++        query = context.session.query(agent_models.Agent.host,
++                                      agent_ports.mac_address)
++        query = (query.select_from(l3_models.Router)
++                 .join(l3_attrs_models.RouterExtraAttributes,
++                       l3_attrs_models.RouterExtraAttributes.router_id ==
++                       l3_models.Router.id)
++                 .join(ml2_models.DistributedPortBinding,
++                       ml2_models.DistributedPortBinding.router_id ==
++                       l3_models.Router.id)
++                 .join(agent_models.Agent,
++                       agent_models.Agent.host ==
++                       ml2_models.DistributedPortBinding.host)
++                 .join(agent_ports,
++                       agent_ports.device_id == agent_models.Agent.id)
++                 .join(ml2_models.PortBinding,
++                       ml2_models.PortBinding.host == agent_models.Agent.host)
++                 .join(models_v2.Port,
++                       models_v2.Port.id == ml2_models.PortBinding.port_id)
++                 .filter(models_v2.Port.id == fixed_port_id)
++                 .filter(agent_ports.device_owner ==
++                         lib_constants.DEVICE_OWNER_AGENT_GW)
++                 .filter(l3_models.Router.id == router_id)
++                 .filter(l3_attrs_models.RouterExtraAttributes.distributed ==
++                         sql.true())
++                 .group_by(agent_models.Agent.host,
++                           agent_ports.mac_address))
++        # return [(host, mac, ip)...]
++        return [(e[0], e[1], floating_ip_address) for e in query.all()]
++
++    @staticmethod
++    def _get_fip_dvr_fdb_entries(context, network_id, floatingip_id=None,
++                                 exclude_host=None):
++        """Returns FDB information about all DVR FIP resources.
++
++        The DB queries for all FIP resources that are associated to DVR
++        routers and then returns a tuple describing which (host, mac_address,
++        ip_address) relates to each FIP resource.  The tuple describes the
++        MAC address of the floatingip agent gateway interface that is
++        servicing that FIP resource and on which node that agent gateway
++        interface resides.
++        """
++        agent_ports = orm.aliased(models_v2.Port, name='agent_ports')
++        query = context.session.query(agent_models.Agent.host,
++                                      agent_ports.mac_address,
++                                      l3_models.FloatingIP.floating_ip_address)
++        query = (query.select_from(l3_models.FloatingIP)
++                 .join(l3_models.Router,
++                       l3_models.Router.id == l3_models.FloatingIP.router_id)
++                 .join(l3_attrs_models.RouterExtraAttributes,
++                       l3_attrs_models.RouterExtraAttributes.router_id ==
++                       l3_models.Router.id)
++                 .join(models_v2.Port,
++                       models_v2.Port.id == l3_models.FloatingIP.fixed_port_id)
++                 .join(ml2_models.PortBinding,
++                       ml2_models.PortBinding.port_id == models_v2.Port.id)
++                 .join(agent_models.Agent,
++                       agent_models.Agent.host == ml2_models.PortBinding.host)
++                 .join(agent_ports,
++                       agent_ports.device_id == agent_models.Agent.id)
++                 .filter(agent_ports.device_owner ==
++                         lib_constants.DEVICE_OWNER_AGENT_GW)
++                 .filter(l3_models.FloatingIP.floating_network_id ==
++                         network_id)
++                 .filter(l3_attrs_models.RouterExtraAttributes.distributed ==
++                         sql.true()))
++        if floatingip_id is not None:
++            query = query.filter(l3_models.FloatingIP.id == floatingip_id)
++        if exclude_host is not None:
++            query = query.filter(agent_models.Agent.host != exclude_host)
++        # return [(host, mac, ip)...]
++        return [(e[0], e[1], e[2]) for e in query.all()]
++
++    def l3_fdb_extend_func(self, context, network_id, fdb_entries,
++                           exclude_host=None):
++        """Hook in to the l2pop FDB generation and add FIP entries to it."""
++        dvr_fip_entries = self._get_fip_dvr_fdb_entries(
++            context, network_id, exclude_host=exclude_host)
++        fip_entries = self._get_fip_fdb_entries(
++            context, network_id, exclude_host=exclude_host)
++        entries = dvr_fip_entries + fip_entries
++        agent_ips = {}
++        ports = fdb_entries[network_id]['ports']
++        physical_network = fdb_entries[network_id]['physical_network']
++        for host, mac_address, ip_address in entries:
++            key = '{}-{}'.format(host, physical_network)
++            if key not in agent_ips:
++                agent_ip = l2pop_db.get_agent_ip_by_host(
++                    context.session, host, physical_network)
++                agent_ips[key] = agent_ip
++            agent_ip = agent_ips[key]
++            if agent_ip not in ports:
++                ports[agent_ip] = [lib_constants.FLOODING_ENTRY]
++            info = l2pop_rpc.PortInfo(mac_address, ip_address)
++            ports[agent_ip].append(info)
++        return fdb_entries
++
++    @staticmethod
++    def _get_fdb_template(network):
++        return {network['id']:
++                {'ports': {},
++                 'physical_network': network[provider_net.PHYSICAL_NETWORK],
++                 'segment_id': network[provider_net.SEGMENTATION_ID],
++                 'network_type': network[provider_net.NETWORK_TYPE]}}
++
++    @property
++    def l2pop_notifier(self):
++        if not hasattr(self, '_l2pop_notifier'):
++            self._l2pop_notifier = l2pop_rpc.L2populationAgentNotifyAPI()
++        return self._l2pop_notifier
++
++    def _handle_fip_status_update(self, context, fip, fdb_entry):
++        host, mac_address, ip_address = fdb_entry
++        network_id = fip['floating_network_id']
++        network = self._core_plugin.get_network(context, network_id)
++        physical_network = network[provider_net.PHYSICAL_NETWORK]
++        network_type = network[provider_net.NETWORK_TYPE]
++        if network_type != constants.TYPE_VXLAN:
++            return
++        agent_ip = l2pop_db.get_agent_ip_by_host(
++            context.session, host, physical_network)
++        fdb_entries = self._get_fdb_template(network)
++        ports = fdb_entries[network_id]['ports']
++        if fip['status'] == lib_constants.ACTIVE and fip['fixed_port_id']:
++            # NOTE(alegacy): make sure that it is understood that this node
++            # is participating in this network if we are adding an entry but
++            # to be cautious do not remove the flood entry on delete; leave
++            # that up to the l2pop driver itself.
++            ports[agent_ip] = [lib_constants.FLOODING_ENTRY]
++        else:
++            ports[agent_ip] = []
++        ports[agent_ip].append(l2pop_rpc.PortInfo(mac_address, ip_address))
++        fdb_entries['source'] = p_const.L3
++        if fip['status'] == lib_constants.ACTIVE and fip['fixed_port_id']:
++            self.l2pop_notifier.add_fdb_entries(context, fdb_entries)
++        else:
++            self.l2pop_notifier.remove_fdb_entries(context, fdb_entries)
++
++    def handle_fip_status_update(self, context, fip):
++        # NOTE(alegacy): on delete notifications the router/port id are cleared
++        router_id = fip['router_id'] or fip['last_known_router_id']
++        fixed_port_id = fip['fixed_port_id'] or fip.get('last_fixed_port_id')
++        if 'status' not in fip or not fixed_port_id:
++            return
++        entries = self._get_fip_dvr_fdb_entry(
++            context, fip['floating_ip_address'], fixed_port_id, router_id)
++        if not entries:
++            entries = self._get_fip_fdb_entry(
++                context, fip['floating_ip_address'], router_id)
++            if not entries:
++                return  # no data available for this FIP
++        assert len(entries) == 1
++        entry = entries[0]
++        return self._handle_fip_status_update(context, fip, entry)
++
++    def _notify_fip_status_callback(self, resource, event, trigger, **kwargs):
++        context = kwargs.pop('context')
++        self.handle_fip_status_update(context, kwargs)
+diff --git a/neutron/tests/unit/extensions/test_l3.py b/neutron/tests/unit/extensions/test_l3.py
+index 72bd7f6..8af52f3 100644
+--- a/neutron/tests/unit/extensions/test_l3.py
++++ b/neutron/tests/unit/extensions/test_l3.py
+@@ -2479,6 +2479,8 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+                                            floating_network_id=fip_network_id,
+                                            last_known_router_id=None,
+                                            floating_ip_id=fip_id,
++                                           last_fixed_port_id=None,
++                                           status='ACTIVE',
+                                            router_id=router_id)
+ 
+     def test_floatingip_disassociate_notification(self):
+@@ -2507,6 +2509,8 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+                                            floating_ip_address=fip_addr,
+                                            floating_network_id=fip_network_id,
+                                            last_known_router_id=router_id,
++                                           last_fixed_port_id=port_id,
++                                           status=mock.ANY,
+                                            floating_ip_id=fip_id,
+                                            router_id=None)
+ 
+-- 
+2.7.4
+

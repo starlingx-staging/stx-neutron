@@ -1,0 +1,24 @@
+From 08444346b4ce3f4884c4c15189f629681541844c Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Wed, 6 Sep 2017 16:14:17 -0400
+Subject: [PATCH 053/155] US94388: Clear bgp alarms for deleted agent
+
+---
+ neutron/plugins/wrs/drivers/fm.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index 8621dd9..a33a121 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -298,6 +298,7 @@ class DefaultFmDriver(fm.FmDriver):
+                                                                 agent_id)
+         self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_AGENT,
+                                 entity_instance_id)
++        self.fm_api.clear_all("%s.bgp-peer" % entity_instance_id)
+ 
+     def report_bgp_peer_down_fault(self, host_id, agent_id, bgp_peer_id):
+         """
+-- 
+2.7.4
+

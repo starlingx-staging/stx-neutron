@@ -1,0 +1,64 @@
+From 076194243c614d740fc359869cee4195dbb8cf5b Mon Sep 17 00:00:00 2001
+From: venkata anil <anilvenkata@redhat.com>
+Date: Thu, 23 Nov 2017 18:40:30 +0000
+Subject: [PATCH 103/155] Call update_all_ha_network_port_statuses on agent
+ start
+
+As explained in bug [1] when l3 agent fails to report state to the
+server, its state is set to AGENT_REVIVED, triggering
+fetch_and_sync_all_routers, which will set all its HA network ports
+to DOWN, resulting in
+1) ovs agent rewiring these ports and setting status to ACTIVE
+2) when these ports are active, server sends router update to l3 agent
+As server, ovs and l3 agents are busy with this processing, l3 agent
+may fail again reporting state, repeating this process.
+
+As l3 agent is repeatedly processing same routers, SIGHUPs are
+frequently sent to keepalived, resulting in multiple masters.
+
+To fix this, we call update_all_ha_network_port_statuses in l3 agent
+start instead of calling from fetch_and_sync_all_routers.
+
+[1] https://bugs.launchpad.net/neutron/+bug/1731595/comments/7
+
+Change-Id: Ia9d5549f7d53b538c9c9f93fe6aa71ffff15524a
+Related-bug: #1597461
+Closes-Bug: #1731595
+(cherry picked from commit 9ed693228f90251c0f03fb842ef19628b439f9bc)
+---
+ neutron/agent/l3/agent.py | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/agent/l3/agent.py b/neutron/agent/l3/agent.py
+index aef2cf8..95f7c9e 100644
+--- a/neutron/agent/l3/agent.py
++++ b/neutron/agent/l3/agent.py
+@@ -263,6 +263,14 @@ class L3NATAgent(ha.AgentMixin,
+         consumers = [[topics.NETWORK, topics.UPDATE]]
+         agent_rpc.create_consumers([self], topics.AGENT, consumers)
+ 
++        # We set HA network port status to DOWN to let l2 agent update it
++        # to ACTIVE after wiring. This allows us to spawn keepalived only
++        # when l2 agent finished wiring the port.
++        try:
++            self.plugin_rpc.update_all_ha_network_port_statuses(self.context)
++        except Exception:
++            LOG.exception('update_all_ha_network_port_statuses failed')
++
+     def _check_config_params(self):
+         """Check items in configuration files.
+ 
+@@ -608,10 +616,6 @@ class L3NATAgent(ha.AgentMixin,
+                          lib_const.L3_AGENT_MODE_DVR_SNAT)
+         try:
+             router_ids = self.plugin_rpc.get_router_ids(context)
+-            # We set HA network port status to DOWN to let l2 agent update it
+-            # to ACTIVE after wiring. This allows us to spawn keepalived only
+-            # when l2 agent finished wiring the port.
+-            self.plugin_rpc.update_all_ha_network_port_statuses(context)
+             # fetch routers by chunks to reduce the load on server and to
+             # start router processing earlier
+             for i in range(0, len(router_ids), self.sync_routers_chunk_size):
+-- 
+2.7.4
+

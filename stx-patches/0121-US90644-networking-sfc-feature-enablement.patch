@@ -1,0 +1,543 @@
+From 4b47c9b4921e5dc1d1bcba3add82c526b99768a9 Mon Sep 17 00:00:00 2001
+From: Steven Webster <steven.webster@windriver.com>
+Date: Mon, 22 Jan 2018 12:20:30 -0500
+Subject: [PATCH 121/155] US90644: networking-sfc feature enablement
+
+This commit adds SFC support for Titanium Server.
+
+Service function chaining (SFC) essentially refers to the software-defined
+networking (SDN) version of policy-based routing (PBR).
+
+Fundamentally, SFC routes packets through one or more service functions
+instead of conventional routing that routes packets using destination IP
+address. Service functions essentially emulate a series of physical network
+devices with cables linking them together.
+
+The following repos have been modified:
+
+networking-sfc repo:
+
+- An AVS driver is added to translate the port chain, port pair group,
+port pair, and flow classifier db contents to associated service
+function paths and classifiers. The driver operates on the
+neutron-server side.
+
+- An AVS agent is added to create the flow rules which reflect the
+service function path and classifier topologies.  In addition, AVS
+interfaces determined to be part of a service function path are updated
+as such so that the AVS can perform flow table based operations rather
+than regular bridging.  When a service function is terminated, regular
+bridging proceeds as normal.
+The agent resides on the compute nodes and communicates via RPC with
+both the SFC driver and the neutron-avs-agent.
+
+neutron repo:
+
+- A small AVS agent extension is added to communicate with the
+networking-sfc agent, to trigger SFC updates when port changes are
+detected (such as live migration, etc)
+- The vswitch API is extended to handle flow table add / delete
+operations
+- Support for the vxlan-gpe (4790) port
+
+cgcs repo:
+
+- Puppet/Sysinv changes to enable setting of SFC quota parameters
+via service parameters
+- Puppet changes to handle setting of the sfc and flowclassifier
+drivers parameter in the neutron manifest.
+
+AVS repo:
+
+- A small endianness fix for NSH
+- Changes to the engine callback and interface code to enable
+flow table processing if SFC is enabled on an interface.
+- Support for TCP/UDP range matches in the flow table
+- A small change to vxlan (GPE) processing to determine whether
+the first header is Ethernet or NSH.
+
+Horizon repo:
+
+- VXLAN-GPE support (port 4790)
+---
+ neutron/agent/vswitch/api.py           |  43 ++++++++++
+ neutron/agent/vswitch/exceptions.py    |  28 +++++++
+ neutron/agent/vswitch/manager.py       |  46 ++++++++++-
+ neutron/common/constants.py            |   2 +-
+ neutron/plugins/wrs/agent/avs/agent.py |  59 ++++++++++++++
+ neutron/plugins/wrs/agent/avs/sfc.py   | 142 +++++++++++++++++++++++++++++++++
+ tox.ini                                |   2 +
+ 7 files changed, 320 insertions(+), 2 deletions(-)
+ create mode 100644 neutron/plugins/wrs/agent/avs/sfc.py
+
+diff --git a/neutron/agent/vswitch/api.py b/neutron/agent/vswitch/api.py
+index 5647a8a..075948b 100644
+--- a/neutron/agent/vswitch/api.py
++++ b/neutron/agent/vswitch/api.py
+@@ -202,6 +202,16 @@ class VSwitchManagementAPI(object):
+         except exc.HTTPException as e:
+             raise exceptions.VSwitchEndpointError(str(e), endpoint)
+ 
++    def _execute_flow_request(self, callable, network=None):
++        try:
++            return self._do_request(callable)
++        except exc.CommunicationError as e:
++            raise exceptions.VSwitchCommunicationError(str(e))
++        except exc.HTTPNotFound as e:
++            raise exceptions.VSwitchFlowSwitchNotFoundError(str(e), network)
++        except exc.HTTPException as e:
++            raise exceptions.VSwitchFlowError(str(e), network)
++
+     def get_engine_list_stats(self):
+         """
+         Sends a request to the vswitch requesting the current list of engine
+@@ -780,3 +790,36 @@ class VSwitchManagementAPI(object):
+         """
+         return self._execute_vtep_request(
+             lambda: self.client.vxlan.get_ip_endpoints(interface_uuid))
++
++    def get_flow_list(self, network_uuid, table_id):
++        """
++        Sends a request to the vswitch requesting the full list of flows
++        for a given table id on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowrule.list(network_uuid, table_id))
++
++    def get_flow(self, network_uuid, table_id, cookie):
++        """
++        Sends a request to the vswitch requesting a specific
++        flow rule for a given table id on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowrule.get(network_uuid, table_id, cookie))
++
++    def add_flow(self, network_uuid, table_id, rule):
++        """
++        Sends a request to the vswitch requesting the addition of a
++        flow rule for a given table id on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowrule.create(network_uuid, table_id, rule))
++
++    def delete_flow(self, network_uuid, table_id, cookie):
++        """
++        Sends a request to the vswitch requesting the deletion of a
++        flow rule for a given table id on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowrule.delete(network_uuid, table_id,
++                                                cookie))
+diff --git a/neutron/agent/vswitch/exceptions.py b/neutron/agent/vswitch/exceptions.py
+index 46f2741..ab0daff 100644
+--- a/neutron/agent/vswitch/exceptions.py
++++ b/neutron/agent/vswitch/exceptions.py
+@@ -437,3 +437,31 @@ class VSwitchEndpointNotFoundError(VSwitchEndpointError):
+     def __init__(self, message, endpoint):
+         super(VSwitchEndpointNotFoundError, self).__init__(
+             message, endpoint)
++
++
++class VSwitchFlowError(VSwitchError):
++    """
++    Exception raised to signal errors during flow operations.
++    """
++    def __init__(self, message, network):
++        super(VSwitchFlowError, self).__init__(message)
++        self.network = network
++
++    def __str__(self):
++        if self.network:
++            msg = ("request failed with error {} on "
++                   "network {}".format(
++                       self.message, self.network))
++        else:
++            msg = "request failed with error {}".format(self.message)
++        return msg
++
++
++class VSwitchFlowSwitchNotFoundError(VSwitchFlowError):
++    """
++    Exception raised to signal that a flow operation targeted a
++    non-existent flow switch object instance.
++    """
++    def __init__(self, message, network):
++        super(VSwitchFlowSwitchNotFoundError, self).__init__(
++            message, network)
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index 664c9d3..f69d7d3 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -588,7 +588,7 @@ class VSwitchManager(object):
+         attachment.  The target network is derived from the interface_uuid.
+         """
+         try:
+-            return self.api.add_network_entry(interface_uuid, mac_address)
++            return self.api.remove_network_entry(interface_uuid, mac_address)
+         except exceptions.VSwitchError as e:
+             msg = ("Failed to remove static entry {} on {}, {}".format(
+                     mac_address, interface_uuid, e))
+@@ -1438,3 +1438,47 @@ class VSwitchManager(object):
+             msg = ("Failed to query VTEP IP endpoint list for {}, {}".
+                    format(interface_uuid, e))
+             raise VSwitchManagerError(msg)
++
++    def get_flow_list(self, network_uuid, table_id):
++        """
++        Retrieves the current list of flows.
++        """
++        try:
++            return self.api.get_flow_list(network_uuid, table_id)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query flow list for {}, {}".
++                   format(network_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def get_flow(self, network_uuid, table_id, cookie):
++        """
++        Retrieves a flow from a given table id on a given network.
++        """
++        try:
++            return self.api.get_flow(network_uuid, table_id, cookie)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query flow list for {}, {}".
++                   format(cookie, e))
++            raise VSwitchManagerError(msg)
++
++    def add_flow(self, network_uuid, table_id, rule):
++        """
++        Adds a flow to a given table id on a given network.
++        """
++        try:
++            return self.api.add_flow(network_uuid, table_id, rule)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to add flow on network {}, {}".
++                   format(network_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def delete_flow(self, network_uuid, table_id, cookie):
++        """
++        Deletes a flow from a given table id on a given network.
++        """
++        try:
++            return self.api.delete_flow(network_uuid, table_id, cookie)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to delete flow for {}, {}".
++                   format(cookie, e))
++            raise VSwitchManagerError(msg)
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index 1e11664..2e010f1 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -305,7 +305,7 @@ VALID_TTL_RANGE = [MINIMUM_TTL, MAXIMUM_TTL]
+ DEFAULT_VXLAN_GROUP = '239.0.0.1'
+ DEFAULT_VXLAN_TTL = 1
+ DEFAULT_VXLAN_UDP_PORT = 4789
+-VALID_VXLAN_UDP_PORTS = [4789, 8472]
++VALID_VXLAN_UDP_PORTS = [4789, 4790, 8472]
+ 
+ # Represents the number of bytes added to a tenant packet when it is carried
+ # by a VXLAN based provider network.  We start by assuming a tenant network
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index deb53f2..07a5580 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -67,6 +67,7 @@ from neutron.extensions import wrs_provider
+ from neutron.plugins.common import constants as p_const
+ from neutron.plugins.ml2.drivers.l2pop.rpc_manager import l2population_rpc
+ from neutron.plugins.wrs.agent.avs import dvr
++from neutron.plugins.wrs.agent.avs import sfc
+ from neutron.services.trunk import constants as trunk_constants
+ from neutron.services.trunk.rpc import agent as trunk_rpc
+ 
+@@ -878,6 +879,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         self.init_fm()
+         self.port_details = {}
+         self.trunk_details = {}
++        self.sfc_details = {}
+         self.interface_details = {}
+         self.port_stats = {}
+         self.virtual_ports = {}
+@@ -1311,9 +1313,13 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         as updated by an RPC call from the server then the data is refreshed.
+         """
+         port_details = self.port_details.get(port_uuid)
++
+         if not port_details or port_details.get('_updated', False):
+             trunk_id = port_details.get('_trunk_id') if port_details else 0
+             self.trunk_details.pop(trunk_id, None)
++            chain_id = port_details.get('_chain_id') if port_details else 0
++
++            self.sfc_details.pop(chain_id, None)
+             port_details = self.plugin_rpc.get_device_details(
+                 self.context, port_uuid, self.agent_id, self.host)
+             if not port_details or len(port_details) == 1:
+@@ -1344,6 +1350,37 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         trunk_id = port_details.get('_trunk_id', 0)
+         return self.trunk_details.get(trunk_id)
+ 
++    def get_sfc_details(self, port_uuids, ports):
++
++        chain_ids = []
++        for uuid in port_uuids:
++            pd = self.get_port_details(uuid)
++            if not pd:
++                # port may have been deleted, still want to notify the driver
++                try:
++                    self.sfc_agent.get_sfc_details(port_uuids)
++                except Exception as e:
++                    LOG.error("Failed to send SFC port notification: %s", e)
++                continue
++
++            chain_id = None
++            if '_chain_id' not in pd:
++                try:
++                    chain_id = self.sfc_agent.get_sfc_details(port_uuids)
++                except Exception as e:
++                    LOG.error("Failed to send SFC port notification: %s", e)
++
++                chain_id = chain_id[0] if chain_id else 0
++                if chain_id:
++                    self.sfc_details[chain_id] = chain_id
++
++                pd['_chain_id'] = chain_id
++
++            chain_id = pd.get('_chain_id', 0)
++            chain_ids.append(chain_id)
++
++        return chain_ids
++
+     @staticmethod
+     def get_fixed_subnet_ids(port_details):
+         """Return the list of subnet ids for which this port has an IP."""
+@@ -1453,6 +1490,10 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             len(updated_ports), updated_ports))
+         devices = [self._get_device_name(uuid) for uuid in updated_ports]
+         self.prepare_sg_device_filters(devices)
++
++        # Trigger an SFC update
++        self.get_sfc_details(updated_ports, ports)
++
+         for uuid in updated_ports:
+             try:
+                 port_details = self.get_port_details(uuid)
+@@ -1495,6 +1536,9 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         trunk_id = port_details.get('_trunk_id')
+         trunk_details = self.trunk_details.pop(trunk_id, None)
+ 
++        chain_id = port_details.get('_chain_id')
++        self.sfc_details.pop(chain_id, None)
++
+         if not self.manage_network_for_device(port_details):
+             # Leave the network(s) as-is if we are not managing them.
+             return
+@@ -1525,6 +1569,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         LOG.debug("{} port(s) removed: {} ".format(len(uuids), uuids))
+         devices = [self._get_device_name(uuid) for uuid in uuids]
+         self.remove_sg_device_filters(devices)
++
+         for uuid in uuids:
+             try:
+                 self.plugin_rpc.update_device_down(
+@@ -1534,6 +1579,9 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             except manager.VSwitchManagerError as e:
+                 LOG.exception(repr(e))
+ 
++        # Trigger an SFC update
++        self.get_sfc_details(uuids, ports)
++
+     def compare_ports(self, uuids, current, previous):
+         """
+         Compare existing ports to determine if a state change needs to be
+@@ -2030,6 +2078,13 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+ 
+         self.dvr_agent.register_manager(self.vswitch_mgr)
+ 
++        self.sfc_agent = sfc.VswitchSFCNeutronAgent(
++            self.context,
++            self,
++            self.host)
++
++        self.sfc_agent.register_manager(self.vswitch_mgr)
++
+     def remove_network(self, network_id, in_use_interfaces):
+         super(VSwitchNeutronAgent, self).remove_network(
+             network_id, in_use_interfaces)
+@@ -2375,6 +2430,10 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         # Feature not supported in SDN mode so always return no data
+         return None
+ 
++    def get_sfc_details(self, port_uuids):
++        # Feature not supported in SDN mode so always return no data
++        return None
++
+     def _get_network_info(self, port_details):
+         """
+         Determine which network this port should be attached to.  The normal
+diff --git a/neutron/plugins/wrs/agent/avs/sfc.py b/neutron/plugins/wrs/agent/avs/sfc.py
+new file mode 100644
+index 0000000..84720cd
+--- /dev/null
++++ b/neutron/plugins/wrs/agent/avs/sfc.py
+@@ -0,0 +1,142 @@
++#!/usr/bin/env python
++#
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2017 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import collections
++
++from oslo_config import cfg
++from oslo_log import log as logging
++import oslo_messaging
++
++from networking_sfc.services.sfc.agent.extensions.vswitch import sfc_driver
++from networking_sfc.services.sfc.drivers.avs import rpc_topics as sfc_topics
++
++from neutron.agent import rpc as agent_rpc
++from neutron.common import rpc as n_rpc
++from neutron.common import topics
++
++from neutron.plugins.ml2.drivers.l2pop.rpc_manager import l2population_rpc
++
++LOG = logging.getLogger(__name__)
++
++
++class SfcPluginApi(object):
++    def __init__(self, topic, host):
++        self.host = host
++        self.target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.client = n_rpc.get_client(self.target)
++
++    def get_sfc_details(self, context, port_ids):
++        cctxt = self.client.prepare()
++        return cctxt.call(
++            context, 'get_sfc_details',
++            port_ids=port_ids)
++
++
++class SfcL2PopHandler(l2population_rpc.L2populationRpcCallBackMixin):
++
++    def __init__(self, manager):
++        self.manager = manager
++
++    def fdb_add(self, context, fdb_entries):
++        self.manager.fdb_add(context, fdb_entries)
++
++    def fdb_remove(self, context, fdb_entries):
++        self.manager.fdb_remove(context, fdb_entries)
++
++    def fdb_update(self, context, fdb_entries):
++        self.manager.fdb_update(context, fdb_entries)
++
++
++class VswitchSFCNeutronAgent(object):
++    """
++    Implements Vswitch-based SFC(Service Function Chaining).
++    """
++    # history
++    #   1.0 Initial version
++
++    def __init__(self, context,
++                 agent,
++                 host=None):
++        self.context = context
++        self.agent = agent
++        self.host = host
++        self.vswitch_mgr = None
++        self.sfc_driver = sfc_driver.SfcAVSAgentDriver()
++        self._sfc_setup_rpc()
++
++        self.l2pop_handler = None
++        self.l2pop_rpc = l2population_rpc.L2populationRpcQueryMixin()
++        self.l2pop_connection = None
++        self.setup_l2pop_rpc_handler()
++        self.details = collections.OrderedDict()
++
++    def register_manager(self, manager):
++        self.vswitch_mgr = manager
++        self.sfc_driver.consume_api(self.vswitch_mgr)
++
++    def get_sfc_details(self, port_ids):
++        return self.sfc_plugin_rpc.get_sfc_details(self.context, port_ids)
++
++    def setup_l2pop_rpc_handler(self):
++        # We need to listen for l2pop RPC events to distribute the FDB
++        # entries to BGP peers.
++        self.l2pop_handler = SfcL2PopHandler(self.sfc_driver)
++        consumers = [[topics.L2POPULATION, topics.UPDATE]]
++        self.l2pop_connection = agent_rpc.create_consumers(
++            [self.l2pop_handler], topics.AGENT, consumers)
++        self.l2pop_connection.consume_in_threads()
++
++    def _sfc_setup_rpc(self):
++        self.sfc_plugin_rpc = SfcPluginApi(
++            sfc_topics.SFC_PLUGIN, cfg.CONF.host)
++
++        self.topic = sfc_topics.SFC_AGENT
++        self.endpoints = [self]
++        consumers = [
++            [sfc_topics.SERVICEPATH, topics.UPDATE],
++            [sfc_topics.SERVICEPATH, topics.DELETE],
++            [sfc_topics.CLASSIFIER, topics.UPDATE],
++            [sfc_topics.CLASSIFIER, topics.DELETE]
++        ]
++
++        # subscribe sfc plugin message
++        self.connection = agent_rpc.create_consumers(
++            self.endpoints,
++            self.topic,
++            consumers)
++
++    def update_service_paths(self, context, **kwargs):
++        paths = kwargs['service_paths']
++        self.sfc_driver.update_service_paths(paths)
++
++    def update_classifiers(self, context, **kwargs):
++        fcs = kwargs['classifiers']
++        self.sfc_driver.update_classifiers(fcs)
++
++    def delete_service_paths(self, context, **kwargs):
++        paths = kwargs['service_paths']
++        self.sfc_driver.delete_service_paths(paths)
++
++    def delete_classifiers(self, context, **kwargs):
++        fcs = kwargs['classifiers']
++        self.sfc_driver.delete_classifiers(fcs)
+diff --git a/tox.ini b/tox.ini
+index 43e77a1..43790a2 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -12,9 +12,11 @@ skipsdist = True
+ wrsdir = {toxinidir}/../../../../../..
+ cgcsdir = {[wrs]wrsdir}/addons/wr-cgcs/layers/cgcs
+ avsdir = {[wrs]wrsdir}/addons/wr-avs/layers/avs/
++sfcdir = {[wrs]wrsdir}/addons/wr-cgcs/layers/cgcs/git/networking-sfc
+ deps = -e{[wrs]cgcsdir}/middleware/fault/recipes-common/fm-api
+        -e{[wrs]cgcsdir}/middleware/sysinv/recipes-common/cgts-client/cgts-client
+        -e{[wrs]cgcsdir}/middleware/config/recipes-common/tsconfig/tsconfig
++       -e{[wrs]sfcdir}
+        -e{[wrs]avsdir}/python-vswitchclient
+ 
+ [testenv]
+-- 
+2.7.4
+

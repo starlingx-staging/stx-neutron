@@ -1,0 +1,55 @@
+From 9339b12df1793a1f44fbee14146c16060cc5e54e Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 31 Aug 2017 13:17:29 -0500
+Subject: [PATCH 086/155] avs: strip the source attribute from l2pop events
+
+The BGP VPN feature has added a "source" attribute to the FDB message
+structure which needs to be removed prior to handling.  This could be
+done better by changing the actual RPC format but to avoid compatibility
+issues and rebase issues we are going to add a new attribute to the FDB
+message.  This could be a problem if we ever want to interop with a
+vanilla compute node but since this is not on the horizon it does not
+pose a risk.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 5d006cd..35d1599 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -475,7 +475,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         """
+         Handle new FDB entries published to this agent (or all agents).
+         """
+-        LOG.debug("fdb_add received: {}".format(fdb_entries))
++        source = fdb_entries.get('source', topics.L2POPULATION)
++        LOG.debug("fdb_add received from {}: {}".format(source, fdb_entries))
+         for network_id, fdb_entries in six.iteritems(fdb_entries):
+             if network_id not in self.virtual_networks:
+                 # NOTE(alegacy): skip for now but it will be replayed by the
+@@ -493,7 +494,9 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         """
+         Handle new FDB entries published to this agent (or all agents).
+         """
+-        LOG.debug("fdb_remove received {}".format(fdb_entries))
++        source = fdb_entries.get('source', topics.L2POPULATION)
++        LOG.debug("fdb_remove received from {}: {}".format(
++            source, fdb_entries))
+         for network_id, fdb_entries in six.iteritems(fdb_entries):
+             if network_id not in self.virtual_networks:
+                 LOG.debug("skipping FDB delete on missing network {}, fdb: {}".
+@@ -535,7 +538,9 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                     port_info.mac_address, agent_ip)
+ 
+     def fdb_update(self, context, fdb_entries):
+-        LOG.debug("fdb_update received {}".format(fdb_entries))
++        source = fdb_entries.get('source', topics.L2POPULATION)
++        LOG.debug("fdb_update received from {}: {}".format(
++            source, fdb_entries))
+         ip_delta = fdb_entries['chg_ip']
+         for network_id, ip_changes in six.iteritems(ip_delta):
+             if network_id not in self.virtual_networks:
+-- 
+2.7.4
+

@@ -1,0 +1,31 @@
+From e6669ec8d6f701ddf1879d44c72148d426ab2ccb Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Thu, 4 Jan 2018 16:00:50 -0500
+Subject: [PATCH 098/155] CGTS-8611: Fix call to get l3 agents hosting router
+
+As part of moving to pike, get_l3_agents_hosting_routers was switched to use
+OVO objects.  This is resulting in update_router_scheduling to fail due to the
+format for the agent being invalid, where get_l3_agent_candidates can't parse
+the configuration dict.  This is causing the router to be resceduled whenever
+we update the gateway info.  Instead, we should use the new function
+_get_l3_agents_hosting_routers which returns the agents in the old format.
+---
+ neutron/db/l3_host_db.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/db/l3_host_db.py b/neutron/db/l3_host_db.py
+index df05d99..84e2236 100644
+--- a/neutron/db/l3_host_db.py
++++ b/neutron/db/l3_host_db.py
+@@ -82,7 +82,7 @@ class L3HostSchedulerDbMixin(hosts_db.HostSchedulerDbMixin):
+         """
+         try:
+             agent_id = None
+-            agents = self.get_l3_agents_hosting_routers(context, [router_id])
++            agents = self._get_l3_agents_hosting_routers(context, [router_id])
+             if agents:
+                 agent_id = agents[0].id
+                 # Determine if the current agent is still a valid choice
+-- 
+2.7.4
+

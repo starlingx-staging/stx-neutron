@@ -1,0 +1,25 @@
+From a4c419180c393fa74b73bca71cd8cf512dd62e06 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Tue, 21 Nov 2017 12:46:13 -0500
+Subject: [PATCH 072/155] Pad mac addresses before sending to AVS.
+
+---
+ neutron/plugins/wrs/agent/avs/dvr.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/dvr.py b/neutron/plugins/wrs/agent/avs/dvr.py
+index e6e7aae..ccacdc6 100644
+--- a/neutron/plugins/wrs/agent/avs/dvr.py
++++ b/neutron/plugins/wrs/agent/avs/dvr.py
+@@ -101,7 +101,7 @@ class VswitchDVRNeutronAgent(object):
+ 
+     @staticmethod
+     def _format_mac_avs(mac_address):
+-        return str(netaddr.EUI(mac_address, dialect=netaddr.mac_unix))
++        return str(netaddr.EUI(mac_address, dialect=netaddr.mac_unix_expanded))
+ 
+     def get_peer_dvr_mac_addresses(self):
+         """Find our local unique mac address as well as those of other hosts"""
+-- 
+2.7.4
+

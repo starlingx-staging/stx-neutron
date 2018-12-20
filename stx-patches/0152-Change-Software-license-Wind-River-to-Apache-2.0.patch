@@ -1,0 +1,1616 @@
+From cd7ddc4714555703a44b7f618c884688216f79af Mon Sep 17 00:00:00 2001
+From: Jesus Ornelas Aguayo <jesus.ornelas.aguayo@intel.com>
+Date: Fri, 11 May 2018 12:40:34 -0400
+Subject: [PATCH 152/155] Change Software license Wind River to Apache 2.0
+
+This commit changes the Wind River software license to Apache 2.0
+by adding SPDX-License-Identifier: Apache-2.0 and removing the
+following:
+
+The right to copy, distribute, modify, or otherwise make use
+of this software may be licensed only pursuant to the terms
+of an applicable Wind River license agreement.
+
+Signed-off-by: Jesus Ornelas Aguayo <jesus.ornelas.aguayo@intel.com>
+---
+ LICENSE.wrs                                                           | 4 +---
+ bin/neutron-restart                                                   | 4 +---
+ neutron/agent/fm.py                                                   | 4 ----
+ neutron/agent/linux/dhcp.py                                           | 4 ----
+ neutron/agent/linux/interface.py                                      | 4 ----
+ neutron/agent/rpc.py                                                  | 4 ----
+ neutron/agent/vswitch/api.py                                          | 4 ----
+ neutron/agent/vswitch/constants.py                                    | 4 ----
+ neutron/agent/vswitch/exceptions.py                                   | 4 ----
+ neutron/agent/vswitch/vif_api.py                                      | 4 ----
+ neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py                  | 4 ----
+ neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py     | 4 ----
+ neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py                   | 4 ----
+ neutron/api/rpc/handlers/pnet_connectivity_rpc.py                     | 4 ----
+ neutron/api/rpc/handlers/qos_rpc.py                                   | 4 ----
+ neutron/common/constants.py                                           | 4 ----
+ neutron/common/exceptions.py                                          | 4 ----
+ neutron/common/ipv6_utils.py                                          | 4 ----
+ neutron/common/topics.py                                              | 4 ----
+ neutron/common/utils.py                                               | 4 ----
+ neutron/conf/agent/securitygroups_rpc.py                              | 4 ----
+ neutron/conf/common.py                                                | 4 ----
+ neutron/db/agents_db.py                                               | 4 ----
+ neutron/db/agentschedulers_db.py                                      | 4 ----
+ neutron/db/db_base_plugin_v2.py                                       | 4 ----
+ neutron/db/hosts_db.py                                                | 4 ----
+ neutron/db/l3_agentschedulers_db.py                                   | 4 ----
+ neutron/db/l3_db.py                                                   | 4 ----
+ neutron/db/l3_host_db.py                                              | 4 ----
+ .../pike/expand/wrs_43a0f920c515_remove_managed_from_subnet.py        | 4 ----
+ .../expand/10b1502ffd1c_host_interface_providernet_bindings.py        | 4 ----
+ .../wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py   | 4 ----
+ .../expand/5018b7ad4223_ml2_subnet_segment_dynamic_field.py           | 4 ----
+ .../expand/52eb37bd3d77_hosts_table_primary_key_fix.py                | 4 ----
+ .../versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py              | 4 ----
+ .../wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py    | 4 ----
+ .../versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py              | 4 ----
+ .../wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py  | 4 ----
+ .../wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py   | 4 ----
+ .../wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py  | 4 ----
+ .../versions/wrs_mitaka/expand/f3ead3dada66_settings_table_updates.py | 4 ----
+ .../versions/wrs_mitaka/expand/wrs_mitaka_release.py                  | 4 ----
+ .../versions/wrs_newton/expand/wrs_newton_release.py                  | 4 ----
+ neutron/db/migration/alembic_migrations/vswitch_init_ops.py           | 4 ----
+ neutron/db/migration/models/head.py                                   | 4 ----
+ neutron/db/models_v2.py                                               | 4 ----
+ neutron/db/portforwardings_db.py                                      | 3 ---
+ neutron/db/providernet_db.py                                          | 4 ----
+ neutron/db/qos_db.py                                                  | 4 ----
+ neutron/db/securitygroups_rpc_base.py                                 | 4 ----
+ neutron/db/settings_db.py                                             | 4 ----
+ neutron/drivers/fm.py                                                 | 4 ----
+ neutron/drivers/host.py                                               | 4 ----
+ neutron/extensions/host.py                                            | 4 ----
+ neutron/extensions/l3agentscheduler.py                                | 4 ----
+ neutron/extensions/portforwardings.py                                 | 3 ---
+ neutron/extensions/wrs_binding.py                                     | 4 ----
+ neutron/extensions/wrs_net.py                                         | 4 ----
+ neutron/extensions/wrs_provider.py                                    | 4 ----
+ neutron/extensions/wrs_tenant.py                                      | 4 ----
+ neutron/extensions/wrs_tm.py                                          | 4 ----
+ neutron/pecan_wsgi/hooks/wrs_fields.py                                | 4 ----
+ neutron/plugins/ml2/db.py                                             | 4 ----
+ neutron/plugins/ml2/driver_api.py                                     | 4 ----
+ neutron/plugins/ml2/driver_context.py                                 | 4 ----
+ neutron/plugins/ml2/drivers/helpers.py                                | 4 ----
+ neutron/plugins/ml2/drivers/type_flat.py                              | 4 ----
+ neutron/plugins/ml2/drivers/type_gre.py                               | 4 ----
+ neutron/plugins/ml2/drivers/type_local.py                             | 4 ----
+ neutron/plugins/ml2/drivers/type_tunnel.py                            | 4 ----
+ neutron/plugins/ml2/drivers/type_vlan.py                              | 4 ----
+ neutron/plugins/ml2/drivers/type_vxlan.py                             | 4 ----
+ neutron/plugins/ml2/managers.py                                       | 4 ----
+ neutron/plugins/ml2/models.py                                         | 4 ----
+ neutron/plugins/ml2/plugin.py                                         | 4 ----
+ neutron/plugins/ml2/rpc.py                                            | 4 ----
+ neutron/plugins/wrs/drivers/firewall.py                               | 4 ----
+ neutron/plugins/wrs/drivers/fm.py                                     | 4 ----
+ neutron/plugins/wrs/drivers/host.py                                   | 4 ----
+ neutron/plugins/wrs/drivers/qos.py                                    | 4 ----
+ neutron/plugins/wrs/drivers/type_generic.py                           | 4 ----
+ neutron/plugins/wrs/drivers/type_managed_flat.py                      | 4 ----
+ neutron/plugins/wrs/drivers/type_managed_vlan.py                      | 4 ----
+ neutron/plugins/wrs/drivers/type_managed_vxlan.py                     | 4 ----
+ neutron/scheduler/dhcp_agent_scheduler.py                             | 4 ----
+ neutron/scheduler/dhcp_host_agent_scheduler.py                        | 4 ----
+ neutron/scheduler/l3_agent_scheduler.py                               | 4 ----
+ neutron/scheduler/l3_host_agent_scheduler.py                          | 4 ----
+ neutron/services/l3_router/service_providers/l2pop.py                 | 4 ----
+ neutron/setting.py                                                    | 4 ----
+ neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py      | 4 ----
+ neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py      | 4 ----
+ neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py     | 4 ----
+ neutron/tests/unit/plugins/wrs/test_agent_scheduler.py                | 4 ----
+ neutron/tests/unit/plugins/wrs/test_extension_host.py                 | 4 ----
+ neutron/tests/unit/plugins/wrs/test_extension_interface.py            | 4 ----
+ neutron/tests/unit/plugins/wrs/test_extension_manager.py              | 4 ----
+ neutron/tests/unit/plugins/wrs/test_extension_pnet.py                 | 4 ----
+ neutron/tests/unit/plugins/wrs/test_host_driver.py                    | 4 ----
+ neutron/tests/unit/plugins/wrs/test_wrs_plugin.py                     | 4 ----
+ 100 files changed, 2 insertions(+), 396 deletions(-)
+
+diff --git a/LICENSE.wrs b/LICENSE.wrs
+index 144ecd6..1c7414c 100644
+--- a/LICENSE.wrs
++++ b/LICENSE.wrs
+@@ -1,7 +1,5 @@
+ #
+ #  Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-#  The right to copy, distribute, modify, or otherwise make use
+-#  of this software may be licensed only pursuant to the terms
+-#  of an applicable Wind River license agreement.
++# SPDX-License-Identifier: Apache-2.0
+ #
+diff --git a/bin/neutron-restart b/bin/neutron-restart
+index 8a7d700..e808de1 100755
+--- a/bin/neutron-restart
++++ b/bin/neutron-restart
+@@ -2,9 +2,7 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
++# SPDX-License-Identifier: Apache-2.0
+ #
+ 
+ #
+diff --git a/neutron/agent/fm.py b/neutron/agent/fm.py
+index 3c77db7..60e247b 100644
+--- a/neutron/agent/fm.py
++++ b/neutron/agent/fm.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from oslo_config import cfg
+ from oslo_log import log as logging
+diff --git a/neutron/agent/linux/dhcp.py b/neutron/agent/linux/dhcp.py
+index 95c6469..5cec5a1 100644
+--- a/neutron/agent/linux/dhcp.py
++++ b/neutron/agent/linux/dhcp.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ import collections
+diff --git a/neutron/agent/linux/interface.py b/neutron/agent/linux/interface.py
+index 2aa678c..c657373 100644
+--- a/neutron/agent/linux/interface.py
++++ b/neutron/agent/linux/interface.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ import abc
+diff --git a/neutron/agent/rpc.py b/neutron/agent/rpc.py
+index 31f17a6..c11a247 100644
+--- a/neutron/agent/rpc.py
++++ b/neutron/agent/rpc.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from datetime import datetime
+ import itertools
+diff --git a/neutron/agent/vswitch/api.py b/neutron/agent/vswitch/api.py
+index 29e3995..e6173ce 100644
+--- a/neutron/agent/vswitch/api.py
++++ b/neutron/agent/vswitch/api.py
+@@ -17,10 +17,6 @@
+ #
+ # Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import threading
+ 
+diff --git a/neutron/agent/vswitch/constants.py b/neutron/agent/vswitch/constants.py
+index 2784f2f..f965a71 100644
+--- a/neutron/agent/vswitch/constants.py
++++ b/neutron/agent/vswitch/constants.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from vswitchclient import constants
+ 
+diff --git a/neutron/agent/vswitch/exceptions.py b/neutron/agent/vswitch/exceptions.py
+index ab0daff..bcdb348 100644
+--- a/neutron/agent/vswitch/exceptions.py
++++ b/neutron/agent/vswitch/exceptions.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ class VSwitchError(Exception):
+diff --git a/neutron/agent/vswitch/vif_api.py b/neutron/agent/vswitch/vif_api.py
+index 4d61e87..12cf6a4 100644
+--- a/neutron/agent/vswitch/vif_api.py
++++ b/neutron/agent/vswitch/vif_api.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import socket
+ 
+diff --git a/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py
+index b1d68f1..657b1f3 100644
+--- a/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py
++++ b/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from oslo_log import log as logging
+ import oslo_messaging
+diff --git a/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py
+index 7040eca..f84c458 100644
+--- a/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py
++++ b/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import oslo_messaging
+ 
+diff --git a/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py
+index 9905804..f126fa3 100644
+--- a/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py
++++ b/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import oslo_messaging
+ 
+diff --git a/neutron/api/rpc/handlers/pnet_connectivity_rpc.py b/neutron/api/rpc/handlers/pnet_connectivity_rpc.py
+index 4ecfea7..a57c8f7 100644
+--- a/neutron/api/rpc/handlers/pnet_connectivity_rpc.py
++++ b/neutron/api/rpc/handlers/pnet_connectivity_rpc.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import oslo_messaging
+ 
+diff --git a/neutron/api/rpc/handlers/qos_rpc.py b/neutron/api/rpc/handlers/qos_rpc.py
+index 9688617..a40564b 100644
+--- a/neutron/api/rpc/handlers/qos_rpc.py
++++ b/neutron/api/rpc/handlers/qos_rpc.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.plugins import directory
+ from oslo_config import cfg
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index 2e010f1..b77ec8c 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import constants as lib_constants
+ 
+diff --git a/neutron/common/exceptions.py b/neutron/common/exceptions.py
+index d044b51..bc454bb 100644
+--- a/neutron/common/exceptions.py
++++ b/neutron/common/exceptions.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ from neutron_lib import exceptions as e
+diff --git a/neutron/common/ipv6_utils.py b/neutron/common/ipv6_utils.py
+index bf1b70e..cc32246 100644
+--- a/neutron/common/ipv6_utils.py
++++ b/neutron/common/ipv6_utils.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """
+ IPv6-related utilities and helper functions.
+diff --git a/neutron/common/topics.py b/neutron/common/topics.py
+index d271c5b..1e186bd 100644
+--- a/neutron/common/topics.py
++++ b/neutron/common/topics.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014,2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ NETWORK = 'network'
+ SUBNET = 'subnet'
+diff --git a/neutron/common/utils.py b/neutron/common/utils.py
+index 5c95663..0510705 100644
+--- a/neutron/common/utils.py
++++ b/neutron/common/utils.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ # Borrowed from nova code base, more utilities will be added/borrowed as and
+ # when needed.
+ 
+diff --git a/neutron/conf/agent/securitygroups_rpc.py b/neutron/conf/agent/securitygroups_rpc.py
+index 17a11fd..67fc82e 100644
+--- a/neutron/conf/agent/securitygroups_rpc.py
++++ b/neutron/conf/agent/securitygroups_rpc.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014,2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ from oslo_config import cfg
+diff --git a/neutron/conf/common.py b/neutron/conf/common.py
+index fdfa3f0..876923a 100644
+--- a/neutron/conf/common.py
++++ b/neutron/conf/common.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.utils import net
+ from oslo_config import cfg
+diff --git a/neutron/db/agents_db.py b/neutron/db/agents_db.py
+index 9b0906a..dd73231 100644
+--- a/neutron/db/agents_db.py
++++ b/neutron/db/agents_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ import datetime
+diff --git a/neutron/db/agentschedulers_db.py b/neutron/db/agentschedulers_db.py
+index 64ac2e8..f9cc0e0 100644
+--- a/neutron/db/agentschedulers_db.py
++++ b/neutron/db/agentschedulers_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ import datetime
+diff --git a/neutron/db/db_base_plugin_v2.py b/neutron/db/db_base_plugin_v2.py
+index f65044a..46f10fe 100644
+--- a/neutron/db/db_base_plugin_v2.py
++++ b/neutron/db/db_base_plugin_v2.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import functools
+ 
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 41ad445..bcb72a6 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import re
+ 
+diff --git a/neutron/db/l3_agentschedulers_db.py b/neutron/db/l3_agentschedulers_db.py
+index bf8aadc..51a17cc 100644
+--- a/neutron/db/l3_agentschedulers_db.py
++++ b/neutron/db/l3_agentschedulers_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import time
+ 
+diff --git a/neutron/db/l3_db.py b/neutron/db/l3_db.py
+index c5a1c24..283742d 100644
+--- a/neutron/db/l3_db.py
++++ b/neutron/db/l3_db.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import functools
+ import itertools
+diff --git a/neutron/db/l3_host_db.py b/neutron/db/l3_host_db.py
+index 84e2236..8cc02cb 100644
+--- a/neutron/db/l3_host_db.py
++++ b/neutron/db/l3_host_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import constants
+ from oslo_config import cfg
+diff --git a/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_43a0f920c515_remove_managed_from_subnet.py b/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_43a0f920c515_remove_managed_from_subnet.py
+index d8a7dac..0a67a3e 100644
+--- a/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_43a0f920c515_remove_managed_from_subnet.py
++++ b/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_43a0f920c515_remove_managed_from_subnet.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """Remove managed from subnet
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py
+index 5540896..75cfbdc 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """host interface providernet bindings
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py
+index cb0f3ad..ed671c8 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """enum table column fixes
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/5018b7ad4223_ml2_subnet_segment_dynamic_field.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/5018b7ad4223_ml2_subnet_segment_dynamic_field.py
+index f991892..47b6ee0 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/5018b7ad4223_ml2_subnet_segment_dynamic_field.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/5018b7ad4223_ml2_subnet_segment_dynamic_field.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """ml2 subnet segment new kilo fields
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py
+index d862a13..cc376d9 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """hosts table primary key fix
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+index c912db2..2471168 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """WRS Kilo Revision placeholder
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py
+index c79b4e0..cad25eb 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """WRS QoS table renaming
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+index 29b73d4..97619d3 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """WRS Kilo Revision placeholder
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py
+index 8c3b0b0..49fcba4 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """Port forwarding rule protocol conversion
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py
+index c884e2b..50c2c3b 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """Providernet connectivity table
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py
+index 7cb6b8c..81e3f24 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """Provider network table updates
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/f3ead3dada66_settings_table_updates.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/f3ead3dada66_settings_table_updates.py
+index 2874dfa..a0f4947 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/f3ead3dada66_settings_table_updates.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/f3ead3dada66_settings_table_updates.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """Settings table updates
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+index b1a569e..a9ab33e 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """WRS Mitaka Revision placeholder
+ 
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py
+index 46effc7..96511be 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """WRS Newton Revision placeholder
+ 
+diff --git a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+index 89199fe..ca76d34 100644
+--- a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
++++ b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ # Initial schema operations for vswitch related features.  This file should
+ # only contain content that was delivered prior to the Kilo release.  Anything
+diff --git a/neutron/db/migration/models/head.py b/neutron/db/migration/models/head.py
+index 0ab799b..f652b8d 100644
+--- a/neutron/db/migration/models/head.py
++++ b/neutron/db/migration/models/head.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ """
+ The module provides all database models at current HEAD.
+diff --git a/neutron/db/models_v2.py b/neutron/db/models_v2.py
+index ff9f2bd..f7b9e77 100644
+--- a/neutron/db/models_v2.py
++++ b/neutron/db/models_v2.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ from neutron_lib.api.definitions import network as net_def
+diff --git a/neutron/db/portforwardings_db.py b/neutron/db/portforwardings_db.py
+index 5271896..f7cb397 100644
+--- a/neutron/db/portforwardings_db.py
++++ b/neutron/db/portforwardings_db.py
+@@ -16,9 +16,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+ 
+ import netaddr
+ import sqlalchemy as sa
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 6990b55..1d671c4 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from datetime import datetime
+ from datetime import timedelta
+diff --git a/neutron/db/qos_db.py b/neutron/db/qos_db.py
+index ca875e4..1dd4558 100644
+--- a/neutron/db/qos_db.py
++++ b/neutron/db/qos_db.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import six
+ 
+diff --git a/neutron/db/securitygroups_rpc_base.py b/neutron/db/securitygroups_rpc_base.py
+index afbce41..0341433 100644
+--- a/neutron/db/securitygroups_rpc_base.py
++++ b/neutron/db/securitygroups_rpc_base.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import netaddr
+ from neutron_lib import constants as const
+diff --git a/neutron/db/settings_db.py b/neutron/db/settings_db.py
+index 6bb2966..5831c8b 100644
+--- a/neutron/db/settings_db.py
++++ b/neutron/db/settings_db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import logging
+ 
+diff --git a/neutron/drivers/fm.py b/neutron/drivers/fm.py
+index 9d89a84..e8b2e3c 100644
+--- a/neutron/drivers/fm.py
++++ b/neutron/drivers/fm.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ 
+diff --git a/neutron/drivers/host.py b/neutron/drivers/host.py
+index 856e54b..6dc3045 100644
+--- a/neutron/drivers/host.py
++++ b/neutron/drivers/host.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ import uuid
+diff --git a/neutron/extensions/host.py b/neutron/extensions/host.py
+index 449d00a..df41177 100644
+--- a/neutron/extensions/host.py
++++ b/neutron/extensions/host.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ import abc
+diff --git a/neutron/extensions/l3agentscheduler.py b/neutron/extensions/l3agentscheduler.py
+index 8b098ea..9bc7bd7 100644
+--- a/neutron/extensions/l3agentscheduler.py
++++ b/neutron/extensions/l3agentscheduler.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ 
+diff --git a/neutron/extensions/portforwardings.py b/neutron/extensions/portforwardings.py
+index 6d02223..9129bb4 100644
+--- a/neutron/extensions/portforwardings.py
++++ b/neutron/extensions/portforwardings.py
+@@ -16,9 +16,6 @@
+ #
+ # Copyright (c) 2015,2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+ 
+ import abc
+ 
+diff --git a/neutron/extensions/wrs_binding.py b/neutron/extensions/wrs_binding.py
+index 401d81f..51731dd 100644
+--- a/neutron/extensions/wrs_binding.py
++++ b/neutron/extensions/wrs_binding.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api import extensions as api_extensions
+ from neutron_lib import constants
+diff --git a/neutron/extensions/wrs_net.py b/neutron/extensions/wrs_net.py
+index e241c62..fdf3e63 100644
+--- a/neutron/extensions/wrs_net.py
++++ b/neutron/extensions/wrs_net.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from oslo_log import log as logging
+ 
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index 3d3cb76..9ce866a 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ 
+diff --git a/neutron/extensions/wrs_tenant.py b/neutron/extensions/wrs_tenant.py
+index 48dddfd..a97e672 100644
+--- a/neutron/extensions/wrs_tenant.py
++++ b/neutron/extensions/wrs_tenant.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ from neutron_lib.api import converters
+diff --git a/neutron/extensions/wrs_tm.py b/neutron/extensions/wrs_tm.py
+index 04e9f7d..e190c47 100644
+--- a/neutron/extensions/wrs_tm.py
++++ b/neutron/extensions/wrs_tm.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ 
+diff --git a/neutron/pecan_wsgi/hooks/wrs_fields.py b/neutron/pecan_wsgi/hooks/wrs_fields.py
+index cb87906..1141e81 100644
+--- a/neutron/pecan_wsgi/hooks/wrs_fields.py
++++ b/neutron/pecan_wsgi/hooks/wrs_fields.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2017-2018 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron.common import constants as n_const
+ from pecan import hooks
+diff --git a/neutron/plugins/ml2/db.py b/neutron/plugins/ml2/db.py
+index 0d814d9..16f8210 100644
+--- a/neutron/plugins/ml2/db.py
++++ b/neutron/plugins/ml2/db.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from debtcollector import removals
+ from neutron_lib.api.definitions import portbindings
+diff --git a/neutron/plugins/ml2/driver_api.py b/neutron/plugins/ml2/driver_api.py
+index ff39dad..db8f630 100644
+--- a/neutron/plugins/ml2/driver_api.py
++++ b/neutron/plugins/ml2/driver_api.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ 
+diff --git a/neutron/plugins/ml2/driver_context.py b/neutron/plugins/ml2/driver_context.py
+index 5f38fb3..f0c166f 100644
+--- a/neutron/plugins/ml2/driver_context.py
++++ b/neutron/plugins/ml2/driver_context.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api.definitions import portbindings
+ from neutron_lib import constants
+diff --git a/neutron/plugins/ml2/drivers/helpers.py b/neutron/plugins/ml2/drivers/helpers.py
+index 6583086..ffa40bd 100644
+--- a/neutron/plugins/ml2/drivers/helpers.py
++++ b/neutron/plugins/ml2/drivers/helpers.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import random
+ 
+diff --git a/neutron/plugins/ml2/drivers/type_flat.py b/neutron/plugins/ml2/drivers/type_flat.py
+index bbb97ae..12e454a 100644
+--- a/neutron/plugins/ml2/drivers/type_flat.py
++++ b/neutron/plugins/ml2/drivers/type_flat.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import exceptions as exc
+ from neutron_lib.plugins.ml2 import api
+diff --git a/neutron/plugins/ml2/drivers/type_gre.py b/neutron/plugins/ml2/drivers/type_gre.py
+index 1b2fd3a..b64eae3 100644
+--- a/neutron/plugins/ml2/drivers/type_gre.py
++++ b/neutron/plugins/ml2/drivers/type_gre.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import exceptions as n_exc
+ from oslo_config import cfg
+diff --git a/neutron/plugins/ml2/drivers/type_local.py b/neutron/plugins/ml2/drivers/type_local.py
+index 04f57fb..74e47b0 100644
+--- a/neutron/plugins/ml2/drivers/type_local.py
++++ b/neutron/plugins/ml2/drivers/type_local.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import exceptions as exc
+ from neutron_lib.plugins.ml2 import api
+diff --git a/neutron/plugins/ml2/drivers/type_tunnel.py b/neutron/plugins/ml2/drivers/type_tunnel.py
+index 22ea667..0859d38 100644
+--- a/neutron/plugins/ml2/drivers/type_tunnel.py
++++ b/neutron/plugins/ml2/drivers/type_tunnel.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ import itertools
+diff --git a/neutron/plugins/ml2/drivers/type_vlan.py b/neutron/plugins/ml2/drivers/type_vlan.py
+index 22ed24f..f1c184d 100644
+--- a/neutron/plugins/ml2/drivers/type_vlan.py
++++ b/neutron/plugins/ml2/drivers/type_vlan.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import sys
+ 
+diff --git a/neutron/plugins/ml2/drivers/type_vxlan.py b/neutron/plugins/ml2/drivers/type_vxlan.py
+index 014aa2b..03e12c7 100644
+--- a/neutron/plugins/ml2/drivers/type_vxlan.py
++++ b/neutron/plugins/ml2/drivers/type_vxlan.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import exceptions as n_exc
+ from oslo_config import cfg
+diff --git a/neutron/plugins/ml2/managers.py b/neutron/plugins/ml2/managers.py
+index e4ad71d..d00a02e 100644
+--- a/neutron/plugins/ml2/managers.py
++++ b/neutron/plugins/ml2/managers.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api.definitions import portbindings
+ from neutron_lib.api.definitions import provider_net as provider
+diff --git a/neutron/plugins/ml2/models.py b/neutron/plugins/ml2/models.py
+index 81ca4b9..19f5a55 100644
+--- a/neutron/plugins/ml2/models.py
++++ b/neutron/plugins/ml2/models.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api.definitions import portbindings
+ from neutron_lib.db import model_base
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index ed127be..78ae6b5 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from ast import literal_eval
+ import copy
+diff --git a/neutron/plugins/ml2/rpc.py b/neutron/plugins/ml2/rpc.py
+index 612aab0..bfe4650 100644
+--- a/neutron/plugins/ml2/rpc.py
++++ b/neutron/plugins/ml2/rpc.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api.definitions import port_security as psec
+ from neutron_lib.api.definitions import portbindings
+diff --git a/neutron/plugins/wrs/drivers/firewall.py b/neutron/plugins/wrs/drivers/firewall.py
+index 00754cd..1b347ce 100644
+--- a/neutron/plugins/wrs/drivers/firewall.py
++++ b/neutron/plugins/wrs/drivers/firewall.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import uuid
+ 
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index a33a121..1859275 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from fm_api import constants as fm_constants
+ from fm_api import fm_api
+diff --git a/neutron/plugins/wrs/drivers/host.py b/neutron/plugins/wrs/drivers/host.py
+index 2f1f67c..c4ff624 100644
+--- a/neutron/plugins/wrs/drivers/host.py
++++ b/neutron/plugins/wrs/drivers/host.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import re
+ 
+diff --git a/neutron/plugins/wrs/drivers/qos.py b/neutron/plugins/wrs/drivers/qos.py
+index 86a4488..33d12b7 100644
+--- a/neutron/plugins/wrs/drivers/qos.py
++++ b/neutron/plugins/wrs/drivers/qos.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ from neutron.agent import qos
+ 
+ 
+diff --git a/neutron/plugins/wrs/drivers/type_generic.py b/neutron/plugins/wrs/drivers/type_generic.py
+index f660822..5dc19b3 100644
+--- a/neutron/plugins/wrs/drivers/type_generic.py
++++ b/neutron/plugins/wrs/drivers/type_generic.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ 
+diff --git a/neutron/plugins/wrs/drivers/type_managed_flat.py b/neutron/plugins/wrs/drivers/type_managed_flat.py
+index b7ff1d2..944dc83 100644
+--- a/neutron/plugins/wrs/drivers/type_managed_flat.py
++++ b/neutron/plugins/wrs/drivers/type_managed_flat.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import six
+ 
+diff --git a/neutron/plugins/wrs/drivers/type_managed_vlan.py b/neutron/plugins/wrs/drivers/type_managed_vlan.py
+index b42138a..87eadb4 100644
+--- a/neutron/plugins/wrs/drivers/type_managed_vlan.py
++++ b/neutron/plugins/wrs/drivers/type_managed_vlan.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from oslo_log import log as logging
+ 
+diff --git a/neutron/plugins/wrs/drivers/type_managed_vxlan.py b/neutron/plugins/wrs/drivers/type_managed_vxlan.py
+index 3432ffb..79ff1bc 100644
+--- a/neutron/plugins/wrs/drivers/type_managed_vxlan.py
++++ b/neutron/plugins/wrs/drivers/type_managed_vxlan.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.db import model_base
+ from oslo_log import log as logging
+diff --git a/neutron/scheduler/dhcp_agent_scheduler.py b/neutron/scheduler/dhcp_agent_scheduler.py
+index 3c55dd2..54fd352 100644
+--- a/neutron/scheduler/dhcp_agent_scheduler.py
++++ b/neutron/scheduler/dhcp_agent_scheduler.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ import collections
+diff --git a/neutron/scheduler/dhcp_host_agent_scheduler.py b/neutron/scheduler/dhcp_host_agent_scheduler.py
+index 5fb809c..c95807e 100644
+--- a/neutron/scheduler/dhcp_host_agent_scheduler.py
++++ b/neutron/scheduler/dhcp_host_agent_scheduler.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api.definitions import provider_net as provider
+ from neutron_lib import constants
+diff --git a/neutron/scheduler/l3_agent_scheduler.py b/neutron/scheduler/l3_agent_scheduler.py
+index 52c1946..df554d7 100644
+--- a/neutron/scheduler/l3_agent_scheduler.py
++++ b/neutron/scheduler/l3_agent_scheduler.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import abc
+ import collections
+diff --git a/neutron/scheduler/l3_host_agent_scheduler.py b/neutron/scheduler/l3_host_agent_scheduler.py
+index e27218b..6e8ebd8 100644
+--- a/neutron/scheduler/l3_host_agent_scheduler.py
++++ b/neutron/scheduler/l3_host_agent_scheduler.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import datetime
+ 
+diff --git a/neutron/services/l3_router/service_providers/l2pop.py b/neutron/services/l3_router/service_providers/l2pop.py
+index e6cd3b2..86016d3 100644
+--- a/neutron/services/l3_router/service_providers/l2pop.py
++++ b/neutron/services/l3_router/service_providers/l2pop.py
+@@ -14,10 +14,6 @@
+ 
+ # Copyright (c) 2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib.api.definitions import provider_net
+ from neutron_lib import constants as lib_constants
+diff --git a/neutron/setting.py b/neutron/setting.py
+index 553dfac..bde4604 100644
+--- a/neutron/setting.py
++++ b/neutron/setting.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ 
+ """Neutron settings for tenants."""
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py
+index 47ee9c1..cb04a53 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron_lib import context
+ from neutron_lib import exceptions as exc
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
+index ace2903..51adc12 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from testtools import matchers
+ 
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py
+index 0ede30b..bb54903 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from oslo_log import log as logging
+ 
+diff --git a/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py b/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+index b4b443d..dfbb251 100644
+--- a/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
++++ b/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import collections
+ import copy
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_host.py b/neutron/tests/unit/plugins/wrs/test_extension_host.py
+index 487d4dc..4eeb090 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_host.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_host.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import contextlib
+ import copy
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_interface.py b/neutron/tests/unit/plugins/wrs/test_extension_interface.py
+index ba526f4..de72503 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_interface.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_interface.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import copy
+ import uuid
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_manager.py b/neutron/tests/unit/plugins/wrs/test_extension_manager.py
+index 0374272..745da0f 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_manager.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_manager.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2014 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ from neutron.extensions import agent as ext_agent
+ from neutron.extensions import host as ext_host
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_pnet.py b/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+index c5085ee..11f2ea9 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+@@ -14,10 +14,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import contextlib
+ import copy
+diff --git a/neutron/tests/unit/plugins/wrs/test_host_driver.py b/neutron/tests/unit/plugins/wrs/test_host_driver.py
+index 7bba22a..1471edd 100644
+--- a/neutron/tests/unit/plugins/wrs/test_host_driver.py
++++ b/neutron/tests/unit/plugins/wrs/test_host_driver.py
+@@ -15,10 +15,6 @@
+ #
+ # Copyright (c) 2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import uuid
+ 
+diff --git a/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py b/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+index 97e7561..bdd5eef 100644
+--- a/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
++++ b/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+@@ -16,10 +16,6 @@
+ #
+ # Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+-# The right to copy, distribute, modify, or otherwise make use
+-# of this software may be licensed only pursuant to the terms
+-# of an applicable Wind River license agreement.
+-#
+ 
+ import functools
+ 
+-- 
+2.7.4
+

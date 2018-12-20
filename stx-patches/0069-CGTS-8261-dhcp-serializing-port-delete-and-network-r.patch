@@ -1,0 +1,141 @@
+From 309371d9d6d1c1aacca17c54e682ccc969a3b2d7 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 10 Nov 2017 10:44:50 -0600
+Subject: [PATCH 069/155] CGTS-8261: dhcp: serializing port delete and network
+ rpc calls
+
+The port delete events are not synchronized with network rpc events.  This
+creates a condition which makes it possible for a port delete event to be
+processed just before a network is queried from the server.  The order of
+operations is as follows:
+
+  1) a network is scheduled to an agent; a network rpc is sent to the agent
+
+  2) the agent queries the network data from the server
+
+  3) while that query is in progress a port on that network is deleted; a port
+  rpc is sent to the agent
+
+  4) that port delete rpc is received before the network query rpc completes
+
+  5) the port delete results in no action because the port was not present on the
+  agent
+
+  6) the network query finishes and adds the port to the cache (even though the
+  port has already been deleted)
+
+  7) some time passes and a new port is configured with the same IP address as
+  the port that was just deleted
+
+  8) the dhcp host file is corrupted with 2 entries for the same IP address.
+
+  9) dhcp queries for the newest port is rejected because of the duplicate entry
+  in the dhcp host file.
+
+The solution is to add the network_id to the port_delete_end rpc event so that
+the _net_lock(network_id) synchronization point can be acquired so that it is
+processed serially with other network related events.
+---
+ neutron/agent/dhcp/agent.py                          | 15 +++++----------
+ neutron/api/rpc/agentnotifiers/dhcp_rpc_agent_api.py |  3 ++-
+ neutron/tests/unit/agent/dhcp/test_agent.py          | 10 +++++-----
+ 3 files changed, 12 insertions(+), 16 deletions(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index 9c4897e..46cbba3 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -484,10 +484,7 @@ class DhcpAgent(manager.Manager):
+     def subnet_delete_end(self, context, payload):
+         """Handle the subnet.delete.end notification event."""
+         subnet_id = payload['subnet_id']
+-        network = self.cache.get_network_by_subnet_id(subnet_id)
+-        if not network:
+-            return
+-        with _net_lock(network.id):
++        with _net_lock(payload['network_id']):
+             network = self.cache.get_network_by_subnet_id(subnet_id)
+             if not network:
+                 return
+@@ -578,12 +575,10 @@ class DhcpAgent(manager.Manager):
+     @run_if_rpc_enabled()
+     def port_delete_end(self, context, payload):
+         """Handle the port.delete.end notification event."""
+-        port = self.cache.get_port_by_id(payload['port_id'])
+-        self.cache.deleted_ports.add(payload['port_id'])
+-        if not port:
+-            return
+-        with _net_lock(port.network_id):
+-            port = self.cache.get_port_by_id(payload['port_id'])
++        port_id = payload['port_id']
++        with _net_lock(payload['network_id']):
++            port = self.cache.get_port_by_id(port_id)
++            self.cache.deleted_ports.add(port_id)
+             if not port:
+                 return
+             network = self.cache.get_network_by_id(port.network_id)
+diff --git a/neutron/api/rpc/agentnotifiers/dhcp_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/dhcp_rpc_agent_api.py
+index 64a2a67..50a7fbb 100644
+--- a/neutron/api/rpc/agentnotifiers/dhcp_rpc_agent_api.py
++++ b/neutron/api/rpc/agentnotifiers/dhcp_rpc_agent_api.py
+@@ -295,7 +295,8 @@ class DhcpAgentNotifyAPI(object):
+         if method_name.endswith("_delete_end"):
+             if 'id' in obj_value:
+                 self._notify_agents(context, method_name,
+-                                    {obj_type + '_id': obj_value['id']},
++                                    {obj_type + '_id': obj_value['id'],
++                                     'network_id': network_id},
+                                     network_id)
+         else:
+             self._notify_agents(context, method_name, data, network_id)
+diff --git a/neutron/tests/unit/agent/dhcp/test_agent.py b/neutron/tests/unit/agent/dhcp/test_agent.py
+index 3561be8..385c159 100644
+--- a/neutron/tests/unit/agent/dhcp/test_agent.py
++++ b/neutron/tests/unit/agent/dhcp/test_agent.py
+@@ -1001,7 +1001,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
+                                    subnets=[fake_subnet1, fake_subnet3],
+                                    ports=[fake_port1]))
+ 
+-        payload = dict(subnet_id=fake_subnet1.id)
++        payload = dict(subnet_id=fake_subnet1.id, network_id=fake_network.id)
+         self.cache.get_network_by_subnet_id.return_value = prev_state
+         self.cache.get_network_by_id.return_value = prev_state
+         self.plugin.get_network_info.return_value = fake_network
+@@ -1097,7 +1097,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
+             [mock.call.call_driver('reload_allocations', fake_network)])
+ 
+     def test_port_delete_end(self):
+-        payload = dict(port_id=fake_port2.id)
++        payload = dict(port_id=fake_port2.id, network_id=fake_network.id)
+         self.cache.get_network_by_id.return_value = fake_network
+         self.cache.get_port_by_id.return_value = fake_port2
+ 
+@@ -1105,14 +1105,13 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
+         self.cache.assert_has_calls(
+             [mock.call.get_port_by_id(fake_port2.id),
+              mock.call.deleted_ports.add(fake_port2.id),
+-             mock.call.get_port_by_id(fake_port2.id),
+              mock.call.get_network_by_id(fake_network.id),
+              mock.call.remove_port(fake_port2)])
+         self.call_driver.assert_has_calls(
+             [mock.call.call_driver('reload_allocations', fake_network)])
+ 
+     def test_port_delete_end_unknown_port(self):
+-        payload = dict(port_id='unknown')
++        payload = dict(port_id='unknown', network_id='unknown')
+         self.cache.get_port_by_id.return_value = None
+ 
+         self.dhcp.port_delete_end(None, payload)
+@@ -1127,7 +1126,8 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
+         port['device_id'] = device_id
+         self.cache.get_network_by_id.return_value = fake_network
+         self.cache.get_port_by_id.return_value = port
+-        self.dhcp.port_delete_end(None, {'port_id': port.id})
++        self.dhcp.port_delete_end(None, {'port_id': port.id,
++                                         'network_id': fake_network.id})
+         self.call_driver.assert_has_calls(
+             [mock.call.call_driver('disable', fake_network)])
+ 
+-- 
+2.7.4
+

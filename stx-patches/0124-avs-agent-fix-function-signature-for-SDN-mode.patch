@@ -1,0 +1,27 @@
+From fabd593e7d6bca6eb66abbc2fc4168adb1162c76 Mon Sep 17 00:00:00 2001
+From: Jianqiang Shi <jianqiang.shi@windriver.com>
+Date: Thu, 1 Feb 2018 15:32:26 -0500
+Subject: [PATCH 124/155] avs:agent fix function signature for SDN mode
+
+fixed function signature for SDN mode, which prevents vswitch from init
+ports and interfaces in startup.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 07a5580..c51a7b5 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -2430,7 +2430,7 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         # Feature not supported in SDN mode so always return no data
+         return None
+ 
+-    def get_sfc_details(self, port_uuids):
++    def get_sfc_details(self, port_uuids, ports):
+         # Feature not supported in SDN mode so always return no data
+         return None
+ 
+-- 
+2.7.4
+

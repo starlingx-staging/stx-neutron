@@ -1,0 +1,88 @@
+From edf973126a6888a278ad7ce12b4b09f6ea1292e1 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 8 Nov 2016 08:41:14 -0500
+Subject: [PATCH 062/155] CGTS-5759: dvr: force admin state update before
+ distributed update
+
+To change the distributed attribute of a router the user must first disable the
+router by setting the admin-state-up attribute to False.  Until now the API
+allowed combining the change to both the distributed and admin-state-up
+attribute in the same request.  For transitions from centralized to distributed
+that works fine, but for distributed to centralized that causes an issue.
+
+The issue is that the notification to the nodes hosting the router depends on
+the state of the distributed attribute to decide whether a notification should
+go to the node hosting the centralized router, or to all nodes that require the
+distributed router.  When the distributed flag is set to false the notification
+code thinks it needs to only notify one node.  The result of that is that all
+other nodes remain configured as distributed routers for the given router.
+This condition affects communication to VM instances until the layer3 agent
+audit comes around and notices that the router is no longer in distributed mode
+and cleans up the node.  The neutron-avr-agent audit runs at 5 minute intervals
+so the condition could persist for up to 5 minutes.
+
+We could try to remember to old state of the router for the purpose of sending
+out the final notification to all nodes, but that would involve a more
+complicated change.  Instead, we have opted to enforce that the user update the
+admin-state-up to false prior to changing the distributed status.  Once the
+router is disabled they are then free to set the distributed attribute and
+re-enable the router in a single step.
+
+Before this change the following was possible:
+
+    neutron router-update tenant2-router --distributed false  --admin-state-up false
+    neutron router-update tenant2-router --admin-state-up true
+
+After this change the following is required:
+
+    neutron router-update tenant2-router --admin-state-up false
+    neutron router-update tenant2-router --distributed false  --admin-state-up true
+
+The same restriction applies to the Horizon workflow.
+
+Conflicts:
+	neutron/db/l3_dvr_db.py
+---
+ neutron/db/l3_dvr_db.py | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/db/l3_dvr_db.py b/neutron/db/l3_dvr_db.py
+index 6e9db9e..db1a990 100644
+--- a/neutron/db/l3_dvr_db.py
++++ b/neutron/db/l3_dvr_db.py
+@@ -83,7 +83,8 @@ class DVRResourceOperationHandler(object):
+         self.l3plugin.set_extra_attr_value(context, router_db, 'distributed',
+                                            dist)
+ 
+-    def _validate_router_migration(self, context, router_db, router_res):
++    def _validate_router_migration(self, context, router_db, router_res,
++                                   old_router=None):
+         """Allow transition only when admin_state_up=False"""
+         original_distributed_state = router_db.extra_attributes.distributed
+         requested_distributed_state = router_res.get('distributed', None)
+@@ -93,7 +94,11 @@ class DVRResourceOperationHandler(object):
+             requested_distributed_state != original_distributed_state)
+         if not distributed_changed:
+             return False
+-        if router_db.admin_state_up:
++        if old_router:
++            admin_state_up = old_router.get('admin_state_up')
++        else:
++            admin_state_up = router_db.admin_state_up
++        if admin_state_up:
+             msg = _("Cannot change the 'distributed' attribute of active "
+                     "routers. Please set router admin_state_up to False "
+                     "prior to upgrade")
+@@ -117,7 +122,8 @@ class DVRResourceOperationHandler(object):
+                                       router_id, router, router_db, old_router,
+                                       **kwargs):
+         """Event handler for router update migration to distributed."""
+-        if not self._validate_router_migration(context, router_db, router):
++        if not self._validate_router_migration(context, router_db, router,
++                                               old_router=old_router):
+             return
+ 
+         migrating_to_distributed = (
+-- 
+2.7.4
+

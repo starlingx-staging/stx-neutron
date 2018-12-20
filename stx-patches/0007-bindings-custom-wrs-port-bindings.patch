@@ -1,0 +1,441 @@
+From c647127d31be0c4880a8c44eb2c064d8e7db50f0 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Thu, 26 Oct 2017 14:15:09 -0400
+Subject: [PATCH 007/155] bindings: custom wrs port bindings
+
+This commit introduces new port bindings for mtu and mac filtering.
+This allows custom attributes to be passed around with port objects when
+they are queried on rpc api invocations.
+
+Conflicts:
+	etc/policy.json
+	neutron/agent/linux/interface.py
+	neutron/db/migration/alembic_migrations/versions/HEAD
+	neutron/db/migration/models/frozen.py
+	neutron/extensions/portbindings.py
+	neutron/plugins/ml2/plugin.py
+	neutron/tests/etc/policy.json
+
+Conflicts:
+	neutron/extensions/portbindings.py
+	neutron/plugins/ml2/models.py
+	neutron/plugins/ml2/plugin.py
+
+Conflicts:
+	neutron/plugins/ml2/plugin.py
+---
+ etc/policy.json                                    |  6 ++
+ neutron/agent/linux/interface.py                   |  8 ++
+ .../expand/230661bb0d02_ml2_dvr_port_bindings.py   | 44 ++++++++++
+ .../wrs_kilo_shipped/expand/wrs_kilo_shipped.py    |  2 +-
+ .../alembic_migrations/vswitch_init_ops.py         | 12 +++
+ neutron/extensions/portbindings.py                 |  4 +-
+ neutron/extensions/wrs_binding.py                  | 96 ++++++++++++++++++++++
+ neutron/plugins/ml2/models.py                      | 13 +++
+ neutron/plugins/ml2/plugin.py                      | 41 ++++++++-
+ neutron/tests/etc/policy.json                      |  6 ++
+ 10 files changed, 228 insertions(+), 4 deletions(-)
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/230661bb0d02_ml2_dvr_port_bindings.py
+ create mode 100644 neutron/extensions/wrs_binding.py
+
+diff --git a/etc/policy.json b/etc/policy.json
+index 744ca82..df2f686 100644
+--- a/etc/policy.json
++++ b/etc/policy.json
+@@ -93,6 +93,9 @@
+     "create_port:mac_learning_enabled": "rule:context_is_advsvc or rule:admin_or_network_owner",
+     "create_port:allowed_address_pairs": "rule:admin_or_network_owner",
+     "get_port": "rule:context_is_advsvc or rule:admin_owner_or_network_owner",
++    "create_port:wrs-binding:mtu": "rule:admin_only",
++    "create_port:wrs-binding:mac_filtering": "rule:admin_only",
++    "create_port:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "get_port:queue_id": "rule:admin_only",
+     "get_port:binding:vif_type": "rule:admin_only",
+     "get_port:binding:vif_details": "rule:admin_only",
+@@ -109,6 +112,9 @@
+     "update_port:allowed_address_pairs": "rule:admin_or_network_owner",
+     "update_port:data_plane_status": "rule:admin_or_data_plane_int",
+     "delete_port": "rule:context_is_advsvc or rule:admin_owner_or_network_owner",
++    "update_port:wrs-binding:mtu": "rule:admin_only",
++    "update_port:wrs-binding:mac_filtering": "rule:admin_only",
++    "update_port:wrs-tm:qos": "rule:admin_or_qos_owner",
+ 
+     "get_router:ha": "rule:admin_only",
+     "create_router": "rule:regular_user",
+diff --git a/neutron/agent/linux/interface.py b/neutron/agent/linux/interface.py
+index 88d6e67..ade5667 100644
+--- a/neutron/agent/linux/interface.py
++++ b/neutron/agent/linux/interface.py
+@@ -12,6 +12,14 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
+ 
+ import abc
+ import time
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/230661bb0d02_ml2_dvr_port_bindings.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/230661bb0d02_ml2_dvr_port_bindings.py
+new file mode 100644
+index 0000000..c9b1101
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/230661bb0d02_ml2_dvr_port_bindings.py
+@@ -0,0 +1,44 @@
++# Copyright 2015 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++
++"""ml2_dvr_port_bindings
++
++Revision ID: 230661bb0d02
++Revises: 10b1502ffd1c
++Create Date: 2015-03-17 20:31:21.124839
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = '230661bb0d02'
++down_revision = '3c52bf0d97f3'
++
++from alembic import op
++import sqlalchemy as sa
++
++
++def upgrade():
++    op.add_column('ml2_dvr_port_bindings',
++                  sa.Column('mac_filtering', sa.Boolean(), nullable=True))
++    op.add_column('ml2_dvr_port_bindings',
++                  sa.Column('mtu', sa.Integer(), nullable=True))
++    op.add_column('ml2_dvr_port_bindings',
++                  sa.Column('vif_model', sa.String(length=255), nullable=True))
++
++
++def downgrade():
++    op.drop_column('ml2_dvr_port_bindings', 'vif_model')
++    op.drop_column('ml2_dvr_port_bindings', 'mtu')
++    op.drop_column('ml2_dvr_port_bindings', 'mac_filtering')
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+index c0e801c..d8ebec4 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+@@ -29,7 +29,7 @@ Create Date: 2016-05-25 00:00:01.000000
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_kilo_shipped'
+-down_revision = '3c52bf0d97f3'
++down_revision = '230661bb0d02'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+index 724b139..168f182 100644
+--- a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
++++ b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+@@ -97,3 +97,15 @@ def upgrade():
+         sa.Column('name', sa.String(length=255), nullable=True),
+         sa.Column('value', sa.String(length=255), nullable=True),
+         sa.PrimaryKeyConstraint('id'))
++
++    op.add_column(
++        'ml2_port_bindings',
++        sa.Column('vif_model', sa.String(length=255), nullable=True))
++
++    op.add_column(
++        'ml2_port_bindings',
++        sa.Column('mac_filtering', sa.Boolean(), nullable=True))
++
++    op.add_column(
++        'ml2_port_bindings',
++        sa.Column('mtu', sa.Integer(), nullable=True))
+diff --git a/neutron/extensions/portbindings.py b/neutron/extensions/portbindings.py
+index df5af4a..9d33e52 100644
+--- a/neutron/extensions/portbindings.py
++++ b/neutron/extensions/portbindings.py
+@@ -17,6 +17,9 @@ from neutron_lib.api.definitions import portbindings
+ from neutron_lib.api import extensions
+ 
+ 
++VIF_TYPE_AVS = 'avs'
++
++
+ class Portbindings(extensions.APIExtensionDescriptor):
+     """Extension class supporting port bindings.
+ 
+@@ -25,5 +28,4 @@ class Portbindings(extensions.APIExtensionDescriptor):
+ 
+     With admin rights one will be able to update and read the values.
+     """
+-
+     api_definition = portbindings
+diff --git a/neutron/extensions/wrs_binding.py b/neutron/extensions/wrs_binding.py
+new file mode 100644
+index 0000000..2794f9c
+--- /dev/null
++++ b/neutron/extensions/wrs_binding.py
+@@ -0,0 +1,96 @@
++# Copyright (c) 2012 OpenStack Foundation.
++# All rights reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from neutron_lib.api import extensions as api_extensions
++from neutron_lib import constants
++
++# The MTU value is associated to the network to which the port is attached
++MTU = 'wrs-binding:mtu'
++
++# The VIF model describes the type of emulated device in the guest.  This is
++# analoguous to the hw_vif_model property in Nova.  For clarity, the
++# 'vif_type' above represents the type of virtual switch that runs on the
++# host, and this field represents type type of hardware emulated in the
++# guest.
++VIF_MODEL = 'wrs-binding:vif_model'
++
++VIF_MODEL_DEFAULT = 'default'
++VIF_MODEL_PCI_PASSTHROUGH = 'pci-passthrough'
++
++# The mac_filtering attribute describes whether the MAC filtering was enabled
++# as an attribute of the project that this port is owned by.
++MAC_FILTERING = 'wrs-binding:mac_filtering'
++
++VIF_TYPE_AVS = 'avs'
++
++EXTENDED_ATTRIBUTES_2_0 = {
++    'ports': {
++        VIF_MODEL: {'allow_post': True, 'allow_put': True,
++                    'default': constants.ATTR_NOT_SPECIFIED,
++                    'enforce_policy': True,
++                    'is_visible': True},
++        MTU: {'allow_post': False, 'allow_put': False,
++              'default': constants.ATTR_NOT_SPECIFIED,
++              'enforce_policy': True,
++              'is_visible': True},
++        MAC_FILTERING: {'allow_post': False, 'allow_put': False,
++              'default': constants.ATTR_NOT_SPECIFIED,
++              'enforce_policy': True,
++              'is_visible': True},
++    }
++}
++
++
++class Wrs_binding(api_extensions.ExtensionDescriptor):
++    """Extension class supporting port bindings.
++
++    This class is used by neutron's extension framework to make
++    metadata about the port bindings available to external applications.
++
++    With admin rights one will be able to update and read the values.
++    """
++
++    @classmethod
++    def get_name(cls):
++        return "wrs-port-binding"
++
++    @classmethod
++    def get_alias(cls):
++        return "wrs-binding"
++
++    @classmethod
++    def get_description(cls):
++        return "WRS Port Binding Extensions."
++
++    @classmethod
++    def get_namespace(cls):
++        return "http://docs.windriver.org/tis/ext/wrs-binding/v1"
++
++    @classmethod
++    def get_updated(cls):
++        return "2014-10-01T12:00:00-00:00"
++
++    def get_extended_resources(self, version):
++        if version == "2.0":
++            return EXTENDED_ATTRIBUTES_2_0
++        else:
++            return {}
+diff --git a/neutron/plugins/ml2/models.py b/neutron/plugins/ml2/models.py
+index ffc4d2f..81ca4b9 100644
+--- a/neutron/plugins/ml2/models.py
++++ b/neutron/plugins/ml2/models.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from neutron_lib.api.definitions import portbindings
+ from neutron_lib.db import model_base
+@@ -51,6 +58,9 @@ class PortBinding(model_base.BASEV2):
+     status = sa.Column(sa.String(16), nullable=False,
+                        default=constants.PORT_BINDING_STATUS_ACTIVE,
+                        server_default=constants.PORT_BINDING_STATUS_ACTIVE)
++    vif_model = sa.Column(sa.String(255), nullable=True)
++    mtu = sa.Column(sa.Integer, nullable=True)
++    mac_filtering = sa.Column(sa.Boolean, default=False, nullable=True)
+ 
+     # Add a relationship to the Port model in order to instruct SQLAlchemy to
+     # eagerly load port bindings
+@@ -112,6 +122,9 @@ class DistributedPortBinding(model_base.BASEV2):
+     vif_type = sa.Column(sa.String(64), nullable=False)
+     vif_details = sa.Column(sa.String(4095), nullable=False, default='',
+                             server_default='')
++    vif_model = sa.Column(sa.String(255), nullable=True)
++    mtu = sa.Column(sa.Integer, nullable=True)
++    mac_filtering = sa.Column(sa.Boolean, default=False, nullable=True)
+     vnic_type = sa.Column(sa.String(64), nullable=False,
+                           default=portbindings.VNIC_NORMAL,
+                           server_default=portbindings.VNIC_NORMAL)
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 53e7048..9936a77 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -95,6 +95,7 @@ from neutron.extensions import availability_zone as az_ext
+ from neutron.extensions import netmtu_writable as mtu_ext
+ from neutron.extensions import providernet as provider
+ from neutron.extensions import vlantransparent
++from neutron.extensions import wrs_binding
+ from neutron.extensions import wrs_provider
+ from neutron.plugins.common import utils as p_utils
+ from neutron.plugins.ml2.common import exceptions as ml2_exc
+@@ -173,7 +174,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                                     "network_availability_zone",
+                                     "default-subnetpools",
+                                     "subnet-service-types",
+-                                    "host", "wrs-provider", "wrs-tenant"]
++                                    "host", "wrs-provider", "wrs-tenant",
++                                    "wrs-binding"]
+ 
+     @property
+     def supported_extension_aliases(self):
+@@ -362,6 +364,24 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             binding.vnic_type = vnic_type
+             changes = True
+ 
++        vif_model = attrs and attrs.get(wrs_binding.VIF_MODEL)
++        if (validators.is_attr_set(vif_model) and
++            binding.vif_model != vif_model):
++            binding.vif_model = vif_model
++            changes = True
++
++        mtu = attrs and attrs.get(wrs_binding.MTU)
++        if (validators.is_attr_set(mtu) and
++            binding.mtu != mtu):
++            binding.mtu = mtu
++            changes = True
++
++        mac_filtering = attrs and attrs.get(wrs_binding.MAC_FILTERING)
++        if (validators.is_attr_set(mac_filtering) and
++            binding.mac_filtering != mac_filtering):
++            binding.mac_filtering = mac_filtering
++            changes = True
++
+         # treat None as clear of profile.
+         profile = None
+         if attrs and portbindings.PROFILE in attrs:
+@@ -625,6 +645,9 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             port[portbindings.HOST_ID] = binding.host
+             port[portbindings.VIF_TYPE] = binding.vif_type
+             port[portbindings.VIF_DETAILS] = self._get_vif_details(binding)
++        port[wrs_binding.VIF_MODEL] = binding.vif_model
++        port[wrs_binding.MTU] = binding.mtu
++        port[wrs_binding.MAC_FILTERING] = binding.mac_filtering
+ 
+     def _get_vif_details(self, binding):
+         if binding.vif_details:
+@@ -1189,6 +1212,17 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 context, port['id'], resources.PORT,
+                 provisioning_blocks.DHCP_ENTITY)
+ 
++    def _set_port_mtu(self, context, port, network, attrs):
++        # The port inherits the MTU value of its network
++        attrs[wrs_binding.MTU] = network.get(api.MTU)
++
++    def _set_port_mac_filtering(self, context, port, attrs):
++        # The port inherits the MAC filtering value of its project/tenant
++        mac_filtering = self.setting_driver.get_tenant_setting(
++            context, setting.ENGINE.settings,
++            port['tenant_id'], setting.MAC_FILTERING)
++        attrs[wrs_binding.MAC_FILTERING] = mac_filtering
++
+     def _before_create_port(self, context, port):
+         attrs = port[port_def.RESOURCE_NAME]
+         if not attrs.get('status'):
+@@ -1216,8 +1250,11 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             binding = db.add_port_binding(context, result['id'])
+             mech_context = driver_context.PortContext(self, context, result,
+                                                       network, binding, None)
+-            self._process_port_binding(mech_context, attrs)
++            # Set default values for derived attributes
++            self._set_port_mtu(context, result, network, attrs)
++            self._set_port_mac_filtering(context, result, attrs)
+ 
++            self._process_port_binding(mech_context, attrs)
+             result[addr_pair.ADDRESS_PAIRS] = (
+                 self._process_create_allowed_address_pairs(
+                     context, result,
+diff --git a/neutron/tests/etc/policy.json b/neutron/tests/etc/policy.json
+index 744ca82..df2f686 100644
+--- a/neutron/tests/etc/policy.json
++++ b/neutron/tests/etc/policy.json
+@@ -93,6 +93,9 @@
+     "create_port:mac_learning_enabled": "rule:context_is_advsvc or rule:admin_or_network_owner",
+     "create_port:allowed_address_pairs": "rule:admin_or_network_owner",
+     "get_port": "rule:context_is_advsvc or rule:admin_owner_or_network_owner",
++    "create_port:wrs-binding:mtu": "rule:admin_only",
++    "create_port:wrs-binding:mac_filtering": "rule:admin_only",
++    "create_port:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "get_port:queue_id": "rule:admin_only",
+     "get_port:binding:vif_type": "rule:admin_only",
+     "get_port:binding:vif_details": "rule:admin_only",
+@@ -109,6 +112,9 @@
+     "update_port:allowed_address_pairs": "rule:admin_or_network_owner",
+     "update_port:data_plane_status": "rule:admin_or_data_plane_int",
+     "delete_port": "rule:context_is_advsvc or rule:admin_owner_or_network_owner",
++    "update_port:wrs-binding:mtu": "rule:admin_only",
++    "update_port:wrs-binding:mac_filtering": "rule:admin_only",
++    "update_port:wrs-tm:qos": "rule:admin_or_qos_owner",
+ 
+     "get_router:ha": "rule:admin_only",
+     "create_router": "rule:regular_user",
+-- 
+2.7.4
+

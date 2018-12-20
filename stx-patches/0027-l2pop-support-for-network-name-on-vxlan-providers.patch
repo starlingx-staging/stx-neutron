@@ -1,0 +1,269 @@
+From 1e368a36af6c193f4ae3a319a5eb5bcd01b43947 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 27 Jul 2017 12:29:53 -0500
+Subject: [PATCH 027/155] l2pop: support for network name on vxlan providers
+
+Upstream VXLAN provider networks do not support 'physical_network' attributes;
+meaning that they assume that the VNI space is global and accessible by any
+interface on a node that supports that particular provider network.
+
+In our system, we allow partitioning of vswitch instances so that provider
+networks are constrained to a specific device.  This allows customers to have
+overlapping VNI instance in different parts of their system.
+
+This commit extends the l2pop db and mech driver so that the physical network
+name is part of all transactions.
+
+Conflicts:
+	neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+---
+ neutron/plugins/ml2/drivers/l2pop/db.py            | 28 +++++++---
+ neutron/plugins/ml2/drivers/l2pop/mech_driver.py   | 59 ++++++++++++++++------
+ .../plugins/ml2/drivers/l2pop/test_mech_driver.py  |  3 +-
+ 3 files changed, 66 insertions(+), 24 deletions(-)
+
+diff --git a/neutron/plugins/ml2/drivers/l2pop/db.py b/neutron/plugins/ml2/drivers/l2pop/db.py
+index 894a4ba..19926ef 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/db.py
++++ b/neutron/plugins/ml2/drivers/l2pop/db.py
+@@ -28,15 +28,21 @@ HA_ROUTER_PORTS = (const.DEVICE_OWNER_HA_REPLICATED_INT,
+                    const.DEVICE_OWNER_ROUTER_SNAT)
+ 
+ 
+-def get_agent_ip_by_host(session, agent_host):
++def get_agent_ip_by_host(session, agent_host, physical_network=None):
+     agent = get_agent_by_host(session, agent_host)
+     if agent:
+-        return get_agent_ip(agent)
++        return get_agent_ip(agent, physical_network=physical_network)
+ 
+ 
+-def get_agent_ip(agent):
++def get_agent_ip(agent, physical_network=None):
+     configuration = jsonutils.loads(agent.configurations)
+-    return configuration.get('tunneling_ip')
++    if 'tunneling_ip' in configuration:
++        return configuration.get('tunneling_ip')
++    elif 'tunneling_ips' in configuration:
++        tunneling_ips = configuration.get('tunneling_ips')
++        return tunneling_ips.get(physical_network)
++    else:
++        return None
+ 
+ 
+ def get_agent_uptime(agent):
+@@ -54,6 +60,12 @@ def get_agent_l2pop_network_types(agent):
+     return configuration.get('l2pop_network_types')
+ 
+ 
++def agent_supports_tunneling(agent):
++    configuration = jsonutils.loads(agent.configurations)
++    return ('tunneling_ip' in configuration or
++            'tunneling_ips' in configuration)
++
++
+ def get_agent_by_host(session, agent_host):
+     """Return a L2 agent on the host."""
+ 
+@@ -61,7 +73,7 @@ def get_agent_by_host(session, agent_host):
+         query = session.query(agent_model.Agent)
+         query = query.filter(agent_model.Agent.host == agent_host)
+     for agent in query:
+-        if get_agent_ip(agent):
++        if agent_supports_tunneling(agent):
+             return agent
+ 
+ 
+@@ -100,7 +112,7 @@ def get_nondistributed_active_network_ports(session, network_id):
+     ha_iface_ids_query = _get_ha_router_interface_ids(session, network_id)
+     query = query.filter(models_v2.Port.id.notin_(ha_iface_ids_query))
+     return [(bind, agent) for bind, agent in query.all()
+-            if get_agent_ip(agent)]
++            if agent_supports_tunneling(agent)]
+ 
+ 
+ def get_dvr_active_network_ports(session, network_id):
+@@ -118,7 +130,7 @@ def get_dvr_active_network_ports(session, network_id):
+                              models_v2.Port.device_owner ==
+                              const.DEVICE_OWNER_DVR_INTERFACE)
+     return [(bind, agent) for bind, agent in query.all()
+-            if get_agent_ip(agent)]
++            if agent_supports_tunneling(agent)]
+ 
+ 
+ def get_distributed_active_network_ports(session, network_id):
+@@ -152,7 +164,7 @@ def get_ha_agents(session, network_id=None, router_id=None):
+     agents_query = session.query(agent_model.Agent)
+     agents_query = agents_query.filter(agent_model.Agent.host.in_(query))
+     return [agent for agent in agents_query
+-            if get_agent_ip(agent)]
++            if agent_supports_tunneling(agent)]
+ 
+ 
+ def get_ha_agents_by_router_id(session, router_id):
+diff --git a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+index a4a7d05..713e94f 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+@@ -58,13 +58,14 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         return True
+ 
+     def _get_ha_port_agents_fdb(
+-            self, session, network_id, router_id):
++            self, session, network_id, router_id, physical_network=None):
+         other_fdb_ports = {}
+         for agent in l2pop_db.get_ha_agents_by_router_id(session, router_id):
+             agent_active_ports = l2pop_db.get_agent_network_active_port_count(
+                 session, agent.host, network_id)
+             if agent_active_ports == 0:
+-                ip = l2pop_db.get_agent_ip(agent)
++                ip = l2pop_db.get_agent_ip(
++                    agent, physical_network=physical_network)
+                 other_fdb_ports[ip] = [const.FLOODING_ENTRY]
+ 
+         return other_fdb_ports
+@@ -104,6 +105,12 @@ class L2populationMechanismDriver(api.MechanismDriver):
+             return orig_chg_ips, port_chg_ips
+ 
+     def _fixed_ips_changed(self, context, orig, port, diff_ips):
++        segment = context.bottom_bound_segment
++        if not segment:
++            LOG.warning(("No segment for port {} diff {}").format(
++                context.current, diff_ips))
++            return
++
+         orig_ips, port_ips = diff_ips
+ 
+         if (port['device_owner'] == const.DEVICE_OWNER_DVR_INTERFACE):
+@@ -114,8 +121,10 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         if not agent_host:
+             return
+ 
+-        agent_ip = l2pop_db.get_agent_ip_by_host(db_api.get_reader_session(),
+-                                                 agent_host)
++        agent_ip = l2pop_db.get_agent_ip_by_host(
++            db_api.get_reader_session(),
++            agent_host,
++            physical_network=segment.get('physical_network'))
+ 
+         orig_mac_ip = [l2pop_rpc.PortInfo(mac_address=port['mac_address'],
+                                           ip_address=ip)
+@@ -194,6 +203,12 @@ class L2populationMechanismDriver(api.MechanismDriver):
+                       "to any segment", {'port': port_id, 'agent': agent})
+             return False
+ 
++        if not agent:
++            LOG.debug("Port %(port)s updated by agent %(agent)s which does "
++                      "not support tunneling",
++                      {'port': port_id, 'agent': agent})
++            return False
++
+         network_types = l2pop_db.get_agent_l2pop_network_types(agent)
+         if network_types is None:
+             network_types = l2pop_db.get_agent_tunnel_types(agent)
+@@ -207,6 +222,10 @@ class L2populationMechanismDriver(api.MechanismDriver):
+                              {'segment_id': segment['segmentation_id'],
+                               'network_type': segment['network_type'],
+                               'ports': {}}}
++        physical_network = segment.get('physical_network')
++        if physical_network:
++            agent_fdb_entries[network_id]['physical_network'] = (
++                physical_network)
+         tunnel_network_ports = (
+             l2pop_db.get_distributed_active_network_ports(session, network_id))
+         fdb_network_ports = (
+@@ -215,21 +234,26 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         ports = agent_fdb_entries[network_id]['ports']
+         ports.update(self._get_tunnels(
+             fdb_network_ports + tunnel_network_ports,
+-            agent.host))
++            agent.host,
++            physical_network=physical_network))
+         for agent_ip, fdbs in ports.items():
+             for binding, agent in fdb_network_ports:
+-                if l2pop_db.get_agent_ip(agent) == agent_ip:
++                ip = l2pop_db.get_agent_ip(
++                    agent, physical_network=segment.get('physical_network'))
++                if ip == agent_ip:
+                     fdbs.extend(self._get_port_fdb_entries(binding.port))
+ 
+         return agent_fdb_entries
+ 
+-    def _get_tunnels(self, tunnel_network_ports, exclude_host):
++    def _get_tunnels(self, tunnel_network_ports, exclude_host,
++                     physical_network=None):
+         agents = {}
+         for __, agent in tunnel_network_ports:
+             if agent.host == exclude_host:
+                 continue
+ 
+-            ip = l2pop_db.get_agent_ip(agent)
++            ip = l2pop_db.get_agent_ip(
++                agent, physical_network=physical_network)
+             if not ip:
+                 LOG.debug("Unable to retrieve the agent ip, check "
+                           "the agent %s configuration.", agent.host)
+@@ -273,10 +297,11 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         agent_active_ports = l2pop_db.get_agent_network_active_port_count(
+             session, agent_host, network_id)
+ 
+-        agent_ip = l2pop_db.get_agent_ip(agent)
+         segment = context.bottom_bound_segment
+         if not self._validate_segment(segment, port['id'], agent):
+             return
++        agent_ip = l2pop_db.get_agent_ip(
++            agent, physical_network=segment.get('physical_network'))
+         other_fdb_entries = self._get_fdb_entries_template(
+             segment, agent_ip, network_id)
+         other_fdb_ports = other_fdb_entries[network_id]['ports']
+@@ -325,7 +350,8 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         if not self._validate_segment(segment, port['id'], agent):
+             return
+ 
+-        agent_ip = l2pop_db.get_agent_ip(agent)
++        agent_ip = l2pop_db.get_agent_ip(
++            agent, physical_network=segment.get('physical_network'))
+         other_fdb_entries = self._get_fdb_entries_template(
+             segment, agent_ip, port['network_id'])
+         if agent_active_ports == 0:
+@@ -345,8 +371,11 @@ class L2populationMechanismDriver(api.MechanismDriver):
+ 
+     @classmethod
+     def _get_fdb_entries_template(cls, segment, agent_ip, network_id):
+-        return {
+-            network_id:
+-                {'segment_id': segment['segmentation_id'],
+-                 'network_type': segment['network_type'],
+-                 'ports': {agent_ip: []}}}
++        template = {network_id:
++                    {'segment_id': segment['segmentation_id'],
++                     'network_type': segment['network_type'],
++                     'ports': {agent_ip: []}}}
++        physical_network = segment.get('physical_network')
++        if physical_network:
++            template[network_id]['physical_network'] = physical_network
++        return template
+diff --git a/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py b/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py
+index 11f0431..50df438 100644
+--- a/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py
++++ b/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py
+@@ -528,6 +528,7 @@ class TestL2PopulationRpcTestCase(test_plugin.Ml2PluginV2TestCase):
+                                                    p1['mac_address'],
+                                                    p1_ips[0])]},
+                                  'network_type': 'vlan',
++                                 'physical_network': 'physnet1',
+                                  'segment_id': 2}}
+ 
+                     self.mock_fanout.assert_called_with(
+@@ -1251,7 +1252,7 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
+             self._mock_network_ports(HOST + '1', [None]))
+         agent_ips[tunnel_agent] = '10.0.0.1'
+ 
+-        def agent_ip_side_effect(agent):
++        def agent_ip_side_effect(agent, **kwargs):
+             return agent_ips[agent]
+ 
+         with mock.patch.object(l2pop_db, 'get_agent_ip',
+-- 
+2.7.4
+

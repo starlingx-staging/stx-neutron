@@ -1,0 +1,94 @@
+From 3c2136135f545851842ebf5f596bc6c619f89012 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 29 Sep 2016 11:12:18 -0400
+Subject: [PATCH 041/155] CGTS-5429: dhcp: event driven periodic resync task
+
+The periodic resync task currently waits on a timer to determine if a resync is
+necessary.  This causes a potentially long delay before an agent gets new work
+via an agent_updated RPC call.  Changing this to a threading.Event.wait() we
+are forcing the agent to act on the resync request immediately therefore
+decreasing how much time is needed before DHCP services are available.
+
+Conflicts:
+	neutron/agent/dhcp/agent.py
+	neutron/tests/unit/agent/dhcp/test_agent.py
+---
+ neutron/agent/dhcp/agent.py                 |  6 +++++-
+ neutron/tests/unit/agent/dhcp/test_agent.py | 23 +++++++++++------------
+ 2 files changed, 16 insertions(+), 13 deletions(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index be471c1..0a3ae60 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -16,6 +16,7 @@
+ import collections
+ import functools
+ import os
++import threading
+ 
+ import eventlet
+ from neutron_lib import constants
+@@ -105,6 +106,7 @@ class DhcpAgent(manager.Manager):
+         self.needs_resync_reasons = collections.defaultdict(list)
+         self.dhcp_ready_ports = set()
+         self.conf = conf or cfg.CONF
++        self._periodic_resync_event = threading.Event()
+         self.cache = NetworkCache()
+         self.dhcp_driver_cls = importutils.import_class(self.conf.dhcp_driver)
+         self.plugin_rpc = DhcpPluginApi(topics.PLUGIN, self.conf.host)
+@@ -207,6 +209,7 @@ class DhcpAgent(manager.Manager):
+         specified, resync all networks.
+         """
+         self.needs_resync_reasons[network_id].append(reason)
++        self._periodic_resync_event.set()
+ 
+     @_sync_lock
+     def sync_state(self, networks=None):
+@@ -277,7 +280,8 @@ class DhcpAgent(manager.Manager):
+     def _periodic_resync_helper(self):
+         """Resync the dhcp state at the configured interval."""
+         while True:
+-            eventlet.sleep(self.conf.resync_interval)
++            if self._periodic_resync_event.wait(self.conf.resync_interval):
++                self._periodic_resync_event.clear()
+             if self.needs_resync_reasons:
+                 # be careful to avoid a race with additions to list
+                 # from other threads
+diff --git a/neutron/tests/unit/agent/dhcp/test_agent.py b/neutron/tests/unit/agent/dhcp/test_agent.py
+index 428da95..3561be8 100644
+--- a/neutron/tests/unit/agent/dhcp/test_agent.py
++++ b/neutron/tests/unit/agent/dhcp/test_agent.py
+@@ -484,18 +484,17 @@ class TestDhcpAgent(base.BaseTestCase):
+                              ['Agent has just been revived'])
+ 
+     def test_periodic_resync_helper(self):
+-        with mock.patch.object(dhcp_agent.eventlet, 'sleep') as sleep:
+-            dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
+-            resync_reasons = collections.OrderedDict(
+-                (('a', 'reason1'), ('b', 'reason2')))
+-            dhcp.needs_resync_reasons = resync_reasons
+-            with mock.patch.object(dhcp, 'sync_state') as sync_state:
+-                sync_state.side_effect = RuntimeError
+-                with testtools.ExpectedException(RuntimeError):
+-                    dhcp._periodic_resync_helper()
+-                sync_state.assert_called_once_with(resync_reasons.keys())
+-                sleep.assert_called_once_with(dhcp.conf.resync_interval)
+-                self.assertEqual(0, len(dhcp.needs_resync_reasons))
++        dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
++        resync_reasons = collections.OrderedDict(
++            (('a', 'reason1'), ('b', 'reason2')))
++        dhcp.needs_resync_reasons = resync_reasons
++        with mock.patch.object(dhcp, 'sync_state') as sync_state:
++            sync_state.side_effect = RuntimeError
++            with testtools.ExpectedException(RuntimeError):
++                dhcp._periodic_resync_helper()
++            sync_state.assert_called_once_with(resync_reasons.keys())
++
++            self.assertEqual(0, len(dhcp.needs_resync_reasons))
+ 
+     def test_populate_cache_on_start_without_active_networks_support(self):
+         # emul dhcp driver that doesn't support retrieving of active networks
+-- 
+2.7.4
+

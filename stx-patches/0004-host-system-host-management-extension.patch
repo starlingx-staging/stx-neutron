@@ -1,0 +1,3403 @@
+From 566b640ba1d1bca7baa9dd42fb04db9f3f46392d Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 19 May 2016 10:34:25 -0400
+Subject: [PATCH 004/155] host: system host management extension
+
+This extension adds host management to the neutron API.  It is expected that
+another entity (e.g., VIM or mtce) is sending host update notifications to let
+neutron know when hosts are added, deleted or when they change state.  It also
+allows for that external entity to tell neutron which provider networks are
+associated to which host.  This enables neutron to make scheduling decisions
+about where dhcp and router services can be scheduled.
+
+US94388: Only call agent_updated if exists.
+
+CGTS-7240: hosts: cache host state in agent audit
+
+Since there are 5 agents per host we want to avoid calling the host
+query 5 times for each host.  To this end we are going to cache the host
+availability locally and only query the DB on the first agent on that
+host.
+
+Conflicts:
+	etc/policy.json
+	neutron/api/rpc/handlers/dhcp_rpc.py
+	neutron/common/constants.py
+	neutron/db/agents_db.py
+	neutron/db/l3_agentschedulers_db.py
+	neutron/db/l3_db.py
+	neutron/db/migration/models/head.py
+	neutron/plugins/ml2/rpc.py
+	neutron/scheduler/l3_agent_scheduler.py
+	neutron/services/l3_router/l3_router_plugin.py
+	neutron/tests/etc/policy.json
+	neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
+---
+ etc/policy.json                                    |   2 +
+ neutron/agent/fm.py                                |  37 ++
+ neutron/agent/rpc.py                               |  14 +
+ .../api/rpc/agentnotifiers/host_rpc_agent_api.py   |  57 ++
+ neutron/api/rpc/handlers/dhcp_rpc.py               |   5 +
+ neutron/api/rpc/handlers/l3_rpc.py                 |   5 +
+ neutron/common/constants.py                        |  17 +
+ neutron/common/topics.py                           |   8 +
+ neutron/conf/common.py                             |   8 +-
+ neutron/db/agents_db.py                            |   9 +
+ neutron/db/agentschedulers_db.py                   |  35 +-
+ neutron/db/hosts_db.py                             | 632 +++++++++++++++++++++
+ neutron/db/l3_agentschedulers_db.py                |  29 +-
+ neutron/db/l3_db.py                                |  36 +-
+ neutron/db/l3_host_db.py                           | 172 ++++++
+ .../alembic_migrations/versions/kilo_initial.py    |   2 +
+ .../expand/354db87e3225_nsxv_vdr_metadata.py       |   2 +-
+ ...502ffd1c_host_interface_providernet_bindings.py |  70 +++
+ .../expand/428d71c78e01_enum_table_column_fixes.py |  87 +++
+ .../52eb37bd3d77_hosts_table_primary_key_fix.py    |  52 ++
+ .../wrs_kilo_shipped/expand/wrs_kilo_shipped.py    |   5 +-
+ .../alembic_migrations/vswitch_init_ops.py         |  58 ++
+ neutron/db/migration/models/head.py                |   1 +
+ neutron/drivers/__init__.py                        |   0
+ neutron/drivers/fm.py                              | 107 ++++
+ neutron/drivers/host.py                            |  74 +++
+ neutron/extensions/host.py                         | 233 ++++++++
+ neutron/extensions/l3agentscheduler.py             |  12 +
+ neutron/extensions/wrs_net.py                      |  74 +++
+ neutron/plugins/ml2/plugin.py                      |  23 +-
+ neutron/plugins/ml2/rpc.py                         |  26 +
+ neutron/plugins/wrs/__init__.py                    |   0
+ neutron/plugins/wrs/drivers/__init__.py            |   0
+ neutron/plugins/wrs/drivers/fm.py                  | 222 ++++++++
+ neutron/plugins/wrs/drivers/host.py                | 183 ++++++
+ neutron/scheduler/dhcp_agent_scheduler.py          |   7 +
+ neutron/scheduler/dhcp_host_agent_scheduler.py     |  54 ++
+ neutron/scheduler/l3_agent_scheduler.py            |  21 +-
+ neutron/scheduler/l3_host_agent_scheduler.py       |  95 ++++
+ neutron/services/l3_router/l3_router_plugin.py     |   7 +-
+ neutron/tests/etc/policy.json                      |   2 +
+ neutron/tests/unit/plugins/wrs/__init__.py         |   0
+ neutron/tests/unit/plugins/wrs/test_host_driver.py | 109 ++++
+ neutron/tests/unit/plugins/wrs/test_wrs_plugin.py  |  90 +++
+ .../unit/scheduler/test_l3_agent_scheduler.py      |   7 +-
+ 45 files changed, 2670 insertions(+), 19 deletions(-)
+ create mode 100644 neutron/agent/fm.py
+ create mode 100644 neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py
+ create mode 100644 neutron/db/hosts_db.py
+ create mode 100644 neutron/db/l3_host_db.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py
+ create mode 100644 neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+ create mode 100644 neutron/drivers/__init__.py
+ create mode 100644 neutron/drivers/fm.py
+ create mode 100644 neutron/drivers/host.py
+ create mode 100644 neutron/extensions/host.py
+ create mode 100644 neutron/extensions/wrs_net.py
+ create mode 100644 neutron/plugins/wrs/__init__.py
+ create mode 100644 neutron/plugins/wrs/drivers/__init__.py
+ create mode 100644 neutron/plugins/wrs/drivers/fm.py
+ create mode 100644 neutron/plugins/wrs/drivers/host.py
+ create mode 100644 neutron/scheduler/dhcp_host_agent_scheduler.py
+ create mode 100644 neutron/scheduler/l3_host_agent_scheduler.py
+ create mode 100644 neutron/tests/unit/plugins/wrs/__init__.py
+ create mode 100644 neutron/tests/unit/plugins/wrs/test_host_driver.py
+ create mode 100644 neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+
+diff --git a/etc/policy.json b/etc/policy.json
+index c59e075..792c43a 100644
+--- a/etc/policy.json
++++ b/etc/policy.json
+@@ -107,6 +107,8 @@
+     "update_router": "rule:admin_or_owner",
+     "update_router:external_gateway_info": "rule:admin_or_owner",
+     "update_router:external_gateway_info:network_id": "rule:admin_or_owner",
++    "get_router:wrs-net:host": "rule:admin_only",
++    "get_routers:wrs-net:host": "rule:admin_only",
+     "update_router:external_gateway_info:enable_snat": "rule:admin_only",
+     "update_router:distributed": "rule:admin_only",
+     "update_router:ha": "rule:admin_only",
+diff --git a/neutron/agent/fm.py b/neutron/agent/fm.py
+new file mode 100644
+index 0000000..3c77db7
+--- /dev/null
++++ b/neutron/agent/fm.py
+@@ -0,0 +1,37 @@
++# Copyright (c) 2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from oslo_config import cfg
++from oslo_log import log as logging
++from oslo_utils import importutils
++
++LOG = logging.getLogger(__name__)
++
++
++class FmAgentMixin(object):
++    """
++    A mix-in that enables Fault management support in agent implementations.
++    """
++    def init_fm(self, *args, **kwargs):
++        fm_driver = cfg.CONF.fm_driver
++        LOG.debug("Starting fault management driver %s", fm_driver)
++        self.fm_driver = importutils.import_object(fm_driver, *args, **kwargs)
+diff --git a/neutron/agent/rpc.py b/neutron/agent/rpc.py
+index 1440942..c1cec85 100644
+--- a/neutron/agent/rpc.py
++++ b/neutron/agent/rpc.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from datetime import datetime
+ import itertools
+@@ -114,6 +121,13 @@ class PluginApi(object):
+         return cctxt.call(context, 'get_device_details', device=device,
+                           agent_id=agent_id, host=host)
+ 
++    def get_host_details(self, context, host, agent_id):
++        cctxt = self.client.prepare()
++        return cctxt.call(context,
++                          'get_host_details',
++                          host=host,
++                          agent_id=agent_id)
++
+     def get_devices_details_list(self, context, devices, agent_id, host=None):
+         cctxt = self.client.prepare(version='1.3')
+         return cctxt.call(context, 'get_devices_details_list',
+diff --git a/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py
+new file mode 100644
+index 0000000..b1d68f1
+--- /dev/null
++++ b/neutron/api/rpc/agentnotifiers/host_rpc_agent_api.py
+@@ -0,0 +1,57 @@
++# Copyright (c) 2013 OpenStack Foundation.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++# implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from oslo_log import log as logging
++import oslo_messaging
++
++from neutron.common import rpc as n_rpc
++from neutron.common import topics
++
++
++LOG = logging.getLogger(__name__)
++
++
++class HostAgentNotifyAPI(object):
++    """API for plugin to notify agents of host state change."""
++
++    def __init__(self, topic=topics.AGENT):
++        target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.topic = topic
++        self.client = n_rpc.get_client(target)
++
++    def _notification_host(self, context, method, payload, host):
++        """Notify the agents that are hosted on the host."""
++        LOG.debug('Notify agents on %(host)s of the message '
++                  '%(method)s', {'host': host,
++                                 'method': method})
++        topic_host_updated = topics.get_topic_name(self.topic,
++                                                   topics.HOST,
++                                                   topics.UPDATE,
++                                                   host)
++        cctxt = self.client.prepare(topic=topic_host_updated,
++                                    server=host)
++        cctxt.cast(context, method, payload=payload)
++
++    def host_updated(self, context, host_state_up, host):
++        self._notification_host(context, 'host_updated',
++                                {'host_state_up': host_state_up},
++                                host)
+diff --git a/neutron/api/rpc/handlers/dhcp_rpc.py b/neutron/api/rpc/handlers/dhcp_rpc.py
+index 5681761..493bf5a 100644
+--- a/neutron/api/rpc/handlers/dhcp_rpc.py
++++ b/neutron/api/rpc/handlers/dhcp_rpc.py
+@@ -80,6 +80,11 @@ class DhcpRpcCallback(object):
+         """Retrieve and return a list of the active networks."""
+         host = kwargs.get('host')
+         plugin = directory.get_plugin()
++        if utils.is_extension_supported(plugin, n_const.HOST_EXT_ALIAS):
++            if not plugin.is_host_available(context, host):
++                LOG.debug("host {} disabled; not returning any "
++                          "networks to agent".format(host))
++                return []
+         if utils.is_extension_supported(
+             plugin, constants.DHCP_AGENT_SCHEDULER_EXT_ALIAS):
+             if cfg.CONF.network_auto_schedule:
+diff --git a/neutron/api/rpc/handlers/l3_rpc.py b/neutron/api/rpc/handlers/l3_rpc.py
+index b0d32be..b5fa45e 100644
+--- a/neutron/api/rpc/handlers/l3_rpc.py
++++ b/neutron/api/rpc/handlers/l3_rpc.py
+@@ -117,6 +117,11 @@ class L3RpcCallback(object):
+         router_ids = kwargs.get('router_ids')
+         host = kwargs.get('host')
+         context = neutron_context.get_admin_context()
++        if utils.is_extension_supported(self.plugin, n_const.HOST_EXT_ALIAS):
++            if not self.plugin.is_host_available(context, host):
++                LOG.debug("host {} disabled; not returning any "
++                          "routers to agent".format(host))
++                return {}
+         if utils.is_extension_supported(
+             self.l3plugin, constants.L3_AGENT_SCHEDULER_EXT_ALIAS):
+             routers = (
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index f71dc82..cab0f70 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -12,6 +12,13 @@
+ # implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from neutron_lib import constants as lib_constants
+ 
+@@ -21,6 +28,7 @@ ROUTER_PORT_OWNERS = lib_constants.ROUTER_INTERFACE_OWNERS_SNAT + \
+ 
+ ROUTER_STATUS_ACTIVE = 'ACTIVE'
+ ROUTER_STATUS_ERROR = 'ERROR'
++ROUTER_STATUS_DOWN = 'DOWN'
+ 
+ DEVICE_ID_RESERVED_DHCP_PORT = "reserved_dhcp_port"
+ 
+@@ -37,6 +45,8 @@ HA_PORT_NAME = 'HA port tenant %s'
+ HA_ROUTER_STATE_ACTIVE = 'active'
+ HA_ROUTER_STATE_STANDBY = 'standby'
+ 
++AGENT_TYPE_WRS_VSWITCH = 'AVS agent'
++
+ PAGINATION_INFINITE = 'infinite'
+ 
+ SORT_DIRECTION_ASC = 'asc'
+@@ -176,6 +186,13 @@ VALID_FLOATINGIP_STATUS = (lib_constants.FLOATINGIP_STATUS_ACTIVE,
+ FLOATING_IP_HOST_UNBOUND = "FLOATING_IP_HOST_UNBOUND"
+ FLOATING_IP_HOST_NEEDS_BINDING = "FLOATING_IP_HOST_NEEDS_BINDING"
+ 
++# Host management extension alias
++HOST_EXT_ALIAS = 'host'
++
++# Host Availability States
++HOST_UP = 'up'
++HOST_DOWN = 'down'
++
+ # Possible types of values (e.g. in QoS rule types)
+ VALUES_TYPE_CHOICES = "choices"
+ VALUES_TYPE_RANGE = "range"
+diff --git a/neutron/common/topics.py b/neutron/common/topics.py
+index b6482c9..a337ed9 100644
+--- a/neutron/common/topics.py
++++ b/neutron/common/topics.py
+@@ -12,6 +12,13 @@
+ # implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ NETWORK = 'network'
+ SUBNET = 'subnet'
+@@ -20,6 +27,7 @@ SECURITY_GROUP = 'security_group'
+ L2POPULATION = 'l2population'
+ DVR = 'dvr'
+ RESOURCES = 'resources'
++HOST = 'host'
+ 
+ CREATE = 'create'
+ DELETE = 'delete'
+diff --git a/neutron/conf/common.py b/neutron/conf/common.py
+index afaa2d9..0979761 100644
+--- a/neutron/conf/common.py
++++ b/neutron/conf/common.py
+@@ -138,7 +138,13 @@ core_opts = [
+                       'this value without modification. For overlay networks '
+                       'such as VXLAN, neutron automatically subtracts the '
+                       'overlay protocol overhead from this value. Defaults '
+-                      'to 1500, the standard value for Ethernet.'))
++                      'to 1500, the standard value for Ethernet.')),
++    cfg.StrOpt('host_driver',
++               default='neutron.drivers.host.NoopHostDriver',
++               help=_("Default driver to use for host management")),
++    cfg.StrOpt('fm_driver',
++               default='neutron.drivers.fm.NoopFmDriver',
++               help=_("Default driver to use for fault management")),
+ ]
+ 
+ core_cli_opts = [
+diff --git a/neutron/db/agents_db.py b/neutron/db/agents_db.py
+index 3ee431f..673bca9 100644
+--- a/neutron/db/agents_db.py
++++ b/neutron/db/agents_db.py
+@@ -12,6 +12,14 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
+ 
+ import datetime
+ 
+@@ -232,6 +240,7 @@ class AgentDbMixin(ext_agent.AgentPluginBase, AgentAvailabilityZoneMixin):
+                         context=context, agent=agent)
+         with context.session.begin(subtransactions=True):
+             context.session.delete(agent)
++            self.clear_agent_fault(agent)
+ 
+     @db_api.retry_if_session_inactive()
+     def update_agent(self, context, id, agent):
+diff --git a/neutron/db/agentschedulers_db.py b/neutron/db/agentschedulers_db.py
+index 3e1a7c7..6ba4fca 100644
+--- a/neutron/db/agentschedulers_db.py
++++ b/neutron/db/agentschedulers_db.py
+@@ -12,6 +12,14 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
+ 
+ import datetime
+ import random
+@@ -452,7 +460,7 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
+         if dhcp_notifier:
+             dhcp_notifier.network_removed_from_agent(
+-                context, network_id, agent.host)
++                context, network_id, agent['host'])
+ 
+     def list_networks_on_dhcp_agent(self, context, id):
+         query = context.session.query(
+@@ -512,6 +520,31 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         if self.network_scheduler:
+             self.network_scheduler.auto_schedule_networks(self, context, host)
+ 
++    def relocate_networks(self, context, agent_id):
++        """Remove networks from given agent and attempt to reschedule to a
++        different agent.  This function assumes that it whatever condition led
++        to needing to relocate the networks away from the agent will also
++        prevent it from rescheduling to that same agent; therefore all
++        agent/host state changes must be persisted to the database before
++        invoking this function.
++        """
++        result = self.list_networks_on_dhcp_agent(context, agent_id)
++        networks = result.get('networks')
++        for network in networks:
++            LOG.debug("relocating network {}".format(network['id']))
++            self.remove_network_from_dhcp_agent(context,
++                                                agent_id,
++                                                network['id'])
++            agents = self.schedule_network(context, network)
++            dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
++            if not agents:
++                LOG.warning(("Relocation of network {} has failed").format(
++                    network['id']))
++            elif dhcp_notifier:
++                for agent in agents:
++                    dhcp_notifier.network_added_to_agent(
++                        context, network['id'], agent['host'])
++
+ 
+ class AZDhcpAgentSchedulerDbMixin(DhcpAgentSchedulerDbMixin,
+                                   network_az.NetworkAvailabilityZoneMixin):
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+new file mode 100644
+index 0000000..8c8d201
+--- /dev/null
++++ b/neutron/db/hosts_db.py
+@@ -0,0 +1,632 @@
++# Copyright (c) 2013 OpenStack Foundation.
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import re
++
++import six
++
++from neutron_lib import constants as lib_constants
++from neutron_lib import context
++from neutron_lib.db import model_base
++from oslo_log import log as logging
++from oslo_utils import timeutils
++from oslo_utils import uuidutils
++import sqlalchemy as sa
++from sqlalchemy.orm import exc
++
++from neutron.common import constants
++from neutron.common import topics
++from neutron.common import utils
++from neutron.db import api as db_api
++from neutron.drivers import fm
++from neutron.drivers import host
++from neutron.extensions import host as ext_host
++from neutron_lib.plugins import constants as plugin_constants
++from neutron_lib.plugins import directory
++
++LOG = logging.getLogger(__name__)
++
++DATA_NETWORK = "data"
++PCI_PASSTHROUGH = "pci-passthrough"
++PCI_SRIOV_PASSTHROUGH = "pci-sriov"
++
++
++class Host(model_base.BASEV2):
++    """Represents compute host running in neutron deployments."""
++
++    # system host uuid (set to hostname until maintenance uses uuid)
++    id = sa.Column(sa.String(36), primary_key=True, nullable=False)
++
++    # system hostname
++    name = sa.Column(sa.String(255), unique=True, nullable=False)
++
++    # host operational state
++    availability = sa.Column(sa.Enum(constants.HOST_UP,
++                                     constants.HOST_DOWN,
++                                     name='availability_states'),
++                             default=constants.HOST_DOWN, nullable=False)
++
++    # the time when first report came from maintenance
++    created_at = sa.Column(sa.DateTime, nullable=False)
++
++    # the time when last report came from maintenance
++    updated_at = sa.Column(sa.DateTime, nullable=True)
++
++
++class HostInterface(model_base.BASEV2):
++    """Represents a data interface on a compute host."""
++
++    # system inventory uuid
++    id = sa.Column(sa.String(36), primary_key=True, nullable=False)
++
++    # parent compute node
++    host_id = sa.Column(sa.String(36),
++                        sa.ForeignKey("hosts.id", ondelete='CASCADE'))
++
++    # MTU value of the interface
++    mtu = sa.Column(sa.Integer, nullable=False, default=0)
++
++    # Network type of the interface (i.e., data, pci-passthrough, etc...)
++    network_type = sa.Column(sa.String(255), default=DATA_NETWORK)
++
++    # Comma separated list of reserved vlan values
++    vlans = sa.Column(sa.String(255))
++
++    # the time when first report came from maintenance
++    created_at = sa.Column(sa.DateTime, nullable=False)
++
++    # the time when last report came from maintenance
++    updated_at = sa.Column(sa.DateTime, nullable=True)
++
++
++class HostInterfaceProviderNetBinding(model_base.BASEV2):
++    """Represents the binding between host interfaces and their associated
++    provider networks.
++    """
++    providernet_id = sa.Column(sa.String(36),
++                               sa.ForeignKey("providernets.id",
++                                             ondelete='CASCADE'),
++                               primary_key=True)
++
++    interface_id = sa.Column(sa.String(36),
++                             sa.ForeignKey("hostinterfaces.id",
++                                           ondelete='CASCADE'),
++                             primary_key=True)
++
++
++class HostProviderNetBinding(model_base.BASEV2):
++    """Represents the binding between hosts and their associated provider
++    networks.
++    """
++    providernet_id = sa.Column(sa.String(36),
++                               sa.ForeignKey("providernets.id",
++                                             ondelete='CASCADE'),
++                               primary_key=True)
++    host_id = sa.Column(sa.String(36),
++                        sa.ForeignKey("hosts.id", ondelete='CASCADE'),
++                        primary_key=True)
++
++
++class HostDbMixin(ext_host.HostPluginBase):
++    """
++    Mixin class to add the host extension to the db_plugin_base_v2.
++    """
++
++    host_notifier = None
++    host_driver = host.NoopHostDriver()
++
++    def _get_host_by_id(self, context, id):
++        try:
++            query = self._model_query(context, Host)
++            host = query.filter(Host.id == id).one()
++        except exc.NoResultFound:
++            raise ext_host.HostNotFoundById(id=id)
++        return host
++
++    def _get_host_by_name(self, context, name):
++        try:
++            query = self._model_query(context, Host)
++            host = query.filter(Host.name == name).one()
++        except exc.NoResultFound:
++            raise ext_host.HostNotFoundByName(hostname=name)
++        return host
++
++    def _make_host_dict(self, host, fields=None):
++        attr = ext_host.RESOURCE_ATTRIBUTE_MAP.get(
++            ext_host.RESOURCE_NAME + 's')
++        res = dict((k, host[k]) for k in attr
++                   if k not in ext_host.OPERATIONAL_ATTRIBUTES)
++        # Set operational attributes
++        res.setdefault('agents', [])
++        res.setdefault('subnets', 0)
++        res.setdefault('routers', 0)
++        res.setdefault('ports', 0)
++        return self._fields(res, fields)
++
++    def _create_or_update_host(self, context, id, host):
++        host_data = host['host']
++        res = {}
++        with context.session.begin(subtransactions=True):
++            current_time = timeutils.utcnow()
++            try:
++                host_db = self._get_host_by_id(context, id)
++                if 'availability' in host_data:
++                    res['availability'] = host_data['availability']
++                    res['updated_at'] = current_time
++                    host_db.update(res)
++            except ext_host.HostNotFoundById:
++                res['id'] = id
++                res['name'] = host_data['name']
++                res['created_at'] = current_time
++                res['availability'] = host_data.get('availability',
++                                                    constants.HOST_DOWN)
++                host_db = Host(**res)
++                context.session.add(host_db)
++        host_data = self._make_host_dict(host_db)
++        return host_data
++
++    def get_host_uuid(self, context, hostname):
++        """
++        Returns the UUID value assigned to the specified hostname
++        """
++        # Try looking it up in our DB first
++        try:
++            host = self.get_host_by_name(context, hostname)
++            return host['id']
++        except ext_host.HostNotFoundByName:
++            # Does not exist yet
++            pass
++        # Try looking it up with the host driver
++        return self.host_driver.get_host_uuid(context, hostname)
++
++    def _get_providernet_bindings(self, context, interface_uuid):
++        query = (context.session.query(HostInterfaceProviderNetBinding).
++                 filter((HostInterfaceProviderNetBinding.interface_id ==
++                         interface_uuid)))
++        return [binding.providernet_id for binding in query.all()]
++
++    def _update_interface_providernet_bindings(self, context, interface_uuid,
++                                               current_bindings):
++        previous_bindings = self._get_providernet_bindings(
++            context, interface_uuid)
++        previous = set(previous_bindings)
++        current = set(current_bindings)
++        stale_providernets = previous - current
++        new_providernets = current - previous
++        if not stale_providernets and not new_providernets:
++            return
++        LOG.warning(("Updating provider net bindings for "
++                     "interface {} removed={} added={}").format(
++            interface_uuid, stale_providernets, new_providernets))
++        with context.session.begin(subtransactions=True):
++            if stale_providernets:
++                # remove stale entries
++                query = (context.session.
++                         query(HostInterfaceProviderNetBinding).
++                         filter((HostInterfaceProviderNetBinding.
++                                 interface_id == interface_uuid)).
++                         filter(HostInterfaceProviderNetBinding.providernet_id.
++                                in_(stale_providernets)))
++                query.delete(synchronize_session='fetch')
++            # Add new entries
++            for providernet_id in new_providernets:
++                binding = HostInterfaceProviderNetBinding()
++                binding.providernet_id = providernet_id
++                binding.interface_id = interface_uuid
++                context.session.add(binding)
++
++    def _create_or_update_interface(self, context, host_uuid,
++                                    interface_uuid, body):
++        fields = {'mtu': body['mtu'],
++                  'vlans': body['vlans'],
++                  'network_type': body['network_type']}
++        with context.session.begin(subtransactions=True):
++            try:
++                query = (context.session.query(HostInterface).
++                         filter(HostInterface.id == interface_uuid))
++                interface = query.one()
++                fields['updated_at'] = timeutils.utcnow()
++                interface.update(fields)
++            except exc.NoResultFound:
++                fields['id'] = interface_uuid
++                fields['host_id'] = host_uuid
++                fields['created_at'] = timeutils.utcnow()
++                interface = HostInterface(**fields)
++                context.session.add(interface)
++            self._update_interface_providernet_bindings(
++                context, interface_uuid, body['providernet_ids'])
++
++    def is_host_available(self, context, hostname):
++        return self.host_driver.is_host_available(context, hostname)
++
++    def get_providernet_hosts(self, context, providernet_id):
++        """
++        Returns the list of hosts with interfaces attached to the specified
++        provider network.
++        """
++        bindings = (context.session.query(Host)
++                    .join(HostInterface,
++                          HostInterface.host_id == Host.id)
++                    .join(HostInterfaceProviderNetBinding,
++                          (HostInterfaceProviderNetBinding.interface_id ==
++                           HostInterface.id))
++                    .filter(HostInterfaceProviderNetBinding.providernet_id ==
++                            providernet_id)
++                    .all())
++        return [binding.id for binding in bindings]
++
++    def create_or_update_host(self, context, hostname):
++        host_uuid = self.get_host_uuid(context, hostname)
++        if not host_uuid:
++            LOG.error(("Failed to retrieve uuid value for host {}").format(
++                hostname))
++            raise ext_host.HostNotFoundByName(hostname=hostname)
++        host = {}
++        host['host'] = {'id': host_uuid, 'name': hostname}
++        self._create_or_update_host(context, host_uuid, host)
++
++    @db_api.retry_if_session_inactive()
++    def create_host(self, context, host):
++        host_data = host['host']
++        id = host_data.get('id')
++        host = self._create_or_update_host(context, id, host)
++        return host
++
++    def _fix_host_data(self, context, id, host):
++        hostname = id
++        id = self.get_host_uuid(context, hostname)
++        if not id:
++            LOG.error(("Failed to query UUID for host {}").format(hostname))
++            raise ext_host.HostNotFoundByName(hostname=hostname)
++        host_data = host['host']
++        host_data.update({'name': hostname, 'id': id})
++        host.update({'host': host_data})
++        return id
++
++    @db_api.retry_if_session_inactive()
++    def update_host(self, context, id, host):
++        host = self._create_or_update_host(context, id, host)
++        if host.get('availability') == constants.HOST_UP:
++            host_state_up = True
++        else:
++            host_state_up = False
++        self.host_notifier.host_updated(context, host_state_up, host['name'])
++        return host
++
++    @db_api.retry_if_session_inactive()
++    def delete_host(self, context, id):
++        with context.session.begin(subtransactions=True):
++            host = self._get_host_by_id(context, id)
++            context.session.delete(host)
++
++    def get_host_by_name(self, context, name, fields=None):
++        host = self._get_host_by_name(context, name)
++        return self._make_host_dict(host, fields)
++
++    def get_hostname(self, context, id):
++        host = self._get_host_by_id(context, id)
++        return host['name']
++
++    @db_api.retry_if_session_inactive()
++    def get_host(self, context, id, fields=None):
++        host = self._get_host_by_id(context, id)
++        return self._make_host_dict(host, fields)
++
++    @db_api.retry_if_session_inactive()
++    def get_hosts(self, context, filters=None, fields=None,
++                  sorts=None, limit=None, marker=None, page_reverse=False):
++        marker_obj = self._get_marker_obj(context, 'host', limit, marker)
++        return self._get_collection(
++            context, Host, self._make_host_dict,
++            filters=filters, fields=fields, sorts=sorts, limit=limit,
++            marker_obj=marker_obj, page_reverse=page_reverse)
++
++    def _get_interface_by_id(self, context, interface_uuid):
++        try:
++            query = self._model_query(context, HostInterface)
++            host = query.filter(HostInterface.id == interface_uuid).one()
++        except exc.NoResultFound:
++            raise ext_host.HostInterfaceNotFoundById(id=interface_uuid)
++        return host
++
++    def _delete_interface(self, context, interface_uuid):
++        with context.session.begin(subtransactions=True):
++            interface = self._get_interface_by_id(context, interface_uuid)
++            context.session.delete(interface)
++
++    def _validate_interface_uuid(self, context, interface):
++        if 'uuid' not in interface:
++            raise ext_host.HostMissingInterfaceUuid()
++        if not uuidutils.is_uuid_like(interface['uuid']):
++            raise ext_host.HostInvalidInterfaceUuid(
++                value=interface['uuid'])
++
++    def _validate_interface_mtu(self, context, interface):
++        if 'mtu' not in interface:
++            raise ext_host.HostMissingInterfaceMtu()
++        mtu = interface['mtu']
++        try:
++            mtu = int(mtu)
++        except ValueError:
++            raise ext_host.HostInvalidInterfaceMtu(value=mtu)
++        if (mtu < constants.MINIMUM_MTU) or (mtu > constants.MAXIMUM_MTU):
++            raise ext_host.HostOutOfRangeInterfaceMtu(
++                minimum=constants.MINIMUM_MTU,
++                maximum=constants.MAXIMUM_MTU)
++
++    def _validate_interface_providernets(self, context, interface):
++        if 'providernets' not in interface:
++            raise ext_host.HostMissingInterfaceProviderNetworks()
++        pnets = interface['providernets'].strip()
++        pnets = re.sub(',,+', ',', pnets)
++        pnets = pnets.split(',')
++        values = []
++        for pnet in pnets:
++            providernet = self._get_providernet_by_name(context, pnet)
++            values.append(providernet['id'])
++        # Update the request body with a validated set of values
++        interface['providernets'] = ','.join(values)
++        interface['providernet_ids'] = values
++
++    def _validate_interface_vlans(self, context, interface):
++        if 'vlans' not in interface or not interface['vlans'].strip():
++            interface['vlans'] = ''
++            interface['vlan_ids'] = []
++            return
++        vlans = interface['vlans'].strip()
++        vlans = re.sub(',,+', ',', vlans)
++        vlans = vlans.split(',')
++        values = []
++        for vlan_id in vlans:
++            try:
++                values.append(int(vlan_id))
++            except ValueError:
++                raise ext_host.HostInvalidInterfaceVlans(
++                    values=interface['vlans'])
++            if ((int(vlan_id) < constants.MIN_VLAN_TAG) or
++                (int(vlan_id) > constants.MAX_VLAN_TAG)):
++                raise ext_host.HostOutOfRangeInterfaceVlan(
++                    vlan_id=vlan_id,
++                    minimum=constants.MIN_VLAN_TAG,
++                    maximum=constants.MAX_VLAN_TAG)
++        # Update the request body with a validated set of vlans
++        interface['vlans'] = ','.join([str(x) for x in values])
++        interface['vlan_ids'] = values
++
++    def _validate_interface_network_type(self, context, interface):
++        interface.setdefault('network_type', DATA_NETWORK)
++        network_type = interface['network_type']
++        if network_type not in [DATA_NETWORK, PCI_PASSTHROUGH,
++            PCI_SRIOV_PASSTHROUGH]:
++            raise ext_host.HostInvalidInterfaceNetworkType(
++                value=network_type)
++
++    def _validate_interface(self, context, body):
++        if 'interface' not in body:
++            raise ext_host.HostMissingInterfaceBody()
++        interface = body['interface']
++        self._validate_interface_uuid(context, interface)
++        self._validate_interface_mtu(context, interface)
++        self._validate_interface_providernets(context, interface)
++        self._validate_interface_vlans(context, interface)
++        self._validate_interface_network_type(context, interface)
++
++    def bind_interface(self, context, id, body):
++        host = self._get_host_by_id(context, id)
++        LOG.debug("Binding interface to host {} with values: {}".format(
++                host['name'], body))
++        with context.session.begin(subtransactions=True):
++            self._validate_interface(context, body)
++            interface = body['interface']
++            test_only = interface.get('test', False)
++            if test_only:
++                # API user is testing whether this bind would succeed; no
++                # action is required.
++                return
++            interface_uuid = interface['uuid']
++            self._create_or_update_interface(
++                context, host['id'], interface_uuid, interface)
++        return body
++
++    def unbind_interface(self, context, id, body):
++        host = self._get_host_by_id(context, id)
++        LOG.debug("Unbinding interface to host {} with values: {}".format(
++                host['name'], body))
++        if 'interface' not in body:
++            raise ext_host.HostMissingInterfaceBody()
++        interface = body['interface']
++        self._validate_interface_uuid(context, interface)
++        try:
++            self._delete_interface(context, interface['uuid'])
++        except ext_host.HostInterfaceNotFoundById:
++            pass
++        return body
++
++
++class HostSchedulerDbMixin(HostDbMixin):
++
++    agents = {}
++    fm_driver = fm.NoopFmDriver()
++
++    def _update_agent(self, context, agent_type, host_id, admin_state_up):
++        LOG.debug("updating {} agent on {} with admin_state_up {}".format(
++                agent_type, host_id, admin_state_up))
++        agent_notifier = self.agent_notifiers.get(agent_type)
++        if (agent_notifier and hasattr(agent_notifier, 'agent_updated')):
++            agent_notifier.agent_updated(context, admin_state_up, host_id)
++
++    def _extend_host_dict(self, host, agent, fields=None):
++        if not fields or 'agents' in set(fields):
++            host['agents'].append({'type': agent['agent_type'],
++                                   'id': agent['id']})
++        if not fields or 'subnets' in set(fields):
++            if agent['topic'] == topics.DHCP_AGENT:
++                host['subnets'] = agent['configurations'].get('subnets')
++
++        if not fields or 'routers' in set(fields):
++            if agent['topic'] == topics.L3_AGENT:
++                host['routers'] = agent['configurations'].get('routers')
++
++        if not fields or 'ports' in set(fields):
++            if agent['agent_type'] == constants.AGENT_TYPE_WRS_VSWITCH:
++                # There is no topic for other agent types and this
++                # functionality is specific to the WRS VSWITCH
++                host['ports'] = agent['configurations'].get('devices')
++        return host
++
++    def _relocate_agent(self, context, agent):
++        if agent['topic'] == topics.DHCP_AGENT:
++            plugin = directory.get_plugin()
++            plugin.relocate_networks(context, agent['id'])
++        elif agent['topic'] == topics.L3_AGENT:
++            plugin = directory.get_plugin(plugin_constants.L3)
++            if utils.is_extension_supported(
++                    plugin, lib_constants.L3_AGENT_SCHEDULER_EXT_ALIAS):
++                plugin.relocate_routers(context, agent['id'])
++
++    def _auto_schedule_host(self, context, host):
++        plugin = directory.get_plugin()
++        plugin.auto_schedule_networks(context, host['name'])
++
++        plugin = directory.get_plugin(plugin_constants.L3)
++        if utils.is_extension_supported(
++                plugin, lib_constants.L3_AGENT_SCHEDULER_EXT_ALIAS):
++            plugin.auto_schedule_routers(context, host['name'], None)
++
++    @db_api.retry_if_session_inactive()
++    def delete_host(self, context, id):
++        LOG.warning(("delete_host id={}").format(id))
++        hostname = self.get_hostname(context, id)
++        super(HostSchedulerDbMixin, self).delete_host(context, id)
++        agents = self.get_agents_by_hosts(context, [hostname])
++        LOG.debug("disabling {} agents on {}".format(len(agents), hostname))
++        for agent in agents:
++            self._relocate_agent(context, agent)
++            self.delete_agent(context, agent['id'])
++
++    @db_api.retry_if_session_inactive()
++    def update_host(self, context, id, host):
++        LOG.warning(("update_host id={}, host={}").format(id, host))
++        data = super(HostSchedulerDbMixin, self).update_host(
++            context, id, host)
++        agents = self.get_agents_by_hosts(context, [data['name']])
++        if data.get('availability', constants.HOST_DOWN) == constants.HOST_UP:
++            LOG.debug("enabling {} agents on {}".format(len(agents), id))
++            self._auto_schedule_host(context, data)
++            for agent in agents:
++                self._update_agent(context, agent['agent_type'],
++                                   data['name'], agent['admin_state_up'])
++        else:
++            LOG.debug("disabling {} agents on {}".format(len(agents), id))
++            for agent in agents:
++                self._relocate_agent(context, agent)
++        return self.get_host(context, id)
++
++    @db_api.retry_if_session_inactive()
++    def get_hosts(self, context, filters=None, fields=None,
++                  sorts=None, limit=None, marker=None, page_reverse=False):
++        LOG.debug("get_hosts filters={}, fields={}".format(
++                filters, fields))
++        hosts = super(HostSchedulerDbMixin, self).get_hosts(
++            context, filters, fields, sorts, limit, marker, page_reverse)
++        for h in hosts:
++            agents = self.get_agents_by_hosts(
++                context, [self.get_hostname(context, h['id'])])
++            for agent in agents:
++                self._extend_host_dict(h, agent, fields)
++        return hosts
++
++    @db_api.retry_if_session_inactive()
++    def get_host(self, context, id, fields=None):
++        LOG.debug("get_host id={}, fields={}".format(id, fields))
++        host = super(HostSchedulerDbMixin, self).get_host(
++            context, id, fields)
++        if host:
++            agents = self.get_agents_by_hosts(
++                context, [self.get_hostname(context, host['id'])])
++            for agent in agents:
++                host = self._extend_host_dict(host, agent, fields)
++        return host
++
++    def get_agents_by_hosts(self, context, names=None):
++        filter = {'host': names} if names else None
++        return self.get_agents(context, filter)
++
++    def audit_agent_state(self):
++        """
++        Audit the current state of the agent to determine if fault reports
++        need to be raised or cleared
++        """
++        LOG.debug("Audit agent state")
++        previous_agents = self.agents
++        admin_context = context.get_admin_context()
++        self.agents = {a['id']: a for a in self.get_agents(admin_context)}
++        host_availability = {}
++        for uuid, agent in six.iteritems(self.agents):
++            hostname = agent['host']
++            if hostname not in host_availability:
++                # NOTE(alegacy): Cache to avoid repeating for multiple
++                # agents on same host.
++                host_availability[hostname] = \
++                    self.is_host_available(admin_context, hostname)
++            if not host_availability[hostname]:
++                # If agent dies while host is down, delay updating list of
++                # agents until after the host comes online, so that audit
++                # can correctly assess change in agent state at that point.
++                # Set to None so that alarm will be raised or cleared when
++                # host comes up.
++                self.agents[uuid] = None
++                continue
++            elif uuid in previous_agents:
++                previous = previous_agents[uuid]
++            else:
++                previous = None
++
++            # Raise or clear alarm either if the alive state changes, or
++            # if the alarm hasn't been raised/cleared for this agent yet.
++            if not previous or agent['alive'] != previous['alive']:
++                # Clear fault if agent is alive
++                if agent['alive']:
++                    self.clear_agent_fault(agent)
++                # Only report fault if agent's host is online
++                elif self.host_driver.is_host_available(admin_context,
++                                                        agent['host']):
++                    self.report_agent_fault(agent)
++                # If agent dies while host is down, delay updating list of
++                # agents until after the host comes online, so that audit
++                # can correctly assess change in agent state at that point.
++                else:
++                    self.agents[uuid] = previous
++
++    def report_agent_fault(self, agent):
++        """
++        Generate a fault management alarm condition for agent alive
++        """
++        LOG.debug("Report agent fault: {}".format(agent['id']))
++        self.fm_driver.report_agent_fault(agent['host'], agent['id'])
++
++    def clear_agent_fault(self, agent):
++        """
++        Clear a fault management alarm condition for agent alive
++        """
++        LOG.debug("Clear agent fault: {}".format(agent['id']))
++        self.fm_driver.clear_agent_fault(agent['host'], agent['id'])
+diff --git a/neutron/db/l3_agentschedulers_db.py b/neutron/db/l3_agentschedulers_db.py
+index e7eaae8..ab10cb2 100644
+--- a/neutron/db/l3_agentschedulers_db.py
++++ b/neutron/db/l3_agentschedulers_db.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from neutron_lib import constants
+ from neutron_lib.plugins import constants as plugin_constants
+@@ -51,6 +58,10 @@ L3_AGENTS_SCHEDULER_OPTS = [
+     cfg.BoolOpt('allow_automatic_l3agent_failover', default=False,
+                 help=_('Automatically reschedule routers from offline L3 '
+                        'agents to online L3 agents.')),
++    cfg.BoolOpt('router_status_managed',
++                default=False,
++                help=_("Enable/Disable support for actively managing the "
++                       "operational status of routers")),
+ ]
+ 
+ cfg.CONF.register_opts(L3_AGENTS_SCHEDULER_OPTS)
+@@ -64,6 +75,12 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+ 
+     router_scheduler = None
+ 
++    def can_l3_agent_host_router(self, context, agent_id, router_id):
++        if self.router_scheduler:
++            return self.router_scheduler.can_l3_agent_host_router(
++                self, context, agent_id, router_id)
++        return True
++
+     def add_periodic_l3_agent_status_check(self):
+         if not cfg.CONF.allow_automatic_l3agent_failover:
+             LOG.info("Skipping period L3 agent status check because "
+@@ -126,6 +143,14 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+         if not is_suitable_agent:
+             raise l3agentscheduler.InvalidL3Agent(id=agent['id'])
+ 
++        is_isolated_agent = (
++            not self.can_l3_agent_host_router(context,
++                                              agent['id'],
++                                              router['id'])
++        )
++        if is_isolated_agent:
++            raise l3agentscheduler.IsolatedL3Agent(id=agent['id'])
++
+     def check_agent_router_scheduling_needed(self, context, agent, router):
+         """Check if the router scheduling is needed.
+ 
+@@ -429,7 +454,9 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+                 # ignore_admin_state True comes from manual scheduling
+                 # where admin_state_up judgement is already done.
+                 continue
+-
++            if not self.can_l3_agent_host_router(
++                context, l3_agent['id'], sync_router['id']):
++                continue
+             agent_conf = self.get_configuration_dict(l3_agent)
+             agent_mode = agent_conf.get(constants.L3_AGENT_MODE,
+                                         constants.L3_AGENT_MODE_LEGACY)
+diff --git a/neutron/db/l3_db.py b/neutron/db/l3_db.py
+index ca9dfc3..69bd689 100644
+--- a/neutron/db/l3_db.py
++++ b/neutron/db/l3_db.py
+@@ -11,6 +11,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ import functools
+ import itertools
+@@ -197,6 +204,10 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+             resource_extend.apply_funcs(l3.ROUTERS, res, router)
+         return db_utils.resource_fields(res, fields)
+ 
++    def _get_default_router_status(self):
++        """Return the default operational status of a router"""
++        return n_const.ROUTER_STATUS_ACTIVE
++
+     def _create_router_db(self, context, router, tenant_id):
+         """Create the DB object."""
+         router.setdefault('id', uuidutils.generate_uuid())
+@@ -206,12 +217,13 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+         with context.session.begin(subtransactions=True):
+             # pre-generate id so it will be available when
+             # configuring external gw port
++            status = router.get('status', self._get_default_router_status())
+             router_db = l3_models.Router(
+                 id=router['id'],
+                 tenant_id=router['tenant_id'],
+                 name=router['name'],
+                 admin_state_up=router['admin_state_up'],
+-                status=n_const.ROUTER_STATUS_ACTIVE,
++                status=status,
+                 description=router.get('description'))
+             context.session.add(router_db)
+             registry.notify(resources.ROUTER, events.PRECOMMIT_CREATE,
+@@ -305,6 +317,15 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+         if not network_id:
+             return
+ 
++        if utils.is_extension_supported(self._core_plugin,
++                                        n_const.HOST_EXT_ALIAS):
++            # If the Host extension is present then do not use this method for
++            # checking the correct scheduling of a router.  The Host extension
++            # does this by examining the internal interfaces as well as the
++            # external interfaces and will only schedule routers to nodes that
++            # have the correct provider networks.
++            return
++
+         nets = self._core_plugin.get_networks(
+             context, {external_net.EXTERNAL: [True]})
+         # nothing to do if there is only one external network
+@@ -1927,6 +1948,19 @@ class L3_NAT_db_mixin(L3_NAT_dbonly_mixin, L3RpcNotifierMixin):
+             rp.port_type = new_owner
+             rp.port.device_owner = new_owner
+ 
++    def _is_router_status_managed(self):
++        """Returns whether the router status is managed by the plugin.  That
++        is, whether the state can change based on operational conditions or
++        whether it is static.
++        """
++        return False
++
++    def _get_router_default_status(self):
++        if self._is_router_status_managed():
++            # If state is managed then only set to ACTIVE when scheduled
++            return n_const.ROUTER_STATUS_DOWN
++        return n_const.ROUTER_STATUS_ACTIVE
++
+ 
+ @removals.remove(
+     message="This will be removed in the Pike release. "
+diff --git a/neutron/db/l3_host_db.py b/neutron/db/l3_host_db.py
+new file mode 100644
+index 0000000..df05d99
+--- /dev/null
++++ b/neutron/db/l3_host_db.py
+@@ -0,0 +1,172 @@
++# Copyright (c) 2014 OpenStack Foundation.
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from neutron_lib import constants
++from oslo_config import cfg
++from oslo_log import log as logging
++
++from neutron.db import hosts_db
++from neutron.extensions import wrs_net
++
++LOG = logging.getLogger(__name__)
++
++
++class L3HostSchedulerDbMixin(hosts_db.HostSchedulerDbMixin):
++    """This mixin provides extensions to common L3 mixin methods in order to
++    add host management functionality to the router plugins.  For example,
++    routers can be rescheduled when a host is taken in/out of service and if
++    interfaces are added/removed from routers.
++    """
++
++    def _is_router_status_managed(self):
++        if cfg.CONF.router_status_managed:
++            return True
++        return False
++
++    def relocate_router(self, context, router_id, agent_id=None):
++        """Move the router to a different agent if already scheduled"""
++        l3_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_L3)
++        if agent_id:
++            result = self.list_routers_on_l3_agent(context, agent_id)
++            routers = result.get('routers', [])
++            if any([r['id'] == router_id for r in routers]):
++                self.remove_router_from_l3_agent(context, agent_id, router_id)
++
++        agent = self.schedule_router(context, router_id)
++        if not agent:
++            LOG.debug("Rescheduling of router {} "
++                      "has failed".format(router_id))
++            return
++        if l3_notifier:
++            l3_notifier.router_added_to_agent(
++                context, [router_id], agent.host)
++
++    def relocate_routers(self, context, agent_id):
++        """Remove routers from given agent and attempt to reschedule to a
++        different agent.  This function assumes that it whatever condition led
++        to needing to relocate the routers away from the agent will also
++        prevent it from rescheduling to that same agent; therefore all
++        agent/host state changes must be persisted to the database before
++        invoking this function.
++        """
++        result = self.list_routers_on_l3_agent(context, agent_id)
++        routers = result.get('routers', [])
++        for router in routers:
++            LOG.debug("relocating router {} away from {}".format(
++                    router['id'], agent_id))
++            self.relocate_router(context, router['id'], agent_id)
++
++    def update_router_scheduling(self, context, router_id):
++        """Determine whether the router_id is scheduled and if it is determine
++        whether the agent is still appropriate for the given router interface
++        list.
++        """
++        try:
++            agent_id = None
++            agents = self.get_l3_agents_hosting_routers(context, [router_id])
++            if agents:
++                agent_id = agents[0].id
++                # Determine if the current agent is still a valid choice
++                router = self.get_router(context, router_id)
++                candidates = self.get_l3_agent_candidates(context,
++                                                          router,
++                                                          agents)
++                if candidates:
++                    # The current selection is still valid
++                    return
++            self.relocate_router(context, router_id, agent_id)
++        except Exception as e:
++            LOG.exception(("Failed to update router scheduling, "
++                           "exception={}").format(e))
++            # continue anyway
++
++    def _extend_router_status_dict(self, context, router):
++        if not self._is_router_status_managed():
++            return
++        agents = self.get_l3_agents_hosting_routers(context, [router['id']])
++        agent = agents[0] if len(agents) > 0 else None
++        status = 'ACTIVE' if len(agents) > 0 else 'DOWN'
++        router.update({wrs_net.HOST: agent.host if agent else None,
++                       'status': status})
++
++    def _update_router_gw_info(self, context, router_id, info, router=None):
++        """
++        Intercept the router gateway info update request to adjust scheduling
++        of the router if necessary.
++        """
++        info = super(L3HostSchedulerDbMixin, self)._update_router_gw_info(
++            context, router_id, info, router)
++        # Schedule the router as the admin because it will be necessary to
++        # query the gateway ports which are owned by the admin
++        self.update_router_scheduling(context.elevated(), router_id)
++        return info
++
++    def add_router_interface(self, context, router_id, interface_info=None):
++        """
++        Intercept the router interface add request to adjust scheduling of the
++        router if necessary.
++        """
++        info = super(L3HostSchedulerDbMixin, self).add_router_interface(
++            context, router_id, interface_info)
++        # Schedule the router as the admin because it will be necessary to
++        # query the gateway ports which are owned by the admin
++        self.update_router_scheduling(context.elevated(), router_id)
++        return info
++
++    def remove_router_interface(self, context, router_id, interface_info):
++        """
++        Intercept the router interface remove request to adjust scheduling of
++        the router if necessary.
++        """
++        info = super(L3HostSchedulerDbMixin, self).remove_router_interface(
++            context, router_id, interface_info)
++        # Schedule the router as the admin because it will be necessary to
++        # query the gateway ports which are owned by the admin
++        self.update_router_scheduling(context.elevated(), router_id)
++        return info
++
++    def get_router(self, context, router_id, fields=None):
++        """
++        Intercept the router get request to extend it with the hostname of the
++        agent that is currently hosting it.
++        """
++        session = context.session
++        with session.begin(subtransactions=True):
++            router = super(L3HostSchedulerDbMixin, self).get_router(
++                context, router_id, None)
++            self._extend_router_status_dict(context, router)
++        return self._fields(router, fields)
++
++    def get_routers(self, context, filters=None, fields=None,
++                    sorts=None, limit=None, marker=None,
++                    page_reverse=False):
++        """
++        Intercept the router get request to extend it with the hostname of the
++        agent that is currently hosting it.
++        """
++        session = context.session
++        with session.begin(subtransactions=True):
++            routers = super(L3HostSchedulerDbMixin, self).get_routers(
++                context, filters, None, sorts, limit, marker, page_reverse)
++            for router in routers:
++                self._extend_router_status_dict(context, router)
++        return [self._fields(router, fields) for router in routers]
+diff --git a/neutron/db/migration/alembic_migrations/versions/kilo_initial.py b/neutron/db/migration/alembic_migrations/versions/kilo_initial.py
+index 5bd9a95..84d9e22 100644
+--- a/neutron/db/migration/alembic_migrations/versions/kilo_initial.py
++++ b/neutron/db/migration/alembic_migrations/versions/kilo_initial.py
+@@ -47,6 +47,7 @@ from neutron.db.migration.alembic_migrations import portsec_init_ops
+ from neutron.db.migration.alembic_migrations import secgroup_init_ops
+ from neutron.db.migration.alembic_migrations import vmware_init_ops
+ from neutron.db.migration.alembic_migrations import vpn_init_ops
++from neutron.db.migration.alembic_migrations import vswitch_init_ops
+ 
+ 
+ def upgrade():
+@@ -72,3 +73,4 @@ def upgrade():
+     vmware_init_ops.upgrade()
+     nuage_init_opts.upgrade()
+     nsxv_initial_opts.upgrade()
++    vswitch_init_ops.upgrade()
+diff --git a/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py b/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py
+index 49db869..012901a 100644
+--- a/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py
++++ b/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py
+@@ -16,7 +16,7 @@
+ """nsxv_vdr_metadata.py
+ 
+ Revision ID: 354db87e3225
+-Revises: kilo
++Revises: wrs_kilo
+ Create Date: 2015-04-19 14:59:15.102609
+ 
+ """
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py
+new file mode 100644
+index 0000000..5540896
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/10b1502ffd1c_host_interface_providernet_bindings.py
+@@ -0,0 +1,70 @@
++# Copyright 2015 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""host interface providernet bindings
++
++Revision ID: 10b1502ffd1c
++Revises: 3c52bf0d97f3
++Create Date: 2015-03-13 00:36:08.201998
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = '10b1502ffd1c'
++down_revision = '428d71c78e01'
++
++from alembic import op
++import sqlalchemy as sa
++
++
++def upgrade():
++    # commands auto generated by Alembic - please adjust!
++    op.create_table(
++        'hostinterfaces',
++        sa.Column('id', sa.String(length=36), nullable=False),
++        sa.Column('host_id', sa.String(length=36), nullable=True),
++        sa.Column('mtu', sa.Integer(), nullable=False),
++        sa.Column('network_type', sa.String(length=255), nullable=True),
++        sa.Column('vlans', sa.String(length=255), nullable=True),
++        sa.Column('created_at', sa.DateTime(), nullable=False),
++        sa.Column('updated_at', sa.DateTime(), nullable=True),
++        sa.ForeignKeyConstraint(['host_id'], ['hosts.id'], ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('id')
++    )
++
++    op.create_table(
++        'hostinterfaceprovidernetbindings',
++        sa.Column('providernet_id', sa.String(length=36), nullable=False),
++        sa.Column('interface_id', sa.String(length=36), nullable=False),
++        sa.ForeignKeyConstraint(['interface_id'], ['hostinterfaces.id'],
++                                ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['providernet_id'], ['providernets.id'],
++                                ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('providernet_id', 'interface_id')
++    )
++    # end Alembic commands
++
++
++def downgrade():
++    # commands auto generated by Alembic - please adjust!
++    op.drop_table('hostinterfaceprovidernetbindings')
++    op.drop_table('hostinterfaces')
++    # end Alembic commands
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py
+new file mode 100644
+index 0000000..cb0f3ad
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/428d71c78e01_enum_table_column_fixes.py
+@@ -0,0 +1,87 @@
++# Copyright 2014 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""enum table column fixes
++
++Revision ID: 428d71c78e01
++Revises: 5018b7ad4223
++Create Date: 2014-12-26 12:34:34.210251
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = '428d71c78e01'
++down_revision = '52eb37bd3d77'
++
++from alembic import op
++import sqlalchemy as sa
++
++
++# The original havana based code used camel case for the enum names (e.g.,
++# availabilityEnum, providerNetTypeEnum) and unfortunately postgres does not
++# handle camel case well enough for the alembic enum code to work properly.
++# This upgrade code renames the types to be lower case only.  Because of a
++# different alembic issue the column type cannot be altered with simple
++# alembic commands in a postgres environment so it is done with raw sql
++# statements (see bug #89)
++#
++availability = sa.Enum('up', 'down',
++                       name='availability_states')
++providernet_type = sa.Enum('flat', 'vlan', 'vxlan', 'gre',
++                           name='providernet_type')
++
++
++def upgrade():
++    context = op.get_context()
++    if context.bind.dialect.name == 'postgresql':
++        has_availability_states = context.bind.execute(
++            "SELECT EXISTS (SELECT 1 FROM pg_type "
++            "WHERE typname='availability_states')").scalar()
++        if not has_availability_states:
++            op.execute("CREATE TYPE availability_states AS ENUM ('%s', '%s')"
++                       % ('up', 'down'))
++        op.execute("ALTER TABLE hosts"
++                   " ALTER COLUMN availability TYPE availability_states"
++                   " USING availability::text::availability_states")
++    else:
++        op.alter_column('hosts', 'availability', type_=availability)
++
++    if context.bind.dialect.name == 'postgresql':
++        has_providernet_types = context.bind.execute(
++            "SELECT EXISTS (SELECT 1 FROM pg_type "
++            "WHERE typname='providernet_types')").scalar()
++        if not has_providernet_types:
++            op.execute("CREATE TYPE providernet_types AS "
++                       "ENUM ('%s', '%s', '%s', '%s')"
++                       % ('flat', 'vlan', 'vxlan', 'gre'))
++        op.execute("ALTER TABLE providernets"
++                   " ALTER COLUMN type TYPE providernet_types"
++                   " USING type::text::providernet_types")
++    else:
++        op.alter_column('providernets', 'type',
++                        type_=providernet_type)
++
++
++def downgrade():
++    # Since the columns are simply being renamed it is not necessary to
++    # downgrade them back to the originals
++    pass
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py
+new file mode 100644
+index 0000000..d862a13
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/52eb37bd3d77_hosts_table_primary_key_fix.py
+@@ -0,0 +1,52 @@
++# Copyright 2014 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""hosts table primary key fix
++
++Revision ID: 52eb37bd3d77
++Revises: juno
++Create Date: 2014-12-26 12:15:51.341278
++
++"""
++
++from alembic import op
++import sqlalchemy as sa
++
++from neutron.db.migration import cli
++
++
++# revision identifiers, used by Alembic.
++revision = '52eb37bd3d77'
++down_revision = 'kilo'
++branch_labels = (cli.EXPAND_BRANCH,)
++
++
++def upgrade():
++    op.alter_column('hosts', 'id',
++               existing_type=sa.VARCHAR(length=36),
++               nullable=False)
++
++
++def downgrade():
++    op.alter_column('hosts', 'id',
++               existing_type=sa.VARCHAR(length=36),
++               nullable=True)
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+index da40867..6a65ea1 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+@@ -27,12 +27,9 @@ Create Date: 2016-05-25 00:00:01.000000
+ 
+ """
+ 
+-from neutron.db.migration import cli
+-
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_kilo_shipped'
+-down_revision = 'kilo'
+-branch_labels = (cli.EXPAND_BRANCH,)
++down_revision = '10b1502ffd1c'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+new file mode 100644
+index 0000000..18a7f40
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+@@ -0,0 +1,58 @@
++# Copyright 2014 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++# Initial schema operations for vswitch related features.  This file should
++# only contain content that was delivered prior to the Kilo release.  Anything
++# that happened during Kilo should be in the wrs_kilo/{expand,contract}/*
++# directories.
++#
++
++
++from alembic import op
++import sqlalchemy as sa
++
++
++availability = sa.Enum('up', 'down',
++                       name='availabilityEnum')
++providernet_type = sa.Enum('flat', 'vlan', 'vxlan', 'gre',
++                           name='providerNetTypeEnum')
++
++
++def upgrade():
++    op.create_table(
++        'hosts',
++        sa.Column('id', sa.String(length=36), nullable=True),
++        sa.Column('name', sa.String(length=255), nullable=False),
++        sa.Column('availability', availability, nullable=False),
++        sa.Column('created_at', sa.DateTime(), nullable=False),
++        sa.Column('updated_at', sa.DateTime(), nullable=True),
++        sa.PrimaryKeyConstraint('id'),
++        sa.UniqueConstraint('name'))
++
++    op.create_table(
++        'hostprovidernetbindings',
++        sa.Column('providernet_id', sa.String(length=36), nullable=False),
++        sa.Column('host_id', sa.String(length=36), nullable=False),
++        sa.ForeignKeyConstraint(['host_id'], ['hosts.id'], ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['providernet_id'], ['providernets.id'],
++                                ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('providernet_id', 'host_id'))
+diff --git a/neutron/db/migration/models/head.py b/neutron/db/migration/models/head.py
+index 2c7d859..9e69ba2 100644
+--- a/neutron/db/migration/models/head.py
++++ b/neutron/db/migration/models/head.py
+@@ -28,6 +28,7 @@ from neutron_lib.db import model_base
+ from neutron.common import utils
+ from neutron.db import agentschedulers_db  # noqa
+ from neutron.db.extra_dhcp_opt import models as edo_models  # noqa
++from neutron.db import hosts_db  # noqa
+ from neutron.db import l3_dvrscheduler_db  # noqa
+ from neutron.db import l3_gwmode_db  # noqa
+ from neutron.db import models
+diff --git a/neutron/drivers/__init__.py b/neutron/drivers/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/neutron/drivers/fm.py b/neutron/drivers/fm.py
+new file mode 100644
+index 0000000..2680681
+--- /dev/null
++++ b/neutron/drivers/fm.py
+@@ -0,0 +1,107 @@
++# Copyright (c) 2013 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import abc
++
++import six
++
++FM_SEVERITY_CRITICAL = "critical"
++FM_SEVERITY_MAJOR = "major"
++FM_SEVERITY_MINOR = "minor"
++FM_SEVERITY_CLEAR = "clear"
++
++
++@six.add_metaclass(abc.ABCMeta)
++class FmDriver(object):
++
++    @abc.abstractmethod
++    def report_port_state_fault(self, hostname, port_id, severity):
++        pass
++
++    @abc.abstractmethod
++    def clear_port_state_fault(self, hostname, port_id):
++        pass
++
++    @abc.abstractmethod
++    def get_port_state_faults(self, hostname):
++        pass
++
++    @abc.abstractmethod
++    def report_interface_state_fault(self, hostname, interface_id, severity):
++        pass
++
++    @abc.abstractmethod
++    def clear_interface_state_fault(self, hostname, interface_id):
++        pass
++
++    @abc.abstractmethod
++    def get_interface_state_faults(self, hostname):
++        pass
++
++    @abc.abstractmethod
++    def report_agent_fault(self, hostname, agent_id):
++        pass
++
++    @abc.abstractmethod
++    def clear_agent_fault(self, hostname, agent_id):
++        pass
++
++    @abc.abstractmethod
++    def report_providernet_fault(self, providernet_id):
++        pass
++
++    @abc.abstractmethod
++    def clear_providernet_fault(self, providernet_id):
++        pass
++
++
++class NoopFmDriver(FmDriver):
++
++    def report_port_state_fault(self, hostname, port_id, severity):
++        pass
++
++    def clear_port_state_fault(self, hostname, port_id):
++        pass
++
++    def get_port_state_faults(self, hostname):
++        return None
++
++    def report_interface_state_fault(self, hostname, interface_id, severity):
++        pass
++
++    def clear_interface_state_fault(self, hostname, interface_id):
++        pass
++
++    def get_interface_state_faults(self, hostname):
++        return None
++
++    def report_agent_fault(self, hostname, agent_id):
++        pass
++
++    def clear_agent_fault(self, hostname, agent_id):
++        pass
++
++    def report_providernet_fault(self, providernet_id):
++        pass
++
++    def clear_providernet_fault(self, providernet_id):
++        pass
+diff --git a/neutron/drivers/host.py b/neutron/drivers/host.py
+new file mode 100644
+index 0000000..6fa98b8
+--- /dev/null
++++ b/neutron/drivers/host.py
+@@ -0,0 +1,74 @@
++# Copyright (c) 2013 OpenStack Foundation.
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import abc
++import uuid
++
++import six
++
++from neutron.common import constants
++
++
++@six.add_metaclass(abc.ABCMeta)
++class HostDriver(object):
++    def __init__(self):
++        pass
++
++    @abc.abstractmethod
++    def get_host_uuid(self, context, hostname):
++        pass
++
++    @abc.abstractmethod
++    def get_host_providernets(self, context, host_uuid):
++        pass
++
++    @abc.abstractmethod
++    def get_host_interfaces(self, context, host_uuid):
++        pass
++
++    @abc.abstractmethod
++    def is_host_available(self, context, hostname):
++        pass
++
++
++class NoopHostDriver(HostDriver):
++
++    def get_host_uuid(self, context, hostname):
++        return str(uuid.uuid5(uuid.NAMESPACE_DNS, hostname))
++
++    def get_host_providernets(self, context, host_uuid):
++        interface_uuid = str(uuid.uuid5(uuid.UUID(host_uuid), "interface-0"))
++        providernets = []
++        return {interface_uuid: {'providernets': providernets}}
++
++    def get_host_interfaces(self, context, host_uuid):
++        # Create a fake interface so that we have something to setup bindings
++        # against to satisfy unit tests.
++        interface_uuid = str(uuid.uuid5(uuid.UUID(host_uuid), "interface-0"))
++        result = {interface_uuid: {'uuid': interface_uuid,
++                                   'mtu': constants.DEFAULT_MTU,
++                                   'vlans': '',
++                                   'network_type': 'data'}}
++        return result
++
++    def is_host_available(self, context, hostname):
++        return True
+diff --git a/neutron/extensions/host.py b/neutron/extensions/host.py
+new file mode 100644
+index 0000000..449d00a
+--- /dev/null
++++ b/neutron/extensions/host.py
+@@ -0,0 +1,233 @@
++# Copyright (c) 2013 OpenStack Foundation.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++# implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++
++import abc
++
++from neutron_lib.api import extensions as api_extensions
++from neutron_lib import exceptions as exc
++from neutron_lib.plugins import constants
++
++from neutron._i18n import _
++from neutron.api.v2 import resource_helper
++
++# Attribute Map
++RESOURCE_NAME = 'host'
++RESOURCE_ATTRIBUTE_MAP = {
++    RESOURCE_NAME + 's': {
++        # DB attributes
++        'id': {'allow_post': True, 'allow_put': False,
++               'is_visible': True,
++               'validate': {'type:uuid': None}},
++        'name': {'allow_post': True, 'allow_put': False,
++                 'is_visible': True},
++        'availability': {'allow_post': True, 'allow_put': True,
++                         'validate': {'type:values': ['UP', 'DOWN',
++                                                      'up', 'down']},
++                         'is_visible': True},
++        'created_at': {'allow_post': False, 'allow_put': False,
++                       'is_visible': True},
++        'updated_at': {'allow_post': False, 'allow_put': False,
++                       'is_visible': True},
++        # Operational attributes
++        'tenant_id': {'allow_post': True, 'allow_put': False,
++                      'is_visible': False},
++        'agents': {'allow_post': False, 'allow_put': False,
++                   'is_visible': True},
++        'subnets': {'allow_post': False, 'allow_put': False,
++                    'is_visible': True},
++        'routers': {'allow_post': False, 'allow_put': False,
++                    'is_visible': True},
++        'ports': {'allow_post': False, 'allow_put': False,
++                  'is_visible': True},
++    },
++}
++
++OPERATIONAL_ATTRIBUTES = ['agents', 'subnets', 'routers', 'ports', 'tenant_id']
++
++
++class HostAlreadyExists(exc.Conflict):
++    message = _("Host %(id)s already exists in the database")
++
++
++class HostNotFoundById(exc.NotFound):
++    message = _("Host %(id)s could not be found")
++
++
++class HostNotFoundByName(exc.NotFound):
++    message = _("Host %(hostname)s could not be found")
++
++
++class HostInterfaceNotFoundById(exc.NotFound):
++    message = _("Host interface %(id)s could not be found")
++
++
++class HostMissingInterfaceBody(exc.BadRequest):
++    message = _("Interface parameters missing from bind/unbind request")
++
++
++class HostMissingInterfaceUuid(exc.BadRequest):
++    message = _("Interface UUID missing from bind/unbind request")
++
++
++class HostInvalidInterfaceUuid(exc.BadRequest):
++    message = _("Interface UUID '%(value)s' is not a valid UUID")
++
++
++class HostMissingInterfaceMtu(exc.BadRequest):
++    message = _("Interface MTU missing from bind request")
++
++
++class HostInvalidInterfaceMtu(exc.BadRequest):
++    message = _("Interface MTU value is invalid; value %(value)s")
++
++
++class HostInvalidInterfaceNetworkType(exc.BadRequest):
++    message = _("Interface network type value is invalid; value %(value)s")
++
++
++class HostOutOfRangeInterfaceMtu(exc.BadRequest):
++    message = _("Interface MTU value is out of range; "
++                "min %(minimum)s, max %(maximum)s")
++
++
++class HostMissingInterfaceProviderNetworks(exc.BadRequest):
++    message = _("Interface provider network list missing from bind request")
++
++
++class HostInvalidInterfaceVlans(exc.BadRequest):
++    message = _("Interface VLAN value(s) are invalid; "
++                "expecting comma separated list of integers "
++                "instead of %(values)s")
++
++
++class HostOutOfRangeInterfaceVlan(exc.BadRequest):
++    message = _("Interface VLAN value is out of range; %(vlan_id)s "
++                "min %(minimum)s, max %(maximum)s")
++
++
++class Host(api_extensions.ExtensionDescriptor):
++    """Host based Agent management extension"""
++
++    @classmethod
++    def get_name(cls):
++        return "Host based agent management"
++
++    @classmethod
++    def get_alias(cls):
++        return "host"
++
++    @classmethod
++    def get_description(cls):
++        return "The host based agent management extension."
++
++    @classmethod
++    def get_namespace(cls):
++        return "http://docs.openstack.org/ext/host/api/v2.0"
++
++    @classmethod
++    def get_updated(cls):
++        return "2013-02-03T10:00:00-00:00"
++
++    @classmethod
++    def get_resources(cls):
++        """Returns extension resources """
++        plural_mappings = resource_helper.build_plural_mappings(
++            {}, RESOURCE_ATTRIBUTE_MAP)
++        action_map = {'host': {'bind_interface': 'PUT',
++                               'unbind_interface': 'PUT'}}
++        return resource_helper.build_resource_info(plural_mappings,
++                                                   RESOURCE_ATTRIBUTE_MAP,
++                                                   constants.CORE,
++                                                   action_map=action_map)
++
++    def update_attributes_map(self, attributes):
++        super(Host, self).update_attributes_map(
++            attributes, extension_attrs_map=RESOURCE_ATTRIBUTE_MAP)
++
++    def get_extended_resources(self, version):
++        if version == "2.0":
++            return RESOURCE_ATTRIBUTE_MAP
++        else:
++            return {}
++
++
++class HostPluginBase(object):
++    """REST API to manage agents based on host state.
++
++    All of method must be in an admin context.
++    """
++
++    @abc.abstractmethod
++    def create_host(self, context, host):
++        """Create host record for given host data.
++
++        Agents are stored in the database when they report state once the
++        compute nodes have been initialized.  Upon receiving an agent state
++        report the host record is created automatically.  If no agents have
++        reported their state then this API may be used to create a host record.
++
++        """
++        pass
++
++    @abc.abstractmethod
++    def delete_host(self, context, id):
++        """Delete host and agent records based on host id.
++
++        Agents are stored in the database when they report state once the
++        compute nodes have been initialized.  When a compute node is deleted
++        this API is capable of purging stale information.
++
++        """
++        pass
++
++    @abc.abstractmethod
++    def update_host(self, context, id, host):
++        """
++        Updates the availability status of a host.  The result of this
++        operation is that if the host is being marked as down then any
++        agents running on that host will have their workload unassigned.  If
++        the host is being marked as available then any unassigned networks or
++        routers will be assigned to available agents on this host.
++        @raise exc.BadRequest:
++        """
++        pass
++
++    @abc.abstractmethod
++    def get_hosts(self, context, filters=None, fields=None):
++        pass
++
++    @abc.abstractmethod
++    def get_host(self, context, id, fields=None):
++        pass
++
++    @abc.abstractmethod
++    def bind_interface(self, context, id, body):
++        """Bind an interface with a set of provider networks while also
++        providing system information about an interface.
++        """
++        pass
++
++    @abc.abstractmethod
++    def unbind_interface(self, context, id, body):
++        """Unbind an interface to clear all provider network mappings."""
++        pass
+diff --git a/neutron/extensions/l3agentscheduler.py b/neutron/extensions/l3agentscheduler.py
+index ef2d981..8b098ea 100644
+--- a/neutron/extensions/l3agentscheduler.py
++++ b/neutron/extensions/l3agentscheduler.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ import abc
+ 
+@@ -153,6 +160,11 @@ class InvalidL3Agent(agent.AgentNotFound):
+     message = _("Agent %(id)s is not a L3 Agent or has been disabled")
+ 
+ 
++class IsolatedL3Agent(exceptions.Conflict):
++    message = _("Agent %(id)s does not have access to the required provider "
++                "networks to support the specified router")
++
++
+ class RouterHostedByL3Agent(exceptions.Conflict):
+     message = _("The router %(router_id)s has been already hosted "
+                 "by the L3 Agent %(agent_id)s.")
+diff --git a/neutron/extensions/wrs_net.py b/neutron/extensions/wrs_net.py
+new file mode 100644
+index 0000000..08d0692
+--- /dev/null
++++ b/neutron/extensions/wrs_net.py
+@@ -0,0 +1,74 @@
++# Copyright (c) 2012 OpenStack Foundation.
++# All rights reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from oslo_log import log as logging
++
++from neutron_lib.api import extensions as api_extensions
++
++
++LOG = logging.getLogger(__name__)
++
++HOST = 'wrs-net:host'
++
++EXTENDED_ATTRIBUTES_2_0 = {
++    'routers': {
++        HOST: {'allow_post': False, 'allow_put': False,
++               'enforce_policy': True,
++               'is_visible': True},
++    },
++}
++
++
++class Wrs_net(api_extensions.ExtensionDescriptor):
++    """Extension class supporting port bindings.
++
++    This class is used by neutron's extension framework to make
++    metadata about the port bindings available to external applications.
++
++    With admin rights one will be able to update and read the values.
++    """
++
++    @classmethod
++    def get_name(cls):
++        return "wrs-tenant-network"
++
++    @classmethod
++    def get_alias(cls):
++        return "wrs-net"
++
++    @classmethod
++    def get_description(cls):
++        return "WRS Tenant Network Extensions."
++
++    @classmethod
++    def get_namespace(cls):
++        return "http://docs.windriver.org/tis/ext/wrs-net/v1"
++
++    @classmethod
++    def get_updated(cls):
++        return "2014-10-01T12:00:00-00:00"
++
++    def get_extended_resources(self, version):
++        if version == "2.0":
++            return EXTENDED_ATTRIBUTES_2_0
++        else:
++            return {}
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 112215a..ebaee5e 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from eventlet import greenthread
+ from neutron_lib.api.definitions import extra_dhcp_opt as edo_ext
+@@ -45,6 +52,7 @@ from sqlalchemy.orm import exc as sa_exc
+ from neutron._i18n import _
+ from neutron.agent import securitygroups_rpc as sg_rpc
+ from neutron.api.rpc.agentnotifiers import dhcp_rpc_agent_api
++from neutron.api.rpc.agentnotifiers import host_rpc_agent_api
+ from neutron.api.rpc.handlers import dhcp_rpc
+ from neutron.api.rpc.handlers import dvr_rpc
+ from neutron.api.rpc.handlers import metadata_rpc
+@@ -66,6 +74,7 @@ from neutron.db import db_base_plugin_v2
+ from neutron.db import dvr_mac_db
+ from neutron.db import external_net_db
+ from neutron.db import extradhcpopt_db
++from neutron.db import hosts_db
+ from neutron.db.models import securitygroup as sg_models
+ from neutron.db import models_v2
+ from neutron.db import provisioning_blocks
+@@ -122,7 +131,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 vlantransparent_db.Vlantransparent_db_mixin,
+                 extradhcpopt_db.ExtraDhcpOptMixin,
+                 address_scope_db.AddressScopeDbMixin,
+-                service_type_db.SubnetServiceTypeMixin):
++                service_type_db.SubnetServiceTypeMixin,
++                hosts_db.HostSchedulerDbMixin):
+ 
+     """Implement the Neutron L2 abstractions using modules.
+ 
+@@ -152,7 +162,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                                     "availability_zone",
+                                     "network_availability_zone",
+                                     "default-subnetpools",
+-                                    "subnet-service-types"]
++                                    "subnet-service-types",
++                                    "host"]
+ 
+     @property
+     def supported_extension_aliases(self):
+@@ -192,6 +203,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         self._setup_dhcp()
+         self._start_rpc_notifiers()
+         self.add_agent_status_check_worker(self.agent_health_check)
++        self.add_agent_status_check_worker(self.audit_agent_state)
+         self.add_workers(self.mechanism_manager.get_workers())
+         self._verify_service_plugins_requirements()
+         LOG.info("Modular L2 Plugin initialization complete")
+@@ -213,6 +225,12 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         self.network_scheduler = importutils.import_object(
+             cfg.CONF.network_scheduler_driver
+         )
++        self.host_driver = importutils.import_object(
++            cfg.CONF.host_driver
++        )
++        self.fm_driver = importutils.import_object(
++            cfg.CONF.fm_driver
++        )
+         self.add_periodic_dhcp_agent_status_check()
+ 
+     def _verify_service_plugins_requirements(self):
+@@ -263,6 +281,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         self.agent_notifiers[const.AGENT_TYPE_DHCP] = (
+             dhcp_rpc_agent_api.DhcpAgentNotifyAPI()
+         )
++        self.host_notifier = host_rpc_agent_api.HostAgentNotifyAPI()
+ 
+     @log_helpers.log_method_call
+     def start_rpc_listeners(self):
+diff --git a/neutron/plugins/ml2/rpc.py b/neutron/plugins/ml2/rpc.py
+index 198851d..ed9a868 100644
+--- a/neutron/plugins/ml2/rpc.py
++++ b/neutron/plugins/ml2/rpc.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from neutron_lib.api.definitions import port_security as psec
+ from neutron_lib.api.definitions import portbindings
+@@ -26,6 +33,7 @@ from sqlalchemy.orm import exc
+ 
+ from neutron.api.rpc.handlers import dvr_rpc
+ from neutron.api.rpc.handlers import securitygroups_rpc as sg_rpc
++from neutron.common import constants
+ from neutron.common import rpc as n_rpc
+ from neutron.common import topics
+ from neutron.db import l3_hamode_db
+@@ -65,6 +73,24 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
+             if port['status'] != new_status:
+                 return new_status
+ 
++    def get_host_details(self, rpc_context, **kwargs):
++        """Agent requests host configuration details."""
++        agent_id = kwargs.get('agent_id')
++        hostname = kwargs.get('host')
++        LOG.debug("Host configuration details requested from "
++                  "%(agent_id)s on %(host)s",
++                  {'agent_id': agent_id, 'host': hostname})
++        plugin = directory.get_plugin()
++        host = plugin.get_host_by_name(rpc_context, hostname)
++        # For now only return id, name, and host_state_up
++        data = {'id': host['id'],
++                'name': host['name']}
++        if host.get('availability') == constants.HOST_UP:
++            data['host_state_up'] = True
++        else:
++            data['host_state_up'] = False
++        return data
++
+     def get_device_details(self, rpc_context, **kwargs):
+         """Agent requests device details."""
+         agent_id = kwargs.get('agent_id')
+diff --git a/neutron/plugins/wrs/__init__.py b/neutron/plugins/wrs/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/neutron/plugins/wrs/drivers/__init__.py b/neutron/plugins/wrs/drivers/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+new file mode 100644
+index 0000000..969db27
+--- /dev/null
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -0,0 +1,222 @@
++# Copyright (c) 2015 OpenStack Foundation.
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from fm_api import constants as fm_constants
++from fm_api import fm_api
++from neutron._i18n import _
++from neutron.drivers import fm
++
++
++class DefaultFmDriver(fm.FmDriver):
++
++    def __init__(self):
++        self.fm_api = fm_api.FaultAPIs()
++
++    @staticmethod
++    def _get_port_entity_type_id():
++        return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                              fm_constants.FM_ENTITY_TYPE_PORT)
++
++    @staticmethod
++    def _get_port_entity_instance_id(hostname, port_id):
++        return "{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                    hostname,
++                                    fm_constants.FM_ENTITY_TYPE_PORT,
++                                    port_id)
++
++    @staticmethod
++    def _get_interface_entity_type_id():
++        return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                              fm_constants.FM_ENTITY_TYPE_INTERFACE)
++
++    @staticmethod
++    def _get_interface_entity_instance_id(hostname, interface_id):
++        return "{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                    hostname,
++                                    fm_constants.FM_ENTITY_TYPE_INTERFACE,
++                                    interface_id)
++
++    @staticmethod
++    def _get_providernet_entity_type_id():
++        return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_SERVICE,
++                              fm_constants.FM_ENTITY_TYPE_PROVIDERNET)
++
++    @staticmethod
++    def _get_providernet_entity_instance_id(providernet_id):
++        return "{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_SERVICE,
++                                    fm_constants.FM_SERVICE_NETWORKING,
++                                    fm_constants.FM_ENTITY_TYPE_PROVIDERNET,
++                                    providernet_id)
++
++    @staticmethod
++    def _get_agent_entity_type_id():
++        return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                              fm_constants.FM_ENTITY_TYPE_AGENT)
++
++    @staticmethod
++    def _get_agent_entity_instance_id(hostname, agent_id):
++        return "{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                    hostname,
++                                    fm_constants.FM_ENTITY_TYPE_AGENT,
++                                    agent_id)
++
++    @staticmethod
++    def _get_fault_severity(severity):
++        """Map a fault driver severity to an FM API severity"""
++        map = {fm.FM_SEVERITY_CRITICAL:
++               fm_constants.FM_ALARM_SEVERITY_CRITICAL,
++               fm.FM_SEVERITY_MAJOR:
++               fm_constants.FM_ALARM_SEVERITY_MAJOR,
++               fm.FM_SEVERITY_MINOR:
++               fm_constants.FM_ALARM_SEVERITY_MINOR,
++               fm.FM_SEVERITY_CLEAR:
++               fm_constants.FM_ALARM_SEVERITY_CLEAR}
++        return map[severity]
++
++    def report_port_state_fault(self, hostname, port_id, severity):
++        entity_type_id = self._get_port_entity_type_id()
++        entity_instance_id = self._get_port_entity_instance_id(hostname,
++                                                               port_id)
++        fm_severity = self._get_fault_severity(severity)
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_PORT,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_severity,
++            reason_text=_("'Data' Port failed."),
++            alarm_type=fm_constants.FM_ALARM_TYPE_4,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_29,
++            proposed_repair_action=_("Check cabling and far-end port "
++                                     "configuration and status on adjacent "
++                                     "equipment."),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_port_state_fault(self, hostname, port_id):
++        entity_instance_id = self._get_port_entity_instance_id(hostname,
++                                                               port_id)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_PORT,
++                                entity_instance_id)
++
++    def get_port_state_faults(self, hostname):
++        return self.fm_api.get_faults_by_id(
++            fm_constants.FM_ALARM_ID_NETWORK_PORT)
++
++    def report_interface_state_fault(self, hostname, interface_id, severity):
++        entity_type_id = self._get_interface_entity_type_id()
++        entity_instance_id = \
++            self._get_interface_entity_instance_id(hostname, interface_id)
++
++        fm_severity = self._get_fault_severity(severity)
++
++        if fm_severity == fm_constants.FM_ALARM_SEVERITY_CRITICAL:
++            reason_text = _("'Data' Interface failed.")
++        else:
++            reason_text = _("'Data' Interface degraded.")
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_INTERFACE,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_severity,
++            reason_text=reason_text,
++            alarm_type=fm_constants.FM_ALARM_TYPE_4,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_29,
++            proposed_repair_action=_("Check cabling and far-end port "
++                                     "configuration and status on adjacent "
++                                     "equipment."),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_interface_state_fault(self, hostname, interface_id):
++        entity_instance_id = \
++            self._get_interface_entity_instance_id(hostname, interface_id)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_INTERFACE,
++                                entity_instance_id)
++
++    def get_interface_state_faults(self, hostname):
++        return self.fm_api.get_faults_by_id(
++            fm_constants.FM_ALARM_ID_NETWORK_INTERFACE)
++
++    def report_providernet_fault(self, providernet_id):
++        entity_type_id = self._get_providernet_entity_type_id()
++        entity_instance_id = \
++            self._get_providernet_entity_instance_id(providernet_id)
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_PROVIDERNET,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_constants.FM_ALARM_SEVERITY_MAJOR,
++            reason_text=_("No enabled compute host with connectivity "
++                          "to provider network."),
++            alarm_type=fm_constants.FM_ALARM_TYPE_7,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
++            proposed_repair_action=_("Enable compute hosts with required "
++                                     "provider network connectivity."),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_providernet_fault(self, providernet_id):
++        """
++        Clear a fault management alarm condition for provider network status
++        """
++        entity_instance_id = \
++            self._get_providernet_entity_instance_id(providernet_id)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_PROVIDERNET,
++                                entity_instance_id)
++
++    def report_agent_fault(self, hostname, agent_id):
++        """
++        Generate a fault management alarm condition for agent alive
++        """
++        entity_type_id = self._get_agent_entity_type_id()
++        entity_instance_id = self._get_agent_entity_instance_id(hostname,
++                                                                agent_id)
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_AGENT,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_constants.FM_ALARM_SEVERITY_MAJOR,
++            reason_text=_("Networking Agent not responding."),
++            alarm_type=fm_constants.FM_ALARM_TYPE_7,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
++            proposed_repair_action=(
++                _("If condition persists, attempt to clear issue by "
++                  "administratively locking and unlocking the Host.")),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_agent_fault(self, hostname, agent_id):
++        """
++        Clear a fault management alarm condition for agent alive
++        """
++        entity_instance_id = self._get_agent_entity_instance_id(hostname,
++                                                                agent_id)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_AGENT,
++                                entity_instance_id)
+diff --git a/neutron/plugins/wrs/drivers/host.py b/neutron/plugins/wrs/drivers/host.py
+new file mode 100644
+index 0000000..2f1f67c
+--- /dev/null
++++ b/neutron/plugins/wrs/drivers/host.py
+@@ -0,0 +1,183 @@
++# Copyright (c) 2013 OpenStack Foundation.
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import re
++
++import six
++
++from oslo_config import cfg
++from oslo_log import log as logging
++
++from cgtsclient import exc as cgts_exceptions
++from cgtsclient.v1 import client as cgts_client_v1
++from keystoneclient.v2_0 import client as keystone_client_v2
++from neutron_lib.plugins import directory
++
++from neutron.common import constants
++from neutron.drivers import host
++from neutron.extensions import host as ext_host
++
++LOG = logging.getLogger(__name__)
++
++
++class DefaultHostDriver(host.HostDriver):
++
++    def __init__(self):
++        super(DefaultHostDriver, self).__init__()
++        self._plugin = None
++
++    def _get_plugin(self):
++        if not self._plugin:
++            self._plugin = directory.get_plugin()
++        return self._plugin
++
++    def _get_ksclient(self):
++        auth_url = cfg.CONF.KEYSTONE_AUTHTOKEN.identity_uri + "v2.0"
++        return keystone_client_v2.Client(
++            username=cfg.CONF.KEYSTONE_AUTHTOKEN.admin_user,
++            password=cfg.CONF.KEYSTONE_AUTHTOKEN.admin_password,
++            tenant_name=cfg.CONF.KEYSTONE_AUTHTOKEN.admin_tenant_name,
++            auth_url=auth_url)
++
++    def _get_cgts_url(self):
++        url = self._get_ksclient().service_catalog.url_for(
++            service_type='platform', endpoint_type='admin')
++        # The keystone endpoint has a version number at the end of the URL but
++        # the CGTS client does not expect this so remove it.
++        url = re.sub('/v[0-9\\.]+$', '/', url)
++        return url
++
++    def _get_cgtsclient(self):
++        _ksclient = self._get_ksclient()
++        token = _ksclient.auth_token
++        return cgts_client_v1.Client(
++            endpoint=self._get_cgts_url(),
++            token=token,
++            username=cfg.CONF.KEYSTONE_AUTHTOKEN.admin_user,
++            password=cfg.CONF.KEYSTONE_AUTHTOKEN.admin_password,
++            tenant_name=cfg.CONF.KEYSTONE_AUTHTOKEN.admin_tenant_name,
++            auth_url=cfg.CONF.KEYSTONE_AUTHTOKEN.identity_uri + "v2.0")
++
++    def get_host_uuid(self, context, hostname):
++        try:
++            host = self._get_cgtsclient().ihost.get(hostname)
++            host_uuid = host.uuid
++        except cgts_exceptions.HTTPNotFound:
++            return None
++        return host_uuid
++
++    def _get_host_providernet_names(self, host_uuid):
++        """
++        Returns the list of provider network names that are currently
++        assigned to any interface owned by the specified host UUID.  The names
++        are retrieved from the sysinv database.  The data is
++        organized as a dictionary keyed by interface uuid with a single key
++        representing the providernet list.
++
++           {<uuid>: {'providernets': [a, b, c]},
++            <uuid>: {'providernets': [d, e, f]},
++            ...}
++
++        """
++        result = {}
++        try:
++            interfaces = self._get_cgtsclient().iinterface.list(host_uuid)
++            for interface in interfaces:
++                if interface.networktype == "data":
++                    names = set()
++                    value = interface.providernetworks
++                    providernets = value.split(',') if value else []
++                    for providernet in providernets:
++                        names.add(providernet)
++                    result[interface.uuid] = {'providernets': list(names)}
++        except cgts_exceptions.HTTPNotFound:
++            pass
++        return result
++
++    def get_host_providernets(self, context, host_uuid):
++        """
++        Returns the list of provider network uuids that are currently
++        assigned to interfaces owned by the specified host UUID.  The data is
++        organized as a dictionary keyed by interface uuid with a single key
++        representing the providernet list.
++
++           {<uuid>: {'providernets': [1, 2, 3]},
++            <uuid>: {'providernets': [4, 5, 6]},
++            ...}
++
++        """
++        result = {}
++        # Retrieve the results as providernet names and then convert to
++        # providernet id values.
++        data = self._get_host_providernet_names(host_uuid)
++        for uuid, body in six.iteritems(data):
++            values = []
++            for name in body['providernets']:
++                providernet = self._get_plugin().get_providernet_by_name(
++                    context, name.strip())
++                if providernet:
++                    values.append(providernet['id'])
++                else:
++                    LOG.error(("host {} is referencing "
++                               "non-existent provider network {}").format(
++                                   host_uuid, name.strip()))
++            result[uuid] = {'providernets': values}
++        return result
++
++    def get_host_interfaces(self, context, host_uuid):
++        """
++        Returns the list of data interfaces owned by the specified host UUID.
++        The data is organized as a dictionary keyed by interface uuid with a
++        dictionary representing the relevant interface fields.
++
++           {<uuid>: { ...body... },
++            <uuid>: { ...body... },
++            ...}
++
++        """
++        result = {}
++        interfaces = self._get_cgtsclient().iinterface.list(host_uuid)
++        for interface in interfaces:
++            if interface.networktype != "data":
++                continue
++            providernets = interface.providernetworks
++            result[interface.uuid] = {'uuid': interface.uuid,
++                                      'mtu': interface.imtu,
++                                      'vlans': '',
++                                      'network_type': interface.networktype,
++                                      'providernets': providernets}
++        return result
++
++    def is_host_available(self, context, hostname):
++        """
++        Returns whether the host is available or not.  This code should live in
++        the plugin instead of the driver but since we do have our own subclass
++        of the ml2 plugin this call needs to return true so that existing unit
++        tests continue to work.  If we had our own subclass we would simply
++        return true in the base class and run this code in our subclass.
++        """
++        try:
++            host = self._get_plugin().get_host_by_name(context, hostname)
++            return host['availability'] == constants.HOST_UP
++        except ext_host.HostNotFoundByName:
++            # Does not exist yet
++            return False
+diff --git a/neutron/scheduler/dhcp_agent_scheduler.py b/neutron/scheduler/dhcp_agent_scheduler.py
+index 166993d..d4463ce 100644
+--- a/neutron/scheduler/dhcp_agent_scheduler.py
++++ b/neutron/scheduler/dhcp_agent_scheduler.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ 
+ import collections
+diff --git a/neutron/scheduler/dhcp_host_agent_scheduler.py b/neutron/scheduler/dhcp_host_agent_scheduler.py
+new file mode 100644
+index 0000000..db75942
+--- /dev/null
++++ b/neutron/scheduler/dhcp_host_agent_scheduler.py
+@@ -0,0 +1,54 @@
++# Copyright (c) 2013-2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from oslo_log import log as logging
++
++from neutron.scheduler import dhcp_agent_scheduler
++
++
++LOG = logging.getLogger(__name__)
++
++
++class HostBasedScheduler(dhcp_agent_scheduler.AZAwareWeightScheduler):
++    """
++    Allocate a DHCP agent for a network based on the least loaded DHCP agent.
++
++    This is a refinement of the default WeightScheduler.  Its purpose is to
++    only schedule networks to hosts that are attached to the provider networks
++    that are needed in order to correctly implement the router instance.
++    """
++
++    def auto_schedule_networks(self, plugin, context, host):
++        if not plugin.is_host_available(context, host):
++            LOG.warning(('Host %s is not available'), host)
++            return False
++        return super(HostBasedScheduler, self).auto_schedule_networks(
++            plugin, context, host)
++
++    def get_dhcp_subnets_for_host(self, plugin, context, host):
++        # TODO(alegacy): return an empty list until providernet code is merged
++        return []
++
++    def filter_agents(self, plugin, context, network):
++        # TODO(alegacy): return an empty list until providernet code is merged
++        return []
+diff --git a/neutron/scheduler/l3_agent_scheduler.py b/neutron/scheduler/l3_agent_scheduler.py
+index d15d1fd..ee5b54f 100644
+--- a/neutron/scheduler/l3_agent_scheduler.py
++++ b/neutron/scheduler/l3_agent_scheduler.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ import abc
+ import collections
+@@ -74,7 +81,16 @@ class L3Scheduler(object):
+ 
+         return [r for r in routers if r['id'] not in ids_to_discard]
+ 
+-    def auto_schedule_routers(self, plugin, context, host, router_ids=None):
++    def get_l3_agents_for_router(self, plugin, context, router_id):
++        """Return the list of agents that can host the given router."""
++        return plugin.get_l3_agents(context, active=True)
++
++    def can_l3_agent_host_router(self, plugin, context, agent_id, router_id):
++        """Return true if the agent specified can host the router."""
++        return True
++
++    def auto_schedule_routers(self, plugin, context, host, router_ids=None,
++                              exclude_distributed=True):
+         """Schedule under-scheduled routers to L3 Agents.
+ 
+         An under-scheduled router is a router that is either completely
+@@ -141,7 +157,8 @@ class L3Scheduler(object):
+                            'agent_id': current_l3_agents[0]['id']})
+                 return []
+ 
+-            active_l3_agents = plugin.get_l3_agents(context, active=True)
++            active_l3_agents = self.get_l3_agents_for_router(
++                plugin, context, sync_router['id'])
+             if not active_l3_agents:
+                 LOG.warning('No active L3 agents')
+                 return []
+diff --git a/neutron/scheduler/l3_host_agent_scheduler.py b/neutron/scheduler/l3_host_agent_scheduler.py
+new file mode 100644
+index 0000000..bd0216f
+--- /dev/null
++++ b/neutron/scheduler/l3_host_agent_scheduler.py
+@@ -0,0 +1,95 @@
++# Copyright (c) 2013-2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from oslo_log import log as logging
++
++from neutron.scheduler import l3_agent_scheduler
++
++
++LOG = logging.getLogger(__name__)
++
++
++class HostBasedScheduler(l3_agent_scheduler.AZLeastRoutersScheduler):
++    """
++    Randomly allocate an L3 agent for a router.
++
++    This is a refinement of the default ChanceScheduler.  Its purpose is to
++    only schedule routers to hosts that are attached to the provider networks
++    that are needed in order to correctly implement the router instance.
++    """
++
++    def _get_routers_for_host(self, context, plugin, host):
++        # TODO(alegacy): return an empty list until providernet code is merged
++        return []
++
++    def _get_routers_can_schedule(self, context, plugin, routers, l3_agent):
++        """Filter the list of routers to remove those that are not supported
++        by the specified host.
++        """
++        host = l3_agent['host']
++        router_ids = self._get_routers_for_host(context, plugin, host)
++        target_routers = [r for r in routers if r['id'] in router_ids]
++        # Continue to the parent class and let it further refine the list of
++        # target routers.
++        return super(HostBasedScheduler, self)._get_routers_can_schedule(
++            context, plugin, target_routers, l3_agent)
++
++    def _get_l3_agents_for_router(self, plugin, context, router_id,
++                                  agent_id=None):
++        # TODO(alegacy): return an empty list until providernet code is merged
++        return []
++
++    def get_l3_agents_for_router(self, plugin, context, router_id):
++        """See _get_l3_agents_for_router for a function description.
++        """
++        return self._get_l3_agents_for_router(
++            plugin, context, router_id, agent_id=None)
++
++    def can_l3_agent_host_router(self, plugin, context, agent_id, router_id):
++        """Return true if the agent specified can host the router.  For this
++        we reuse the get_l3_agents_for_router() function and filter the list
++        down to only this one agent_id.  If a non-empty list is returned then
++        the agent and router are compatible.
++
++        :returns: True if given L3 agent can host the given router id
++        """
++        return bool(self._get_l3_agents_for_router(
++                plugin, context, router_id, agent_id=agent_id))
++
++    def auto_schedule_routers(self, plugin, context, host, router_ids,
++                              exclude_distributed=False):
++        """Schedule non-hosted routers to L3 Agent running on host.
++
++        If router_ids is given, each router in router_ids is scheduled
++        if it is not scheduled yet. Otherwise all unscheduled routers
++        are scheduled.
++        Do not schedule the routers which are hosted already
++        by active l3 agents.
++
++        :returns: True if routers have been successfully assigned to host
++        """
++        if not plugin.is_host_available(context, host):
++            LOG.warning(('Host %s is not available'), host)
++            return
++        super(HostBasedScheduler, self).auto_schedule_routers(
++            plugin, context, host, router_ids, exclude_distributed)
+diff --git a/neutron/services/l3_router/l3_router_plugin.py b/neutron/services/l3_router/l3_router_plugin.py
+index 7be653a..3a07318 100644
+--- a/neutron/services/l3_router/l3_router_plugin.py
++++ b/neutron/services/l3_router/l3_router_plugin.py
+@@ -34,6 +34,7 @@ from neutron.db import l3_dvrscheduler_db
+ from neutron.db import l3_gwmode_db
+ from neutron.db import l3_hamode_db
+ from neutron.db import l3_hascheduler_db
++from neutron.db import l3_host_db
+ from neutron.db.models import l3 as l3_models
+ from neutron.extensions import l3
+ from neutron.quota import resource_registry
+@@ -56,6 +57,7 @@ class L3RouterPlugin(service_base.ServicePluginBase,
+                      common_db_mixin.CommonDbMixin,
+                      extraroute_db.ExtraRoute_db_mixin,
+                      l3_hamode_db.L3_HA_NAT_db_mixin,
++                     l3_host_db.L3HostSchedulerDbMixin,
+                      l3_gwmode_db.L3_NAT_db_mixin,
+                      l3_dvr_ha_scheduler_db.L3_DVR_HA_scheduler_db_mixin,
+                      dns_db.DNSDbMixin):
+@@ -71,8 +73,9 @@ class L3RouterPlugin(service_base.ServicePluginBase,
+     """
+     _supported_extension_aliases = ["dvr", "router", "ext-gw-mode",
+                                     "extraroute", "l3_agent_scheduler",
+-                                    "l3-ha", "router_availability_zone",
+-                                    "l3-flavors"]
++                                    "l3-ha", "router_availability_zone"]
++    # NOTE(alegacy): removed l3-flavors because it requires "router" and
++    # "flavors" but "flavors" is not part of the default set.
+ 
+     __native_pagination_support = True
+     __native_sorting_support = True
+diff --git a/neutron/tests/etc/policy.json b/neutron/tests/etc/policy.json
+index c59e075..792c43a 100644
+--- a/neutron/tests/etc/policy.json
++++ b/neutron/tests/etc/policy.json
+@@ -107,6 +107,8 @@
+     "update_router": "rule:admin_or_owner",
+     "update_router:external_gateway_info": "rule:admin_or_owner",
+     "update_router:external_gateway_info:network_id": "rule:admin_or_owner",
++    "get_router:wrs-net:host": "rule:admin_only",
++    "get_routers:wrs-net:host": "rule:admin_only",
+     "update_router:external_gateway_info:enable_snat": "rule:admin_only",
+     "update_router:distributed": "rule:admin_only",
+     "update_router:ha": "rule:admin_only",
+diff --git a/neutron/tests/unit/plugins/wrs/__init__.py b/neutron/tests/unit/plugins/wrs/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/neutron/tests/unit/plugins/wrs/test_host_driver.py b/neutron/tests/unit/plugins/wrs/test_host_driver.py
+new file mode 100644
+index 0000000..7bba22a
+--- /dev/null
++++ b/neutron/tests/unit/plugins/wrs/test_host_driver.py
+@@ -0,0 +1,109 @@
++# Copyright (c) 2013 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import uuid
++
++from oslo_log import log as logging
++
++from neutron.common import constants
++from neutron.drivers import host as host_driver
++from neutron.extensions import host as ext_host
++from neutron_lib.plugins import directory
++
++LOG = logging.getLogger(__name__)
++
++
++class TestHostDriver(host_driver.HostDriver):
++
++    def __init__(self):
++        super(TestHostDriver, self).__init__()
++        self._hosts_by_name = {}
++        self._hosts_by_uuid = {}
++        self._pnets_by_name = {}
++        self._pnet_bindings = {}
++        self._interface_by_host = {}
++        self._plugin = None
++        LOG.info("Test host driver loaded")
++
++    def _get_plugin(self):
++        if not self._plugin:
++            self._plugin = directory.get_plugin()
++        return self._plugin
++
++    def get_host_uuid(self, context, hostname):
++        if hostname in self._hosts_by_name[hostname]:
++            host = self._hosts_by_name[hostname]
++            return host['id']
++        return None
++
++    def get_host_providernets(self, context, host_uuid):
++        if host_uuid not in self._hosts_by_uuid:
++            return {}
++        host = self._hosts_by_uuid[host_uuid]
++        if host['name'] not in self._interface_by_host:
++            return {}
++        data = self._interface_by_host[host['name']]
++        names = data['providernets'].strip()
++        providernets = names.split(',') if names else []
++        values = []
++        for name in providernets:
++            providernet = self._get_plugin().get_providernet_by_name(
++                context, name.strip())
++            if providernet:
++                values.append(providernet['id'])
++        return {data['uuid']: {'providernets': values}}
++
++    def get_host_interfaces(self, context, host_uuid):
++        if host_uuid in self._hosts_by_uuid:
++            host = self._hosts_by_uuid[host_uuid]
++            if host['name'] in self._interface_by_host:
++                data = self._interface_by_host[host['name']]
++                return {data['uuid']: data}
++        return {}
++
++    def add_host(self, host):
++        self._hosts_by_name[host['name']] = host
++        self._hosts_by_uuid[host['id']] = host
++        self._interface_by_host[host['name']] = {
++            'uuid': str(uuid.uuid4()),
++            'mtu': constants.DEFAULT_MTU,
++            'vlans': '',
++            'network_type': 'data',
++            'providernets': ''}
++
++    def add_interface(self, host, interface):
++        self._interface_by_host[host] = interface
++
++    def is_host_available(self, context, hostname):
++        """
++        Returns whether the host is available or not.  This code should live in
++        the plugin instead of the driver but since we do have our own subclass
++        of the ml2 plugin this call needs to return true so that existing unit
++        tests continue to work.  If we had our own subclass we would simply
++        return true in the base class and run this code in our subclass.
++        """
++        try:
++            host = self._get_plugin().get_host_by_name(context, hostname)
++            return host['availability'] == constants.HOST_UP
++        except ext_host.HostNotFoundByName:
++            # Does not exist yet
++            return False
+diff --git a/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py b/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+new file mode 100644
+index 0000000..7078b42
+--- /dev/null
++++ b/neutron/tests/unit/plugins/wrs/test_wrs_plugin.py
+@@ -0,0 +1,90 @@
++# Copyright (c) 2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++#
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import functools
++
++from oslo_log import log as logging
++
++from neutron.api import extensions
++from neutron.plugins.ml2 import config
++from neutron.tests.unit.api import test_extensions
++from neutron.tests.unit.db import test_db_base_plugin_v2 as test_plugin
++from neutron.tests.unit.plugins.ml2 import test_plugin as test_ml2_plugin
++from neutron_lib import context
++
++LOG = logging.getLogger(__name__)
++
++PLUGIN_NAME = 'neutron.plugins.ml2.plugin.Ml2Plugin'
++
++
++class WrsMl2PluginV2TestCase(test_plugin.NeutronDbPluginV2TestCase):
++
++    _mechanism_drivers = ['logger', 'test']
++
++    def setup_parent(self):
++        """Perform parent setup with the common plugin configuration class."""
++        l3_plugin = ('neutron.services.l3_router.l3_router_plugin.'
++                     'L3RouterPlugin')
++        service_plugins = {'l3_plugin_name': l3_plugin}
++        # Ensure that the parent setup can be called without arguments
++        # by the common configuration setUp.
++        parent_setup = functools.partial(
++            super(WrsMl2PluginV2TestCase, self).setUp,
++            plugin=PLUGIN_NAME,
++            service_plugins=service_plugins,
++        )
++        self.useFixture(test_ml2_plugin.Ml2ConfFixture(parent_setup))
++
++    def setup_config(self):
++        super(WrsMl2PluginV2TestCase, self).setup_config()
++        # Setup the plugin configuration to match the WRS runtime
++        # configuration
++        config.cfg.CONF.set_override('type_drivers',
++                                     ['managed_flat',
++                                      'managed_vlan',
++                                      'managed_vxlan'],
++                                     group='ml2')
++        config.cfg.CONF.set_override('tenant_network_types',
++                                     ['flat', 'vlan', 'vxlan'],
++                                     group='ml2')
++        config.cfg.CONF.set_override('router_status_managed',
++                                     True)
++        # Setup our customer schedulers
++        config.cfg.CONF.set_override(
++            'network_scheduler_driver',
++            'neutron.scheduler.dhcp_host_agent_scheduler.HostBasedScheduler')
++        config.cfg.CONF.set_override(
++            'router_scheduler_driver',
++            'neutron.scheduler.l3_host_agent_scheduler.HostBasedScheduler')
++
++    def setUp(self):
++        # Enable the test mechanism driver to ensure that
++        # we can successfully call through to all mechanism
++        # driver apis.
++        config.cfg.CONF.set_override('mechanism_drivers',
++                                     self._mechanism_drivers,
++                                     group='ml2')
++        self.setup_parent()
++        ext_mgr = extensions.PluginAwareExtensionManager.get_instance()
++        self.ext_api = test_extensions.setup_extensions_middleware(ext_mgr)
++        self.adminContext = context.get_admin_context()
+diff --git a/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py b/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
+index 29892a2..59064f0 100644
+--- a/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
++++ b/neutron/tests/unit/scheduler/test_l3_agent_scheduler.py
+@@ -430,16 +430,14 @@ class L3SchedulerTestBaseMixin(object):
+         }
+         plugin.get_router.return_value = sync_router
+         with mock.patch.object(scheduler, 'bind_router'),\
+-                mock.patch.object(plugin,
+-                                  'get_snat_bindings',
+-                                  return_value=False):
++                mock.patch.object(scheduler, 'get_l3_agents_for_router',
++                                  return_value=[agent]):
+             scheduler._schedule_router(
+                 plugin, self.adminContext, 'foo_router_id', None)
+         expected_calls = [
+             mock.call.get_router(mock.ANY, 'foo_router_id'),
+             mock.call.get_l3_agents_hosting_routers(
+                 mock.ANY, ['foo_router_id'], admin_state_up=True),
+-            mock.call.get_l3_agents(mock.ANY, active=True),
+             mock.call.get_l3_agent_candidates(mock.ANY, sync_router, [agent]),
+         ]
+         plugin.assert_has_calls(expected_calls)
+@@ -1274,6 +1272,7 @@ class L3DvrSchedulerTestCase(testlib_api.SqlTestCase):
+ 
+     def _prepare_schedule_snat_tests(self):
+         agent = agent_model.Agent()
++        agent.agent_type = constants.AGENT_TYPE_L3
+         agent.admin_state_up = True
+         agent.heartbeat_timestamp = timeutils.utcnow()
+         router = {
+-- 
+2.7.4
+

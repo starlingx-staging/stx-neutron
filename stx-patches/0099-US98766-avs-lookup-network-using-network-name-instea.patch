@@ -1,0 +1,105 @@
+From 2726e7da900f8be6e909fc4add744b741214a2af Mon Sep 17 00:00:00 2001
+From: Jianqiang Shi <jianqiang.shi@windriver.com>
+Date: Thu, 11 Jan 2018 14:32:35 -0500
+Subject: [PATCH 099/155] US98766: avs: lookup network using network name
+ instead of uuid
+
+Lookup network using network name instead of uuid, since avs and agent may
+use different network uuid. This is because uuid is automatically created
+by ovsdb server. It is possible that agent and avs use different uuid's for
+the same network. This is different than current avs in which uuid is
+always the same with agent.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 89062cf..deb53f2 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1229,6 +1229,12 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             'physical_network': network['physical_network'],
+             'segmentation_id': network['segmentation_id']}
+ 
++    def find_network_by_name(self, network_name):
++        for network_id, network in six.iteritems(self.virtual_networks):
++            if network['name'] == network_name:
++                return network
++        return
++
+     def setup_interface(self, port, details, vlan_id=None):
+         port_uuid = port['uuid']
+         device_owner = details['device_owner']
+@@ -1247,15 +1253,16 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             # The network will be created external to this process so wait for
+             # it.  This is the case in SDN where the controller may create some
+             # networks depending on what mode it is running in.
+-            instance = self.virtual_networks.get(network_uuid)
++            instance = self.find_network_by_name(network_name)
+             if not instance:
+                 data = {'port': port, 'details': details}
+-                self.deferred_ports[network_uuid][port_uuid] = data
++                self.deferred_ports[network_name][port_uuid] = data
+                 LOG.warning("Deferring setup of {} port {} "
+                             "due to missing network {} ({})".format(
+                                 device_owner, port_uuid,
+                                 network_name, network_uuid))
+                 return
++            network_uuid = instance['uuid']
+ 
+         # Setup the tenant interface for a trunk
+         iface_uuid = details['port_id']  # subport
+@@ -2393,14 +2400,14 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+                 network_name)
+         return network_uuid, network_name
+ 
+-    def _handle_new_virtual_network(self, network_uuid, network):
++    def _handle_new_virtual_network(self, network_name, network):
+         """
+         Handles the addition of a new tenant network in AVS.  This means that
+         we need to consult our deferred port and router interface list and
+         attach any objects that were waiting for this network.
+         """
+         # Attach all deferred ports
+-        ports = copy.deepcopy(self.deferred_ports[network_uuid])
++        ports = copy.deepcopy(self.deferred_ports[network_name])
+         for port_uuid, data in six.iteritems(ports):
+             port_details = data['details']
+             device_owner = port_details['device_owner']
+@@ -2408,7 +2415,7 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+                 self.handle_updated_port(data['port'], port_details)
+             else:
+                 self.handle_updated_interface(data['port'], port_details)
+-            del self.deferred_ports[network_uuid][port_uuid]
++            del self.deferred_ports[network_name][port_uuid]
+ 
+     def _process_virtual_networks(self, current_networks, previous_networks):
+         """
+@@ -2421,7 +2428,8 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         added = current - previous
+         for network_uuid in added:
+             network = current_networks[network_uuid]
+-            self._handle_new_virtual_network(network_uuid, network)
++            network_name = network['name']
++            self._handle_new_virtual_network(network_name, network)
+         return current_networks
+ 
+     def manage_network_for_device(self, port_details):
+@@ -2435,11 +2443,11 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         super(VSwitchSdnNeutronAgent, self).handle_removed_port(uuid)
+         # Check whether we were waiting for a network to appear for this port
+         # or interface object.
+-        for network_uuid in self.deferred_ports.keys():
+-            ports = copy.deepcopy(self.deferred_ports[network_uuid])
++        for network_name in self.deferred_ports.keys():
++            ports = copy.deepcopy(self.deferred_ports[network_name])
+             for port_uuid, data in six.iteritems(ports):
+                 if port_uuid == uuid:
+-                    del self.deferred_ports[network_uuid][port_uuid]
++                    del self.deferred_ports[network_name][port_uuid]
+         return
+ 
+ 
+-- 
+2.7.4
+

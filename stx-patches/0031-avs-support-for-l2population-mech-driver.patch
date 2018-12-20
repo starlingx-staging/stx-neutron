@@ -1,0 +1,734 @@
+From 94e30e120d1274574d094f0744615d6e2c01776d Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 27 Jul 2017 12:50:20 -0500
+Subject: [PATCH 031/155] avs: support for l2population mech driver
+
+This adds l2pop RPC handling in the neutron-avs-agent.  The neutron-server
+l2population mechanism driver sends down FDB updates via RPC.  The agent will
+translate those in to endpoint and ip-endpoint entries on vswitch VTEP
+interfaces.
+
+Conflicts:
+	neutron/plugins/wrs/agent/avs/agent.py
+	neutron/plugins/wrs/drivers/mech_vswitch.py
+
+fixup! avs: support for l2population mech driver
+
+We have decided that we are not going to enforce that external networks be
+backed only by multicast vxlan or evpn vxlan.  It would be too difficult for a
+customer to reconfigure the system if they accidentally made a static vxlan for
+the external network if what they intended was an evpn network.  So we are
+allowing a more flexible config by letting them assign BGP EVPN instances to
+the static provider network if that is what they need.
+
+If they configure an external tenant network on a static providernet and do not
+setup BGP EVPN then they will not be able to reach the external gateway but
+that it their responsibility.
+---
+ neutron/agent/vswitch/api.py                |  84 ++++++++++
+ neutron/agent/vswitch/exceptions.py         |  28 ++++
+ neutron/agent/vswitch/manager.py            | 111 +++++++++++++
+ neutron/extensions/wrs_provider.py          |   4 -
+ neutron/plugins/wrs/agent/avs/agent.py      | 249 +++++++++++++++++++++++++++-
+ neutron/plugins/wrs/drivers/mech_vswitch.py |  42 +++++
+ 6 files changed, 505 insertions(+), 13 deletions(-)
+
+diff --git a/neutron/agent/vswitch/api.py b/neutron/agent/vswitch/api.py
+index f20989d..2932095 100644
+--- a/neutron/agent/vswitch/api.py
++++ b/neutron/agent/vswitch/api.py
+@@ -192,6 +192,16 @@ class VSwitchManagementAPI(object):
+         except exc.CommunicationError as e:
+             raise exceptions.VSwitchCommunicationError(str(e))
+ 
++    def _execute_vtep_request(self, callable, endpoint=None):
++        try:
++            return self._do_request(callable)
++        except exc.CommunicationError as e:
++            raise exceptions.VSwitchCommunicationError(str(e))
++        except exc.HTTPNotFound as e:
++            raise exceptions.VSwitchEndpointNotFoundError(str(e), endpoint)
++        except exc.HTTPException as e:
++            raise exceptions.VSwitchEndpointError(str(e), endpoint)
++
+     def get_engine_list_stats(self):
+         """
+         Sends a request to the vswitch requesting the current list of engine
+@@ -696,3 +706,77 @@ class VSwitchManagementAPI(object):
+         """
+         return self._execute_ping_request(
+             lambda: self.client.ping.get(ping_id))
++
++    def add_vtep_endpoint(self, interface_uuid, endpoint):
++        """
++        Sends a request to the vswitch requesting the addition of a static
++        VTEP Endpoint entry.
++        """
++        return self._execute_vtep_request(
++            lambda: self.client.vxlan.add(interface_uuid, endpoint), endpoint)
++
++    def delete_vtep_endpoint(self, interface_uuid, mac_address):
++        """
++        Sends a request to the vswitch requesting the deletion of a static
++        VTEP Endpoint entry.
++        """
++        self._execute_vtep_request(
++            lambda: self.client.vxlan.remove(interface_uuid, mac_address))
++
++    def get_vtep_endpoint_list(self, interface_uuid):
++        """
++        Sends a request to the vswitch requesting the full list of VTEP
++        Endpoint entries.
++        """
++        return self._execute_vtep_request(
++            lambda: self.client.vxlan.get_endpoints(interface_uuid))
++
++    def add_vtep_peer(self, interface_uuid, peer):
++        """
++        Sends a request to the vswitch requesting the addition of a static
++        VTEP peer entry.
++        """
++        return self._execute_vtep_request(
++            lambda: self.client.vxlan.add_peer(interface_uuid, peer), peer)
++
++    def delete_vtep_peer(self, interface_uuid, ip_address):
++        """
++        Sends a request to the vswitch requesting the deletion of a VTEP peer
++        entry.
++        """
++        self._execute_vtep_request(
++            lambda: self.client.vxlan.remove_peer(interface_uuid, ip_address))
++
++    def get_vtep_peer_list(self, interface_uuid):
++        """
++        Sends a request to the vswitch requesting the full list of VTEP
++        peer entries.
++        """
++        return self._execute_vtep_request(
++            lambda: self.client.vxlan.get_peers(interface_uuid))
++
++    def add_vtep_ip_endpoint(self, interface_uuid, endpoint):
++        """
++        Sends a request to the vswitch requesting the addition of a static
++        VTEP IP Endpoint entry.
++        """
++        return self._execute_vtep_request(
++            lambda: self.client.vxlan.add_ip_endpoint(
++                interface_uuid, endpoint), endpoint)
++
++    def delete_vtep_ip_endpoint(self, interface_uuid, ip_address):
++        """
++        Sends a request to the vswitch requesting the deletion of a static
++        VTEP IP Endpoint entry.
++        """
++        self._execute_vtep_request(
++            lambda: self.client.vxlan.remove_ip_endpoint(
++                interface_uuid, ip_address))
++
++    def get_vtep_ip_endpoint_list(self, interface_uuid):
++        """
++        Sends a request to the vswitch requesting the full list of VTEP
++        Endpoint entries.
++        """
++        return self._execute_vtep_request(
++            lambda: self.client.vxlan.get_ip_endpoints(interface_uuid))
+diff --git a/neutron/agent/vswitch/exceptions.py b/neutron/agent/vswitch/exceptions.py
+index d4382f8..46f2741 100644
+--- a/neutron/agent/vswitch/exceptions.py
++++ b/neutron/agent/vswitch/exceptions.py
+@@ -409,3 +409,31 @@ class VSwitchSnatPortBusyError(VSwitchSnatError):
+     def __init__(self, message, snat):
+         super(VSwitchSnatPortBusyError, self).__init__(
+             message, snat)
++
++
++class VSwitchEndpointError(VSwitchError):
++    """
++    Exception raised to signal errors during VTEP Endpoint operations.
++    """
++    def __init__(self, message, endpoint):
++        super(VSwitchEndpointError, self).__init__(message)
++        self.endpoint = endpoint
++
++    def __str__(self):
++        if self.endpoint:
++            msg = ("request failed with error {} on "
++                   "endpoint {}".format(
++                       self.message, self.endpoint))
++        else:
++            msg = "request failed with error {}".format(self.message)
++        return msg
++
++
++class VSwitchEndpointNotFoundError(VSwitchEndpointError):
++    """
++    Exception raised to signal that a VTEP Endpoint operation targeted a
++    non-existent Endpoint object instance.
++    """
++    def __init__(self, message, endpoint):
++        super(VSwitchEndpointNotFoundError, self).__init__(
++            message, endpoint)
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index 22bf4ae..1bfaac1 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -1325,3 +1325,114 @@ class VSwitchManager(object):
+         """
+         suffix = "bridge-%s" % network_name
+         return str(uuid.uuid5(uuid.UUID(tsconfig.host_uuid), suffix))
++
++    def add_vtep_endpoint(self, interface_uuid, mac_address, ip_address):
++        """
++        Adds a VTEP endpoint entry to direct traffic destined to a given MAC to
++        the IP address of a remote VTEP instance.
++        """
++        try:
++            endpoint = {'mac-address': mac_address,
++                        'peer-address': ip_address}
++            return self.api.add_vtep_endpoint(interface_uuid, endpoint)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to add static VTEP endpoint {}: {}".format(
++                endpoint, e))
++            raise VSwitchManagerError(msg)
++
++    def delete_vtep_endpoint(self, interface_uuid, mac_address):
++        """
++        Removes a VTEP endpoint entry.
++        """
++        try:
++            return self.api.delete_vtep_endpoint(interface_uuid, mac_address)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to delete static VTEP endpoint {} on {}: {}".
++                   format(mac_address, interface_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def get_vtep_endpoints(self, interface_uuid, static=True):
++        """
++        Retrieves the current list of VTEP endpoints.
++        """
++        try:
++            type_value = 'static' if static else 'dynamic'
++            for endpoint in self.api.get_vtep_endpoint_list(interface_uuid):
++                if (static is not None and (endpoint['type'] != type_value)):
++                    continue
++                yield endpoint
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query VTEP endpoint list for {}, {}".
++                   format(interface_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def add_vtep_peer(self, interface_uuid, ip_address):
++        """
++        Adds a VTEP peer entry to allow broadcast traffic to be directed
++        to this peer as well as any other peer already registered.
++        """
++        try:
++            peer = {'address': ip_address}
++            return self.api.add_peer(interface_uuid, peer)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to add static VTEP peer {}: {}".format(
++                peer, e))
++            raise VSwitchManagerError(msg)
++
++    def delete_vtep_peer(self, interface_uuid, ip_address):
++        """
++        Removes a VTEP peer entry.
++        """
++        try:
++            return self.api.delete_peer(interface_uuid, ip_address)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to delete static VTEP endpoint {} on {}: {}".
++                   format(ip_address, interface_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def get_vtep_peers(self, interface_uuid):
++        """
++        Retrieves the current list of VTEP endpoints.
++        """
++        try:
++            return self.api.get_peers(interface_uuid)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query VTEP peer list for {}, {}".
++                   format(interface_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def add_vtep_ip_endpoint(self, interface_uuid, ip_address, peer_address):
++        """
++        Adds a VTEP IP endpoint entry to direct traffic destined to a given
++        device IP address to a specific remote VTEP instance.
++        """
++        try:
++            endpoint = {'device-address': ip_address,
++                        'peer-address': peer_address}
++            return self.api.add_vtep_ip_endpoint(interface_uuid, endpoint)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to add static VTEP IP endpoint {}: {}".format(
++                endpoint, e))
++            raise VSwitchManagerError(msg)
++
++    def delete_vtep_ip_endpoint(self, interface_uuid, ip_address):
++        """
++        Removes a VTEP IP endpoint entry.
++        """
++        try:
++            return self.api.delete_vtep_ip_endpoint(interface_uuid, ip_address)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to delete static VTEP IP endpoint {} on {}: {}".
++                   format(ip_address, interface_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def get_vtep_ip_endpoints(self, interface_uuid):
++        """
++        Retrieves the current list of VTEP endpoints.
++        """
++        try:
++            return self.api.get_vtep_ip_endpoint_list(interface_uuid)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query VTEP IP endpoint list for {}, {}".
++                   format(interface_uuid, e))
++            raise VSwitchManagerError(msg)
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index c937b35..e9f6052 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -372,10 +372,6 @@ class MultiSubnetProviderSegmentsNotSupported(exc.NeutronException):
+     message = _("Multi-segment provider networks for subnets is not supported")
+ 
+ 
+-class ProviderNetExternalStaticVxlanNotSupported(exc.NeutronException):
+-    message = _("External networks are not supported on static VXLAN segments")
+-
+-
+ class ProviderNetDynamicVxlanNotSupported(exc.NeutronException):
+     message = _("Dynamic VXLAN based tenant networks are not supported in SDN")
+ 
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index dd7839b..a63c340 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -31,6 +31,7 @@ import time
+ import eventlet
+ eventlet.monkey_patch()
+ 
++import netaddr
+ from neutron_lib import constants
+ from neutron_lib import context
+ from oslo_config import cfg
+@@ -62,6 +63,8 @@ from neutron.conf.agent import common as config
+ from neutron.drivers import fm
+ from neutron.extensions import securitygroup as ext_sg
+ from neutron.extensions import wrs_provider
++from neutron.plugins.common import constants as p_const
++from neutron.plugins.ml2.drivers.l2pop.rpc_manager import l2population_rpc
+ from neutron.plugins.wrs.agent.avs import dvr
+ from neutron.services.trunk import constants as trunk_constants
+ from neutron.services.trunk.rpc import agent as trunk_rpc
+@@ -164,6 +167,14 @@ DEVICES_ON_EXTERNAL_NETWORKS = [constants.DEVICE_OWNER_ROUTER_GW,
+                                 constants.DEVICE_OWNER_AGENT_GW]
+ 
+ 
++FLOODING_ENTRY_MAC = '00:00:00:00:00:00'
++
++
++def _is_ipv6_link_local(address):
++    ipaddr = netaddr.IPAddress(address)
++    return bool(ipaddr.version == 6 and ipaddr.is_link_local())
++
++
+ def is_avs_port(device_owner):
+     """
+     Determine whether a device is represented by an AVS port rather than an AVS
+@@ -242,6 +253,7 @@ class VSwitchBaseRpcCallbacksMixin(object):
+             if network['type'] == avs_constants.VSWITCH_LAYER2_NETWORK:
+                 self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
+                 self.virtual_networks.pop(network_id, None)
++                self.segment_cache.pop(network_id, None)
+ 
+     def agent_updated(self, context, payload):
+         """Handle the agent_updated notification event."""
+@@ -297,6 +309,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                                sg_rpc.SecurityGroupAgentRpcCallbackMixin,
+                                qos_rpc.QoSAgentRpcCallbackMixin,
+                                dvr_rpc.DVRAgentRpcCallbackMixin,
++                               l2population_rpc.L2populationRpcCallBackMixin,
+                                pnet_connectivity_rpc.PnetConnectivityRpc):
+ 
+     # Set RPC API version to 1.0 by default.
+@@ -365,6 +378,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             in_use_interfaces = self._pnet_connectivity_interface_uuids()
+             self.vswitch_mgr.delete_network(network_uuid, in_use_interfaces)
+             self.virtual_networks.pop(network_uuid, None)
++            self.segment_cache.pop(network_uuid, None)
+ 
+         except manager.VSwitchManagerError as e:
+             # network may not exist if subnet is not associated with a
+@@ -372,6 +386,181 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             LOG.debug("Failed to delete subnet network: "
+                       "{}, {}".format(network_uuid, e))
+ 
++    def _fdb_resolve_interface(self, segment):
++        """
++        Determine which VXLAN interface these FDB entries are targeting.
++        """
++        physical_network = segment['physical_network']
++        if 'segment_id' in segment:
++            # Data coming from l2pop RPC with incorrect attribute name
++            segmentation_id = segment['segment_id']
++        else:
++            segmentation_id = segment['segmentation_id']
++        interface_uuid = self.interface_mappings[physical_network]
++        return self.vswitch_mgr.get_provider_interface_uuid(
++            interface_uuid, segment['network_type'], segmentation_id)
++
++    def _is_local_agent_ip(self, physical_network, agent_ips):
++        """
++        Determine whether the FDB record references this agent.
++        """
++        local_ips = self.tunneling_ips.get(physical_network, '')
++        agent_set = set(agent_ips.split(',') if agent_ips else [])
++        local_set = set(local_ips.split(',') if local_ips else [])
++        return bool(local_set & agent_set)
++
++    def _select_local_agent_ip(self, physical_network, agent_ips):
++        """
++        Determine which address we should use to contact the remote VTEP.  If
++        we have both an IPv4 and IPv6 and so does the remote VTEP then we will
++        prefer an IPv6 address; otherwise, use a compatible address.
++        """
++        local_ips = self.tunneling_ips.get(physical_network)
++        if not local_ips:
++            LOG.warning("unable to select a local IP for "
++                        "physical network {}".format(physical_network))
++            return None
++        agent_list = agent_ips.split(',')
++        local_list = local_ips.split(',')
++        agent_v6 = [a for a in agent_list if netaddr.IPAddress(a).version == 6]
++        local_v6 = [a for a in local_list if netaddr.IPAddress(a).version == 6]
++        if agent_v6 and local_v6:
++            return agent_v6[0]
++        agent_v4 = [a for a in agent_list if netaddr.IPAddress(a).version == 4]
++        local_v4 = [a for a in local_list if netaddr.IPAddress(a).version == 4]
++        if agent_v4 and local_v4:
++            return agent_v4[0]
++        return None
++
++    def _fdb_ip_add_entry(self, interface_uuid, ip_address, agent_ip):
++        LOG.info("adding VTEP IP endpoint for {} via {} over {}".format(
++            ip_address, agent_ip, interface_uuid))
++        self.vswitch_mgr.add_vtep_ip_endpoint(
++            interface_uuid, ip_address, agent_ip)
++
++    def _fdb_ip_delete_entry(self, interface_uuid, ip_address, agent_ip):
++        LOG.info("removing VTEP IP endpoint for {} via {} over {}".format(
++            ip_address, agent_ip, interface_uuid))
++        self.vswitch_mgr.delete_vtep_ip_endpoint(
++            interface_uuid, ip_address)
++
++    def _fdb_add_entry(self, interface_uuid, mac_address, agent_ip):
++        """
++        Handle insertion of one FDB entry.
++        """
++        if mac_address == FLOODING_ENTRY_MAC:
++            # Ignore flooding entry; AVS does it on its own
++            return
++        LOG.info("adding VTEP endpoint for {} via {} over {}".format(
++            mac_address, agent_ip, interface_uuid))
++        self.vswitch_mgr.add_vtep_endpoint(
++            interface_uuid, mac_address, agent_ip)
++
++    def _fdb_delete_entry(self, interface_uuid, mac_address, agent_ip):
++        """
++        Handle removal of one FDB entry.
++        """
++        if mac_address == FLOODING_ENTRY_MAC:
++            # Ignore flooding entry; AVS does it on its own
++            return
++        LOG.info("removing VTEP endpoint for {} via {} over {}".format(
++            mac_address, agent_ip, interface_uuid))
++        self.vswitch_mgr.delete_vtep_endpoint(interface_uuid, mac_address)
++
++    def _process_fdb_for_network(self, network_id, fdb_entries,
++                                 fdb_handler, ip_handler):
++        """
++        Handle new FDB entries for a given network_id.
++        """
++        interface_uuid = self._fdb_resolve_interface(fdb_entries)
++        port_entries = fdb_entries['ports']
++        LOG.debug("processing VTEP endpoints for interface "
++                  "{} on network {}".format(interface_uuid, network_id))
++        for agent_ips, ports in six.iteritems(port_entries):
++            if self._is_local_agent_ip(
++                    fdb_entries['physical_network'], agent_ips):
++                continue
++            agent_ip = self._select_local_agent_ip(
++                fdb_entries['physical_network'], agent_ips)
++            if not agent_ip:
++                LOG.warning("no compatible address to reach {}".format(
++                    agent_ips))
++                continue
++            # Filter the list of ip:mac pairs and produce a unique set of MAC
++            # addresses to avoid duplicating effort.
++            mac_addresses = set([p.mac_address for p in ports])
++            for mac_address in mac_addresses:
++                fdb_handler(interface_uuid, mac_address, agent_ip)
++            # Register the device IP address on the VXLAN so that it can be
++            # used for avoiding broadcast packets whenever possible.
++            for p in ports:
++                if p.mac_address != FLOODING_ENTRY_MAC:
++                    ip_handler(interface_uuid, p.ip_address, agent_ip)
++
++    def fdb_add(self, context, fdb_entries):
++        """
++        Handle new FDB entries published to this agent (or all agents).
++        """
++        LOG.debug("fdb_add received: {}".format(fdb_entries))
++        for network_id, fdb_entries in six.iteritems(fdb_entries):
++            if network_id not in self.virtual_networks:
++                # NOTE(alegacy): skip for now but it will be replayed by the
++                # mech driver when/if we enable the first port on this network
++                LOG.debug("skipping FDB add on missing network {}, fdb: {}".
++                          format(network_id, fdb_entries))
++                continue
++            self._process_fdb_for_network(network_id, fdb_entries,
++                                          self._fdb_add_entry,
++                                          self._fdb_ip_add_entry)
++
++    def fdb_remove(self, context, fdb_entries):
++        """
++        Handle new FDB entries published to this agent (or all agents).
++        """
++        LOG.debug("fdb_remove received {}".format(fdb_entries))
++        for network_id, fdb_entries in six.iteritems(fdb_entries):
++            if network_id not in self.virtual_networks:
++                LOG.debug("skipping FDB delete on missing network {}, fdb: {}".
++                          format(network_id, fdb_entries))
++                continue
++            self._process_fdb_for_network(network_id, fdb_entries,
++                                          self._fdb_delete_entry,
++                                          self._fdb_ip_delete_entry)
++
++    def _process_ip_change_for_network(self, network_id, ip_changes):
++        """
++        Handle new FDB entries for a given network_id.
++        """
++        segment = self.segment_cache[network_id]  # not available in ip_chg
++        interface_uuid = self._fdb_resolve_interface(segment)
++        LOG.debug("processing VTEP IP endpoints for interface {} on "
++                  "network {}".format(interface_uuid, network_id))
++        for agent_ips, changes in six.iteritems(ip_changes):
++            if self._is_local_agent_ip(segment['physical_network'], agent_ips):
++                continue
++            agent_ip = self._select_local_agent_ip(
++                segment['physical_network'], agent_ips)
++            if not agent_ip:
++                LOG.warning("no compatible address to reach {}".format(
++                    agent_ips))
++                continue
++            for port_info in changes.get('before', []):
++                self._fdb_ip_delete_entry(
++                    interface_uuid, port_info.ip_address, agent_ip)
++            for port_info in changes.get('after', []):
++                self._fdb_ip_add_entry(
++                    interface_uuid, port_info.ip_address, agent_ip)
++
++    def fdb_update(self, context, fdb_entries):
++        LOG.debug("fdb_update received {}".format(fdb_entries))
++        ip_delta = fdb_entries['chg_ip']
++        for network_id, ip_changes in six.iteritems(ip_delta):
++            if network_id not in self.virtual_networks:
++                LOG.debug("skipping FDB IP change on missing network {}, "
++                          "fdb: {}".format(network_id, ip_changes))
++                continue
++            self._process_ip_change_for_network(network_id, ip_changes)
++
+ 
+ class VSwitchSdnRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin):
+ 
+@@ -431,14 +620,17 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             vswitch_api, interface_mappings)
+         self._notifier = n_rpc.get_notifier('metering')
+         self.host = cfg.CONF.host
++        self.tunnel_types = [p_const.TYPE_VXLAN]
++        self.tunneling_ips = None
+         self.agent_state = {
+             'binary': 'neutron-avs-agent',
+             'host': self.host,
+             'availability_zone': cfg.CONF.AGENT.availability_zone,
+             'topic': constants.L2_AGENT_TOPIC,
+-            'configurations': {'mappings': interface_mappings,
+-                               'enable_distributed_routing':
+-                               self.enable_distributed_routing},
++            'configurations': {
++                'mappings': interface_mappings,
++                'enable_distributed_routing': self.enable_distributed_routing,
++                'tunnel_types': self.tunnel_types},
+             'agent_type': n_const.AGENT_TYPE_WRS_VSWITCH,
+             'start_flag': True}
+         self.setup_vif_listener()
+@@ -450,6 +642,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         self.port_stats = {}
+         self.virtual_ports = {}
+         self.virtual_networks = {}
++        self.segment_cache = {}
+         self.providernet_cache = {}
+         self.interfaces = {}
+         self.stale_interfaces = set()
+@@ -524,10 +717,43 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             self.host_state_up = True
+         LOG.info("host_state_up={} on startup".format(self.host_state_up))
+ 
++    def _get_tunnel_addresses(self, iface_uuid):
++        """
++        Return the IP addresses configured against a particular interface which
++        will be used for all tunnel traffic leaving the node.  Nodes can have
++        multiple addresses so return a list of both IPv4 and IPv6 addresses.
++        """
++        data = self.vswitch_mgr.get_address_list(interface_uuid=iface_uuid)
++        addresses = [a for a in data.keys() if not _is_ipv6_link_local(a)]
++        # Prefer an IPv6 address if one is present
++        addresses = sorted(addresses,
++                           key=lambda x: netaddr.IPAddress(x).version,
++                           reverse=True)
++        LOG.debug("found tunnel addresses for iface {}: {}".format(
++            iface_uuid, addresses))
++        return addresses
++
++    def get_tunneling_ips(self):
++        """
++        Return the IP address to be used for all tunnel traffic leaving the
++        node on individual physical networks.
++        """
++        if self.tunneling_ips is None:
++            self.tunneling_ips = {}
++            mappings = self.interface_mappings
++            for physical_network, iface_uuid in six.iteritems(mappings):
++                addresses = self._get_tunnel_addresses(iface_uuid)
++                if addresses:
++                    self.tunneling_ips[physical_network] = ','.join(addresses)
++            LOG.info("found tunneling_ips for agent: {}".format(
++                self.tunneling_ips))
++        return self.tunneling_ips
++
+     def _report_agent_state(self):
+         try:
+-            count = self.vswitch_mgr.get_virtual_port_count()
+-            self.agent_state.get('configurations')['devices'] = count
++            config = self.agent_state.get('configurations')
++            config['devices'] = self.vswitch_mgr.get_virtual_port_count()
++            config['tunneling_ips'] = self.get_tunneling_ips()
+             self.state_rpc.report_state(self.context, self.agent_state)
+             self.agent_state.pop('start_flag', None)
+         except Exception as e:
+@@ -776,6 +1002,10 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             'network_id': details['network_id'],
+             'tenant_id': details['tenant_id']}
+         self.virtual_networks[network_uuid] = nw_instance
++        self.segment_cache[network_uuid] = {
++            'network_type': network['network_type'],
++            'physical_network': network['physical_network'],
++            'segmentation_id': network['segmentation_id']}
+ 
+     def setup_interface(self, port, details, vlan_id=None):
+         port_uuid = port['uuid']
+@@ -1043,6 +1273,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+                         port_uuid, network_id))
+             self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
+             self.virtual_networks.pop(network_id, None)
++            self.segment_cache.pop(network_id, None)
+             for uuid, iface in self.interface_details.items():
+                 if iface['network_id'] == network_id:
+                     self.interface_details.pop(uuid, None)
+@@ -1612,7 +1843,8 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+         result.extend([[topics.SECURITY_GROUP, topics.UPDATE],
+                        [topics.QOS, topics.UPDATE],
+                        [topics.DVR, topics.UPDATE],
+-                       [topics.PNET_CONNECTIVITY, topics.UPDATE, self.host]])
++                       [topics.PNET_CONNECTIVITY, topics.UPDATE, self.host],
++                       [topics.L2POPULATION, topics.UPDATE]])
+         return result
+ 
+     def setup_rpc(self):
+@@ -1976,10 +2208,9 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+             return cfg.CONF.SDN.manage_external_networks
+         return False
+ 
+-    def handle_removed_port(self, uuid, port_details):
++    def handle_removed_port(self, uuid):
+         # Run default/base actions to delete the port
+-        super(VSwitchSdnNeutronAgent, self).handle_removed_port(
+-            uuid, port_details)
++        super(VSwitchSdnNeutronAgent, self).handle_removed_port(uuid)
+         # Check whether we were waiting for a network to appear for this port
+         # or interface object.
+         for network_uuid in self.deferred_ports.keys():
+diff --git a/neutron/plugins/wrs/drivers/mech_vswitch.py b/neutron/plugins/wrs/drivers/mech_vswitch.py
+index 29f68fa..6f78a1c 100644
+--- a/neutron/plugins/wrs/drivers/mech_vswitch.py
++++ b/neutron/plugins/wrs/drivers/mech_vswitch.py
+@@ -21,6 +21,7 @@
+ #
+ 
+ from oslo_log import log as logging
++from tsconfig import tsconfig
+ 
+ from neutron_lib.api.definitions import portbindings
+ 
+@@ -29,7 +30,10 @@ from neutron.agent import securitygroups_rpc
+ from neutron.callbacks import events
+ from neutron.callbacks import registry
+ from neutron.common import constants
++from neutron.db import segments_db
++from neutron.extensions import external_net
+ from neutron.extensions import wrs_binding
++from neutron.extensions import wrs_provider
+ from neutron.plugins.ml2 import driver_api as api
+ from neutron.plugins.ml2.drivers import mech_agent
+ from neutron.plugins.wrs.drivers import trunk_vswitch
+@@ -68,6 +72,44 @@ class VSwitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
+     network.
+     """
+ 
++    def is_sdn_enabled(self):
++        return bool(tsconfig.sdn_enabled.lower() == 'yes')
++
++    def _check_segment_compatibility_for_sdn(self, context):
++        """SDN controllers are expected to implicitly or explicitly set the
++        destination address of all VXLAN packets therefore using multicast or
++        evpn is not supported/possible.  Eliminate confusion by blocking it
++        here when the network is created.
++        """
++        for s in context.network_segments:
++            if s[segments_db.NETWORK_TYPE] != constants.PROVIDERNET_VXLAN:
++                continue
++            if not context._plugin.is_static_vxlan_segment(
++                    context.context,
++                    s[segments_db.PHYSICAL_NETWORK],
++                    s[segments_db.SEGMENTATION_ID]):
++                raise wrs_provider.ProviderNetDynamicVxlanNotSupported()
++
++    def update_network_precommit(self, context):
++        super(VSwitchMechanismDriver, self).update_network_precommit(context)
++        network = context.current
++        original = context.original
++        if original[external_net.EXTERNAL] == network[external_net.EXTERNAL]:
++            return  # no change
++        if not network[external_net.EXTERNAL]:
++            return  # not external; no further action required
++        if not any(s[segments_db.NETWORK_TYPE] == constants.PROVIDERNET_VXLAN
++                   for s in context.network_segments):
++            return  # no vxlan segments; no further action required
++
++    def create_network_precommit(self, context):
++        super(VSwitchMechanismDriver, self).create_network_precommit(context)
++        if not any(s[segments_db.NETWORK_TYPE] == constants.PROVIDERNET_VXLAN
++                   for s in context.network_segments):
++            return  # no vxlan segments; no further action required
++        if self.is_sdn_enabled():
++            self._check_segment_compatibility_for_sdn(context)
++
+     def __init__(self):
+         sg_enabled = securitygroups_rpc.is_firewall_enabled()
+         vif_details = {portbindings.CAP_PORT_FILTER: sg_enabled}
+-- 
+2.7.4
+

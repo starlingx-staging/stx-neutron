@@ -1,0 +1,67 @@
+From faf7b9a76d02fc4edd5c6ddb605e9efdf978acc4 Mon Sep 17 00:00:00 2001
+From: Matt Peters <matt.peters@windriver.com>
+Date: Fri, 9 Jun 2017 09:23:17 -0400
+Subject: [PATCH 048/155] CGTS-7258: DVR router port scheduling not respecting
+ host groups
+
+When an instance is migrating between hosts, all compute nodes will
+request a router sync against the DVR router that is impacted by
+the migration.  Normally the requested router sync data is rejected
+by the server based on the compute host that is requesting it if
+the router is not applicable to that host.  However, the port
+bindings query for DVR based routers was performing a contains
+operation against the port binding profile field which incorrectly
+matches hosts with a substring name in the hosts impacted by the
+instance that is migrating (i.e. compute-1 will match compute-10).
+
+In order to avoid this condition, a more exact match is being
+performed against the port bindings profile field to include the
+quotes around the host name to delimit the match to the full host
+name and not a substring of the target host in the profile field.
+---
+ neutron/db/l3_dvrscheduler_db.py | 7 ++++++-
+ neutron/wsgi.py                  | 2 +-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/db/l3_dvrscheduler_db.py b/neutron/db/l3_dvrscheduler_db.py
+index 0b572b0..d337dec 100644
+--- a/neutron/db/l3_dvrscheduler_db.py
++++ b/neutron/db/l3_dvrscheduler_db.py
+@@ -351,6 +351,11 @@ class L3_DVRsch_db_mixin(l3agent_sch_db.L3AgentSchedulerDbMixin):
+         if not subnet_ids:
+             return False
+ 
++        # The profile filter of the port binding performs a contains operation,
++        # therefore to avoid a substring match on a portion of the the host
++        # name the quotes are being added to force a more exact match
++        profile_host = "\"%s\"" % host
++
+         Binding = ml2_models.PortBinding
+         IPAllocation = models_v2.IPAllocation
+         Port = models_v2.Port
+@@ -368,7 +373,7 @@ class L3_DVRsch_db_mixin(l3agent_sch_db.L3AgentSchedulerDbMixin):
+         query = query.filter(device_filter)
+         host_filter = or_(
+             ml2_models.PortBinding.host == host,
+-            ml2_models.PortBinding.profile.contains(host))
++            ml2_models.PortBinding.profile.contains(profile_host))
+         query = query.filter(host_filter)
+         return query.first() is not None
+ 
+diff --git a/neutron/wsgi.py b/neutron/wsgi.py
+index 7cca29a..89672f0 100644
+--- a/neutron/wsgi.py
++++ b/neutron/wsgi.py
+@@ -42,8 +42,8 @@ import webob.exc
+ from neutron._i18n import _
+ from neutron.common import config
+ from neutron.common import exceptions as n_exc
+-from neutron.conf import wsgi as wsgi_config
+ from neutron.common import utils
++from neutron.conf import wsgi as wsgi_config
+ from neutron.db import api
+ 
+ CONF = cfg.CONF
+-- 
+2.7.4
+

@@ -1,0 +1,151 @@
+From 522df95e6f7099e9645ad00a2023478d0ad55c94 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Mon, 23 Oct 2017 10:14:44 -0400
+Subject: [PATCH 020/155] US79271: AVS vhost-user support
+
+Added vhost-user port type.  Virtio vifs will now be backed by
+vhost-user instead of avp-guest port in the host.
+
+The vhost-user port type is enabled by default and will always be used
+instead of avp-guest.
+
+Conflicts:
+	neutron/extensions/portbindings.py
+	neutron/plugins/ml2/plugin.py
+---
+ etc/oslo-config-generator/neutron.conf |  1 +
+ neutron/agent/vswitch/constants.py     |  5 ++++-
+ neutron/opts.py                        |  8 ++++++++
+ neutron/plugins/ml2/plugin.py          | 32 ++++++++++++++++++++++++++++++--
+ setup.cfg                              |  1 +
+ 5 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/etc/oslo-config-generator/neutron.conf b/etc/oslo-config-generator/neutron.conf
+index b4bd0fc..9dc727d 100644
+--- a/etc/oslo-config-generator/neutron.conf
++++ b/etc/oslo-config-generator/neutron.conf
+@@ -9,6 +9,7 @@ namespace = neutron.extensions
+ namespace = neutron.pnet_connectivity
+ namespace = neutron.qos
+ namespace = neutron.settings
++namespace = neutron.vhost
+ namespace = nova.auth
+ namespace = oslo.log
+ namespace = oslo.db
+diff --git a/neutron/agent/vswitch/constants.py b/neutron/agent/vswitch/constants.py
+index 2d91994..2784f2f 100644
+--- a/neutron/agent/vswitch/constants.py
++++ b/neutron/agent/vswitch/constants.py
+@@ -31,8 +31,11 @@ VSWITCH_CLIENT_ENDPOINT = constants.VSWITCHCLIENT_URL
+ VSWITCH_PHYSICAL_PORT = "physical"
+ VSWITCH_AVP_GUEST_PORT = "avp-guest"
+ VSWITCH_AVP_HOST_PORT = "avp-host"
++VSWITCH_AVP_VHOST_USER = "vhost-user"
+ 
+-VSWITCH_DVR_SERVICED_PORTS = [VSWITCH_AVP_GUEST_PORT, VSWITCH_AVP_HOST_PORT]
++VSWITCH_DVR_SERVICED_PORTS = [VSWITCH_AVP_GUEST_PORT,
++                              VSWITCH_AVP_HOST_PORT,
++                              VSWITCH_AVP_VHOST_USER]
+ 
+ # vswitch network types
+ VSWITCH_LAYER2_NETWORK = "layer2"
+diff --git a/neutron/opts.py b/neutron/opts.py
+index 6bdae8b..6796e0e 100644
+--- a/neutron/opts.py
++++ b/neutron/opts.py
+@@ -61,6 +61,7 @@ import neutron.extensions.securitygroup
+ import neutron.plugins.ml2.config
+ import neutron.plugins.ml2.drivers.mech_sriov.agent.common.config
+ import neutron.plugins.wrs.agent.avs.agent
++import neutron.plugins.wrs.drivers.mech_vswitch
+ import neutron.setting
+ import neutron.wsgi
+ 
+@@ -333,3 +334,10 @@ def list_avs_agent_opts():
+         ('SECURITYGROUP',
+          neutron.conf.agent.securitygroups_rpc.security_group_opts)
+     ]
++
++
++def list_vhost_opts():
++    return [
++        ('vhost',
++         neutron.plugins.wrs.drivers.mech_vswitch.VHOST_OPTS)
++    ]
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index d9f701e..0d71df4 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -498,7 +498,11 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         # Unbind the port if needed.
+         if changes:
+             binding.vif_type = portbindings.VIF_TYPE_UNBOUND
+-            binding.vif_details = ''
++            if binding.vif_model == wrs_binding.VIF_MODEL_VIRTIO:
++                binding.vif_details = self._get_vhost_vif_details(binding)
++            else:
++                binding.vif_details = ''
++
+             db.clear_binding_levels(plugin_context, port_id, original_host)
+             mech_context._clear_binding_levels()
+             port['status'] = const.PORT_STATUS_DOWN
+@@ -586,12 +590,20 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         # transaction.
+         port = orig_context.current
+         orig_binding = orig_context._binding
++
++        vif_details = ''
++        if orig_binding.vif_model == wrs_binding.VIF_MODEL_VIRTIO:
++            vif_details = self._get_vhost_vif_details(orig_binding)
++
+         new_binding = models.PortBinding(
+             host=orig_binding.host,
+             vnic_type=orig_binding.vnic_type,
+             profile=orig_binding.profile,
+             vif_type=portbindings.VIF_TYPE_UNBOUND,
+-            vif_details=''
++            vif_details=vif_details,
++            vif_model=orig_binding.vif_model,
++            mtu=orig_binding.mtu,
++            mac_filtering=orig_binding.mac_filtering
+         )
+         self._update_port_dict_binding(port, new_binding)
+         new_context = driver_context.PortContext(
+@@ -760,6 +772,22 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                            'port': binding.port_id})
+         return {}
+ 
++    def _get_vhost_vif_details(self, binding):
++        '''Get vhostuser vif details'''
++
++        # Certain vifs may have been marked as being vhost disabled.
++        # ie. they may have been migrated from a vhost-disabled node
++        # to a vhost-enabled node.
++        # If this is the case, return the vhost enabled flag so that
++        # newly bound nodes can retain this information and prevent
++        # an incompatible vhostuser model from being plugged into the switch.
++        details = self._get_vif_details(binding)
++        vhost_enabled = details.get(wrs_binding.VHOST_USER_ENABLED, True)
++        if not vhost_enabled:
++            return jsonutils.dumps({wrs_binding.VHOST_USER_ENABLED: False})
++        else:
++            return ''
++
+     def _get_profile(self, binding):
+         if binding.profile:
+             try:
+diff --git a/setup.cfg b/setup.cfg
+index a80cf7a..8c62faa 100644
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -141,6 +141,7 @@ oslo.config.opts =
+     neutron.metadata.agent = neutron.opts:list_metadata_agent_opts
+     neutron.metering.agent = neutron.opts:list_metering_agent_opts
+     neutron.pnet_connectivity = neutron.opts:list_pnet_connectivity_opts
++    neutron.vhost = neutron.opts:list_vhost_opts
+     neutron.ml2 = neutron.opts:list_ml2_conf_opts
+     neutron.ml2.linuxbridge.agent = neutron.opts:list_linux_bridge_opts
+     neutron.ml2.macvtap.agent = neutron.opts:list_macvtap_opts
+-- 
+2.7.4
+

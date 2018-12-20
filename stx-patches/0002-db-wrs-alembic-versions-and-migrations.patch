@@ -1,0 +1,437 @@
+From 6e1e4a35e43083c06fc225f38870410a6dbb0572 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 7 Feb 2017 08:52:01 -0500
+Subject: [PATCH 002/155] db: wrs alembic versions and migrations
+
+This adds custom version placeholders for each of our releases.  It also can
+add some tweaks to existing migration scripts and anything that is needed to
+align us to the current upstream way of doing things.  Any feature specific
+migration code should remain in that feature's commit.
+
+The migration versions look like this:
+
+     kilo-initial
+
+        |
+
+     wrs-kilo-shipped
+
+        |
+
+     wrs-kilo-upgrade
+
+        |
+
+     liberty
+
+        |
+
+     mitaka
+
+        |
+
+     wrs-mitaka
+
+        |
+
+     newton
+
+        |
+
+     wrs-newton
+
+        |
+
+     ocata
+
+        |
+     pike  <-  EXPAND_HEAD
+
+Any changes to this require corresponding changes to any neutron subprojects
+because the release names must align.  That is, the networking-odl subgit needs
+to be change to have the same topmost release name.
+
+Conflicts:
+	neutron/db/migration/__init__.py
+	neutron/db/migration/alembic_migrations/versions/EXPAND_HEAD
+	neutron/db/migration/cli.py
+---
+ neutron/db/migration/__init__.py                   |  8 ++++
+ .../alembic_migrations/versions/README.wrs         | 41 +++++++++++++++++++++
+ .../expand/354db87e3225_nsxv_vdr_metadata.py       |  5 +--
+ .../7d9d8eeec6ad_rename_tenant_to_project.py       |  4 ++
+ .../expand/45f8dd33480b_qos_dscp_db_addition.py    |  4 +-
+ .../expand/929c968efe70_add_pk_version_table.py    |  4 +-
+ .../wrs_kilo_shipped/expand/wrs_kilo_shipped.py    | 43 ++++++++++++++++++++++
+ .../wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py    | 40 ++++++++++++++++++++
+ .../wrs_mitaka/expand/wrs_mitaka_release.py        | 40 ++++++++++++++++++++
+ .../wrs_newton/expand/wrs_newton_release.py        | 40 ++++++++++++++++++++
+ neutron/db/migration/cli.py                        |  4 ++
+ 11 files changed, 225 insertions(+), 8 deletions(-)
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/README.wrs
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py
+
+diff --git a/neutron/db/migration/__init__.py b/neutron/db/migration/__init__.py
+index b32aada..d0a748f 100644
+--- a/neutron/db/migration/__init__.py
++++ b/neutron/db/migration/__init__.py
+@@ -23,17 +23,25 @@ from sqlalchemy.engine import reflection
+ from neutron._i18n import _
+ 
+ # Neutron milestones for upgrade aliases
++WRS_KILO_SHIPPED = 'wrs_kilo_shipped'
++WRS_KILO_UPGRADE = 'wrs_kilo_upgrade'
+ LIBERTY = 'liberty'
+ MITAKA = 'mitaka'
++WRS_MITAKA = 'wrs_mitaka'
+ NEWTON = 'newton'
++WRS_NEWTON = 'wrs_newton'
+ OCATA = 'ocata'
+ PIKE = 'pike'
+ 
+ NEUTRON_MILESTONES = [
+     # earlier milestones were not tagged
++    WRS_KILO_SHIPPED,
++    WRS_KILO_UPGRADE,
+     LIBERTY,
+     MITAKA,
++    WRS_MITAKA,
+     NEWTON,
++    WRS_NEWTON,
+     OCATA,
+     PIKE,
+     # Do not add the milestone until the end of the release
+diff --git a/neutron/db/migration/alembic_migrations/versions/README.wrs b/neutron/db/migration/alembic_migrations/versions/README.wrs
+new file mode 100644
+index 0000000..2436901
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/README.wrs
+@@ -0,0 +1,41 @@
++Our alembic migration scripts need to take in to consideration that our 15.12
++code was shipped based on the stable/kilo branch.  The last alembic version
++hash value in the field is currently:  38c55b05413c.  This will be the starting
++point when we upgrade from 15.12 to 16.xx therefore it is the first down
++revision referenced in our current active stream.  Not that 38c55b05413c will
++only exist once all of the feature patches are applied over this commit.  This
++is just laying the ground work for the later patches.
++
++The migration branches will look like this going forward.
++
++         38c55b05413c          ...last version shipped in 15.12
++              |
++              |
++        wrs_kilo_shipped       ...WRS content during 15.12
++              |
++              |
++  (contract)     (expand)      ...branch labels
++      |              |
++      |              |
++      |       wrs_kilo_upgrade ...required changes to avoid conflicts with
++      |                           liberty/mitaka content
++      |              |
++   liberty        liberty      ...upstream content changes from liberty
++      |              |
++      |              |
++    mitaka         mitaka      ...upstream content changes from mitaka
++      |              |
++      |              |
++   wrs_mitaka    wrs_mitaka    ...WRS content during 16.xxx
++      |              |
++      |              |
++    newton         newton      ...upstream content changes from newton
++      |              |
++      |              |
++   wrs_newton    wrs_newton    ...WRS content during 17.xxx
++      |              |
++      |              |
++  CONTRACT_HEAD   EXPAND_HEAD
++
++*NOTE: since we do not do in-place DB upgrades we are not using the contract
++ series.  They are shown here for completeness only.
+diff --git a/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py b/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py
+index e63b3f5..49db869 100644
+--- a/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py
++++ b/neutron/db/migration/alembic_migrations/versions/liberty/expand/354db87e3225_nsxv_vdr_metadata.py
+@@ -24,13 +24,10 @@ Create Date: 2015-04-19 14:59:15.102609
+ from alembic import op
+ import sqlalchemy as sa
+ 
+-from neutron.db.migration import cli
+-
+ 
+ # revision identifiers, used by Alembic.
+ revision = '354db87e3225'
+-down_revision = 'kilo'
+-branch_labels = (cli.EXPAND_BRANCH,)
++down_revision = 'wrs_kilo_upgrade'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/alembic_migrations/versions/newton/contract/7d9d8eeec6ad_rename_tenant_to_project.py b/neutron/db/migration/alembic_migrations/versions/newton/contract/7d9d8eeec6ad_rename_tenant_to_project.py
+index 298fa25..79e949e 100644
+--- a/neutron/db/migration/alembic_migrations/versions/newton/contract/7d9d8eeec6ad_rename_tenant_to_project.py
++++ b/neutron/db/migration/alembic_migrations/versions/newton/contract/7d9d8eeec6ad_rename_tenant_to_project.py
+@@ -87,6 +87,10 @@ def get_tables():
+         'default_security_group',
+         'ha_router_networks',
+         'quotausages',
++        'providernet_ranges',
++        'settings',
++        'wrs_qoses',
++        'portforwardingrules',
+     ]
+ 
+     return tables
+diff --git a/neutron/db/migration/alembic_migrations/versions/newton/expand/45f8dd33480b_qos_dscp_db_addition.py b/neutron/db/migration/alembic_migrations/versions/newton/expand/45f8dd33480b_qos_dscp_db_addition.py
+index 48f2217..72eb26c 100644
+--- a/neutron/db/migration/alembic_migrations/versions/newton/expand/45f8dd33480b_qos_dscp_db_addition.py
++++ b/neutron/db/migration/alembic_migrations/versions/newton/expand/45f8dd33480b_qos_dscp_db_addition.py
+@@ -16,14 +16,14 @@
+ """qos dscp db addition
+ 
+ Revision ID: 45f8dd33480b
+-Revises: 0e66c5227a8a
++Revises: wrs_mitaka
+ Create Date: 2015-12-03 07:16:24.742290
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = '45f8dd33480b'
+-down_revision = '0e66c5227a8a'
++down_revision = 'wrs_mitaka'
+ 
+ from alembic import op
+ import sqlalchemy as sa
+diff --git a/neutron/db/migration/alembic_migrations/versions/ocata/expand/929c968efe70_add_pk_version_table.py b/neutron/db/migration/alembic_migrations/versions/ocata/expand/929c968efe70_add_pk_version_table.py
+index adf943b..9b71f42 100644
+--- a/neutron/db/migration/alembic_migrations/versions/ocata/expand/929c968efe70_add_pk_version_table.py
++++ b/neutron/db/migration/alembic_migrations/versions/ocata/expand/929c968efe70_add_pk_version_table.py
+@@ -16,14 +16,14 @@
+ """add_pk_version_table
+ 
+ Revision ID: 929c968efe70
+-Revises: 5cd92597d11d
++Revises: wrs_newton
+ Create Date: 2017-01-12 07:17:33.677770
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = '929c968efe70'
+-down_revision = '5cd92597d11d'
++down_revision = 'wrs_newton'
+ 
+ 
+ from neutron.db import migration
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+new file mode 100644
+index 0000000..da40867
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+@@ -0,0 +1,43 @@
++# Copyright 2016 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""WRS Kilo Revision placeholder
++
++Revision ID: wrs_kilo_shipped
++Revises: kilo
++Create Date: 2016-05-25 00:00:01.000000
++
++"""
++
++from neutron.db.migration import cli
++
++# revision identifiers, used by Alembic.
++revision = 'wrs_kilo_shipped'
++down_revision = 'kilo'
++branch_labels = (cli.EXPAND_BRANCH,)
++
++
++def upgrade():
++    pass
++
++
++def downgrade():
++    pass
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+new file mode 100644
+index 0000000..3d32c2c
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+@@ -0,0 +1,40 @@
++# Copyright 2016 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""WRS Kilo Revision placeholder
++
++Revision ID: wrs_kilo_upgrade
++Revises: wrs_kilo_shipped
++Create Date: 2016-05-25 00:00:01.000000
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = 'wrs_kilo_upgrade'
++down_revision = 'wrs_kilo_shipped'
++
++
++def upgrade():
++    pass
++
++
++def downgrade():
++    pass
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+new file mode 100644
+index 0000000..89c2165
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+@@ -0,0 +1,40 @@
++# Copyright 2015 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""WRS Mitaka Revision placeholder
++
++Revision ID: wrs_mitaka
++Revises:0e66c5227a8a
++Create Date: 2016-05-27 00:00:01.000000
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = 'wrs_mitaka'
++down_revision = '0e66c5227a8a'
++
++
++def upgrade():
++    pass
++
++
++def downgrade():
++    pass
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py
+new file mode 100644
+index 0000000..46effc7
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_newton/expand/wrs_newton_release.py
+@@ -0,0 +1,40 @@
++# Copyright 2015 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""WRS Newton Revision placeholder
++
++Revision ID: wrs_newton
++Revises:5cd92597d11d
++Create Date: 2016-05-27 00:00:01.000000
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = 'wrs_newton'
++down_revision = '5cd92597d11d'
++
++
++def upgrade():
++    pass
++
++
++def downgrade():
++    pass
+diff --git a/neutron/db/migration/cli.py b/neutron/db/migration/cli.py
+index 2c7af24..cac4511 100644
+--- a/neutron/db/migration/cli.py
++++ b/neutron/db/migration/cli.py
+@@ -40,9 +40,13 @@ EXPAND_HEAD_FILENAME = 'EXPAND_HEAD'
+ 
+ CURRENT_RELEASE = migration.PIKE
+ RELEASES = (
++    migration.WRS_KILO_SHIPPED,
++    migration.WRS_KILO_UPGRADE,
+     migration.LIBERTY,
+     migration.MITAKA,
++    migration.WRS_MITAKA,
+     migration.NEWTON,
++    migration.WRS_NEWTON,
+     migration.OCATA,
+     migration.PIKE,
+ )
+-- 
+2.7.4
+

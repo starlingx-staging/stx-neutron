@@ -1,0 +1,48 @@
+From 8632ba691586704ee76e4d8b94ce785597387ff3 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 14 Mar 2018 14:10:04 -0500
+Subject: [PATCH 148/155] CGTS-8844: avs: update sfc before handling removed
+ ports
+
+By moving the call to get_sfc_details() to before the loop that handles removed
+before we ensure that the cached port_details are used instead of executing
+another RPC up to the server to get fresh data.  The additional RPC will leave
+the port_details cache populated with data for already deleted ports which will
+leak memory, and it will also increase the likelihood that a concurrent port
+binding failure will happen on the server because of the increased frequency of
+get_device_details RPC requests.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index d1c03bf..fecd3a2 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1607,6 +1607,13 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         devices = [self._get_device_name(uuid) for uuid in uuids]
+         self.remove_sg_device_filters(devices)
+ 
++        # Trigger an SFC update
++        # NOTE(alegacy): do this before calling handle_removed_port because
++        # otherwise we will end up going back up to the server to do a
++        # get_device_details() and will leave stale information in the
++        # port_details cache.
++        self.get_sfc_details(uuids, ports)
++
+         for uuid in uuids:
+             try:
+                 self.plugin_rpc.update_device_down(
+@@ -1616,9 +1623,6 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             except manager.VSwitchManagerError as e:
+                 LOG.exception(repr(e))
+ 
+-        # Trigger an SFC update
+-        self.get_sfc_details(uuids, ports)
+-
+     def compare_ports(self, uuids, current, previous):
+         """
+         Compare existing ports to determine if a state change needs to be
+-- 
+2.7.4
+

@@ -1,0 +1,104 @@
+From 4aa521e372851a38ce90015010cf87e479573466 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 4 Oct 2017 07:59:49 -0500
+Subject: [PATCH 089/155] host: agent and host notify callbacks
+
+Adding host and agent registry notifications so that other subprojects can
+receive and handle these events if needed.  For example, the
+neutron-dynamic-routing and networking-bgpvpn projects have been altered to use
+these triggers to do work.
+---
+ neutron/callbacks/resources.py |  1 +
+ neutron/db/agents_db.py        | 10 +++++++++-
+ neutron/db/hosts_db.py         | 11 +++++++++++
+ 3 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/callbacks/resources.py b/neutron/callbacks/resources.py
+index 9c6a9ad..90106ae 100644
+--- a/neutron/callbacks/resources.py
++++ b/neutron/callbacks/resources.py
+@@ -15,6 +15,7 @@
+ # String literals representing core resources.
+ AGENT = 'agent'
+ FLOATING_IP = 'floatingip'
++HOST = 'host'
+ NETWORK = 'network'
+ NETWORKS = 'networks'
+ PORT = 'port'
+diff --git a/neutron/db/agents_db.py b/neutron/db/agents_db.py
+index e3cd341..9b0906a 100644
+--- a/neutron/db/agents_db.py
++++ b/neutron/db/agents_db.py
+@@ -252,7 +252,11 @@ class AgentDbMixin(ext_agent.AgentPluginBase, AgentAvailabilityZoneMixin):
+         with context.session.begin(subtransactions=True):
+             agent = self._get_agent(context, id)
+             agent.update(agent_data)
+-        return self._make_agent_dict(agent)
++        agent_data = self._make_agent_dict(agent)
++        registry.notify(resources.AGENT, events.AFTER_UPDATE,
++                        self, context=context, host=agent['host'],
++                        plugin=self, agent=agent_data)
++        return agent_data
+ 
+     @db_api.retry_if_session_inactive()
+     def get_agents_db(self, context, filters=None):
+@@ -389,6 +393,10 @@ class AgentDbMixin(ext_agent.AgentPluginBase, AgentAvailabilityZoneMixin):
+                 status = n_const.AGENT_NEW
+             greenthread.sleep(0)
+ 
++        # NOTE(alegacy): update the state dict to include the 'id' so that
++        # registered users can tell which agent this is without an
++        # additional DB query.
++        agent_state['id'] = agent_db.id
+         registry.notify(resources.AGENT, event_type, self, context=context,
+                         host=agent_state['host'], plugin=self,
+                         agent=agent_state)
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 79831d7..1e353eb 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -36,6 +36,9 @@ import sqlalchemy as sa
+ from sqlalchemy.orm import aliased, exc
+ from sqlalchemy import and_, or_, func
+ 
++from neutron.callbacks import events
++from neutron.callbacks import registry
++from neutron.callbacks import resources
+ from neutron.common import constants
+ from neutron.common import topics
+ from neutron.common import utils
+@@ -178,6 +181,7 @@ class HostDbMixin(ext_host.HostPluginBase):
+         with context.session.begin(subtransactions=True):
+             current_time = timeutils.utcnow()
+             try:
++                event_type = events.AFTER_UPDATE
+                 host_db = self._get_host_by_id(context, id)
+                 if 'availability' in host_data:
+                     # If availability changes, run pnet connectivity tests
+@@ -201,9 +205,12 @@ class HostDbMixin(ext_host.HostPluginBase):
+                 res['created_at'] = current_time
+                 res['availability'] = host_data.get('availability',
+                                                     constants.HOST_DOWN)
++                event_type = events.AFTER_CREATE
+                 host_db = Host(**res)
+                 context.session.add(host_db)
+         host_data = self._make_host_dict(host_db)
++        registry.notify(resources.HOST, event_type, self,
++                        context=context, host=host_data)
+         return host_data
+ 
+     def get_host_uuid(self, context, hostname):
+@@ -780,6 +787,10 @@ class HostSchedulerDbMixin(HostDbMixin):
+             # Raise or clear alarm either if the alive state changes, or
+             # if the alarm hasn't been raised/cleared for this agent yet.
+             if not previous or agent['alive'] != previous['alive']:
++                registry.notify(resources.AGENT, events.AFTER_UPDATE, self,
++                                context=admin_context, host=agent['host'],
++                                plugin=self, agent=agent)
++                # TODO(alegacy): move fault reporting to a registry callback
+                 # Clear fault if agent is alive
+                 if agent['alive']:
+                     self.clear_agent_fault(agent)
+-- 
+2.7.4
+

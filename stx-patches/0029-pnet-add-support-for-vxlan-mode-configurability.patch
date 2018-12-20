@@ -1,0 +1,333 @@
+From 509ea540de8ea7adee1fa2d1e16b37b9fb7747c7 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 27 Jul 2017 12:35:32 -0500
+Subject: [PATCH 029/155] pnet: add support for vxlan mode configurability
+
+This commit adds a "mode" column to all provider network ranges.  The default
+is "dynamic" which represents the original VXLAN behaviour and so the DB
+migration scripts will populate that as a default for all existing tuples.
+
+The mode attributes accepts "static" and "dynamic" for now and in the future we
+will add "evpn" support for BGP deployments.
+
+static VXLAN configuration depend on the l2pop driver to setup static endpoints
+in each vswitch VTEP instance while dynamic VXLAN configuration support
+auto-discovery of MAC:VTEP mappings using multicast packets and device learning
+on packet reception.
+
+CGTS-7728: pnet: fixup for vxlan semantic check
+
+Commit a74a37ce9 caused the TTL attribute to be used before it was
+validated by one of the other semantic checks.  This commit moves the
+order of semantics so that the TTL is validated first.
+
+Conflicts:
+	neutron/db/migration/alembic_migrations/versions/EXPAND_HEAD
+---
+ neutron/common/constants.py                        |  7 +++
+ .../alembic_migrations/versions/EXPAND_HEAD        |  2 +-
+ .../expand/wrs_11a84c4cea76_vxlan_mode_column.py   | 39 ++++++++++++
+ neutron/db/providernet_db.py                       | 73 ++++++++++++++++++----
+ neutron/extensions/wrs_provider.py                 | 24 ++++++-
+ 5 files changed, 130 insertions(+), 15 deletions(-)
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_11a84c4cea76_vxlan_mode_column.py
+
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index 142a3c9..3bd16a0 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -212,6 +212,13 @@ PROVIDERNET_VLAN = 'vlan'
+ PROVIDERNET_VXLAN = 'vxlan'
+ PROVIDERNET_GRE = 'gre'
+ 
++PROVIDERNET_VXLAN_DYNAMIC = 'dynamic'
++PROVIDERNET_VXLAN_STATIC = 'static'
++PROVIDERNET_VXLAN_EVPN = 'evpn'
++# TODO(alegacy): add evpn to valid list.
++PROVIDERNET_VXLAN_MODES = [PROVIDERNET_VXLAN_DYNAMIC,
++                           PROVIDERNET_VXLAN_STATIC]
++
+ PROVIDERNET_ACTIVE = 'ACTIVE'
+ PROVIDERNET_DOWN = 'DOWN'
+ PROVIDERNET_ERROR = 'ERROR'
+diff --git a/neutron/db/migration/alembic_migrations/versions/EXPAND_HEAD b/neutron/db/migration/alembic_migrations/versions/EXPAND_HEAD
+index 902d5a3..4f00477 100644
+--- a/neutron/db/migration/alembic_migrations/versions/EXPAND_HEAD
++++ b/neutron/db/migration/alembic_migrations/versions/EXPAND_HEAD
+@@ -1 +1 @@
+-7d32f979895f
++wrs_11a84c4cea76
+diff --git a/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_11a84c4cea76_vxlan_mode_column.py b/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_11a84c4cea76_vxlan_mode_column.py
+new file mode 100644
+index 0000000..fde8084
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/pike/expand/wrs_11a84c4cea76_vxlan_mode_column.py
+@@ -0,0 +1,39 @@
++# Copyright 2017 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++
++"""vxlan mode column
++
++Revision ID: wrs_11a84c4cea76
++Revises: 7d32f979895f
++Create Date: 2015-07-15 20:31:21.124839
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = 'wrs_11a84c4cea76'
++down_revision = '7d32f979895f'
++
++
++from alembic import op
++from neutron.common import constants as n_const
++import sqlalchemy as sa
++
++
++def upgrade():
++    op.add_column('providernet_range_vxlans',
++                  sa.Column('mode', sa.String(8), nullable=False,
++                            default=n_const.PROVIDERNET_VXLAN_DYNAMIC,
++                            server_default=n_const.PROVIDERNET_VXLAN_DYNAMIC))
++    op.alter_column('providernet_range_vxlans', 'group', nullable=True)
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 53a7115..8bfa2f3 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -151,7 +151,7 @@ class ProviderNetRangeVxLan(model_base.BASEV2, model_base.HasId):
+     __tablename__ = 'providernet_range_vxlans'
+ 
+     # IP address of the multicast group
+-    group = sa.Column(sa.String(64), nullable=False)
++    group = sa.Column(sa.String(64), nullable=True)
+ 
+     # Destination DP port value for all instances
+     port = sa.Column(sa.Integer, default=constants.DEFAULT_VXLAN_UDP_PORT,
+@@ -159,20 +159,26 @@ class ProviderNetRangeVxLan(model_base.BASEV2, model_base.HasId):
+     # Time-to-live value for all instances
+     ttl = sa.Column(sa.Integer, default=constants.DEFAULT_VXLAN_TTL,
+                     nullable=False)
++    # defines dynamic learning with multicast is enable/disabled
++    mode = sa.Column(sa.String(32),
++                     default=constants.PROVIDERNET_VXLAN_DYNAMIC,
++                     nullable=False)
+ 
+     # 1-to-1 relationship back to provider network range table
+     providernet_range_id = sa.Column(sa.String(36),
+                                      sa.ForeignKey('providernet_ranges.id'))
+ 
+-    def __init__(self, group, port, ttl, providernet_range_id=None):
+-        self.group = group
++    def __init__(self, group, port, ttl, mode, providernet_range_id=None):
++        self.group = group if validators.is_attr_set(group) else None
+         self.port = port
+         self.ttl = ttl
++        self.mode = mode
+         self.providernet_range_id = providernet_range_id
+ 
+     def __repr__(self):
+-        return "<ProviderNetRangeVxLan(%s,%s,%s,%s)>" % (
+-            self.group, self.port, self.ttl, self.providernet_range_id)
++        return "<ProviderNetRangeVxLan(%s,%s,%s,%s,%s)>" % (
++            self.group, self.port, self.ttl, self.mode,
++            self.providernet_range_id)
+ 
+ 
+ class ProviderNetRange(model_base.BASEV2, model_base.HasId,
+@@ -352,7 +358,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             vxlan = providernet['ranges'][0]['vxlan']
+             res.update({'vxlan': {'group': vxlan['group'],
+                                   'port': vxlan['port'],
+-                                  'ttl': vxlan['ttl']}})
++                                  'ttl': vxlan['ttl'],
++                                  'mode': vxlan['mode']}})
+         return self._fields(res, fields)
+ 
+     def _get_flat_providernet_segment_details(self, context, type, name):
+@@ -415,7 +422,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+     def _make_vxlan_dict(self, vxlan, fields=None):
+         res = {'group': vxlan['group'],
+                'port': vxlan['port'],
+-               'ttl': vxlan['ttl']}
++               'ttl': vxlan['ttl'],
++               'mode': vxlan['mode']}
+         return self._fields(res, fields)
+ 
+     def _make_providernet_dict(self, providernet, fields=None):
+@@ -575,6 +583,29 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         except exc.NoResultFound:
+             return
+ 
++    def _validate_providernet_range_ttl_mismatch(self, context, range):
++        try:
++            query = self._model_query(context, ProviderNetRangeVxLan)
++            query = (query.
++                     join(ProviderNetRange,
++                          (ProviderNetRange.id ==
++                           ProviderNetRangeVxLan.providernet_range_id)).
++                     filter(ProviderNetRange.providernet_id ==
++                            range['providernet_id']).
++                     filter(ProviderNetRange.id != range.get('id', '0')).
++                     filter(ProviderNetRangeVxLan.mode == range['mode']).
++                     filter(ProviderNetRangeVxLan.port == range['port']).
++                     filter(ProviderNetRangeVxLan.ttl != range['ttl']))
++            if validators.is_attr_set(range['group']):
++                group = range['group']
++                query = query.filter(ProviderNetRangeVxLan.group == group)
++            conflict = query.first()
++            if conflict:
++                raise ext_providernet.ProviderNetRangeMismatchedTTL(
++                    id=conflict['id'])
++        except exc.NoResultFound:
++            return
++
+     def check_providernet_id(self, network_type, id):
+         if network_type == constants.PROVIDERNET_FLAT:
+             return False
+@@ -616,8 +647,13 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+ 
+     def _validate_providernet_range_attrs(self, context, providernet, range):
+         if providernet['type'] == constants.PROVIDERNET_VXLAN:
+-            if not validators.is_attr_set(range.get('group')):
+-                raise ext_providernet.ProviderNetWithoutMulticastGroup()
++            if range['mode'] == constants.PROVIDERNET_VXLAN_DYNAMIC:
++                if not validators.is_attr_set(range.get('group')):
++                    raise ext_providernet.ProviderNetWithoutMulticastGroup()
++            else:
++                if validators.is_attr_set(range.get('group')):
++                    raise ext_providernet.\
++                        ProviderNetNonDynamicWithMulticastGroup()
+             if not validators.is_attr_set(range.get('ttl')):
+                 raise ext_providernet.ProviderNetWithoutTTL()
+             if not validators.is_attr_set(range.get('port')):
+@@ -633,12 +669,13 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             raise ext_providernet.ProviderNetRangeNotAllowedOnFlatNet(
+                 id=providernet.id)
+         self._validate_providernet_range_order(context, range)
++        self._validate_providernet_range_attrs(context, providernet, range)
+         if providernet.type == constants.PROVIDERNET_VLAN:
+             self._validate_providernet_range_vlanid(context, range)
+         if providernet.type == constants.PROVIDERNET_VXLAN:
+             self._validate_providernet_range_vxlanid(context, range)
++            self._validate_providernet_range_ttl_mismatch(context, range)
+         self._validate_providernet_range_overlap(context, range)
+-        self._validate_providernet_range_attrs(context, providernet, range)
+ 
+     def create_providernet_range(self, context, providernet_range):
+         range_data = providernet_range['providernet_range']
+@@ -658,9 +695,10 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             providernet_range = ProviderNetRange(**res)
+             context.session.add(providernet_range)
+             if providernet['type'] == constants.PROVIDERNET_VXLAN:
+-                res = {'group': range_data['group'],
++                res = {'group': range_data.get('group'),
+                        'port': range_data['port'],
+-                       'ttl': range_data['ttl'],
++                       'ttl': range_data.get('ttl'),
++                       'mode': range_data.get('mode'),
+                        'providernet_range_id': providernet_range.id}
+                 vxlan = ProviderNetRangeVxLan(**res)
+                 context.session.add(vxlan)
+@@ -701,7 +739,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             if providernet_range.vxlan:
+                 vxlan = {'group': new_data['group'],
+                          'port': new_data['port'],
+-                         'ttl': new_data['ttl']}
++                         'ttl': new_data['ttl'],
++                         'mode': new_data['mode']}
+                 providernet_range.vxlan.update(vxlan)
+         self.notify_schedule_audit_providernets(
+             context, [providernet_range['providernet_id']], by_event=True
+@@ -829,6 +868,14 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             results = []
+         return {"networks": results}
+ 
++    def is_static_vxlan_segment(self, context, name, segmentation_id):
++        """Determines whether a given VXLAN segment is configured as static."""
++        segment = self._get_providernet_segment_details(
++            context, constants.PROVIDERNET_VXLAN, name, segmentation_id)
++        if segment['vxlan']['mode'] == constants.PROVIDERNET_VXLAN_STATIC:
++            return True
++        return False
++
+     def _report_providernet_fault(self, providernet):
+         """
+         Generate a fault management alarm condition for provider network status
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index 610b576..c937b35 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -174,6 +174,10 @@ PROVIDERNET_RANGE_ATTRIBUTES = {
+                 'validate': {'type:range': n_const.VALID_TTL_RANGE},
+                 'is_visible': True,
+                 'default': constants.ATTR_NOT_SPECIFIED},
++        'mode': {'allow_post': True, 'allow_put': False,
++                 'validate': {'type:values': n_const.PROVIDERNET_VXLAN_MODES},
++                 'default': n_const.PROVIDERNET_VXLAN_DYNAMIC,
++                 'is_visible': True},
+         'vxlan': {'allow_post': False, 'allow_put': False,
+                   'is_visible': True},
+     },
+@@ -288,6 +292,11 @@ class ProviderNetRangeOverlaps(exc.Conflict):
+                 "with range with id %(id)s")
+ 
+ 
++class ProviderNetRangeMismatchedTTL(exc.Conflict):
++    message = _("VXLAN time-to-live attribute mismatched with "
++                "other similar providernet range entry: %(id)s")
++
++
+ class ProviderNetExistingRangeOverlaps(exc.Conflict):
+     message = _("Provider network range %(first)s overlaps "
+                 "with range %(second)s")
+@@ -318,7 +327,7 @@ class ProviderNetWithMulticastGroup(exc.NeutronException):
+ 
+ 
+ class ProviderNetWithoutTTL(exc.NeutronException):
+-    message = _("VXLAN time-to-live attributes missing")
++    message = _("VXLAN time-to-live attribute missing")
+ 
+ 
+ class ProviderNetWithTTL(exc.NeutronException):
+@@ -326,6 +335,11 @@ class ProviderNetWithTTL(exc.NeutronException):
+                 "VXLAN provider networks")
+ 
+ 
++class ProviderNetNonDynamicWithMulticastGroup(exc.NeutronException):
++    message = _("Multicast group attribute only valid for "
++                "dynamic VXLAN provider networks")
++
++
+ class ProviderNetWithoutPort(exc.NeutronException):
+     message = _("UDP port attributes missing")
+ 
+@@ -358,6 +372,14 @@ class MultiSubnetProviderSegmentsNotSupported(exc.NeutronException):
+     message = _("Multi-segment provider networks for subnets is not supported")
+ 
+ 
++class ProviderNetExternalStaticVxlanNotSupported(exc.NeutronException):
++    message = _("External networks are not supported on static VXLAN segments")
++
++
++class ProviderNetDynamicVxlanNotSupported(exc.NeutronException):
++    message = _("Dynamic VXLAN based tenant networks are not supported in SDN")
++
++
+ class ProviderNetTestingDisabled(exc.NeutronException):
+     message = _("Provider network testing is not supported in "
+                 "this configuration.")
+-- 
+2.7.4
+

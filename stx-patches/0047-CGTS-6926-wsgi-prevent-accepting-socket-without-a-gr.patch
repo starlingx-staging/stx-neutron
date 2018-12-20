@@ -1,0 +1,125 @@
+From 8e72491bbe27109149213730dcc3c0c17339671d Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 5 May 2017 12:32:22 -0400
+Subject: [PATCH 047/155] CGTS-6926: wsgi: prevent accepting socket without a
+ greenthread
+
+The current eventlet.wsgi.server implementation will do an accept() call before
+knowing whether a greenthread is available in the pool to service that socket.
+If all socket connections are shortlived then this is not an issue as a
+greenthread will eventually become available and the request will be serviced
+(hopefully before the client times out waiting).
+
+Unfortunately, the nature of the system is that some clients maintain open
+socket connections to the service indefinitely and continue to send requests
+over those open sockets.  This creates a situation where it is possible that a
+worker has all of its greenthreads tied up on open sockets.  If this happens
+and one more connection request arrives then the server will call accept() but
+will never actually receive the incoming request.  The client will timeout and
+the next request could very well come back to this same work and repeat the
+same error.
+
+This is really a bug (IMHO) in the eventlet code but to test the waters and
+make sure this works properly I am pushing this to neutron first before
+deciding whether to make the same/equivalent change at a lower level.  Neutron
+is planning on moving away from the eventlet.wsgi.server so hopefully in the
+future the API will be run by a proper webserver which won't be susceptible to
+this type of failure.
+
+Conflicts:
+	neutron/common/utils.py
+	neutron/wsgi.py
+---
+ neutron/common/utils.py         | 35 +++++++++++++++++++++++++++++++++++
+ neutron/tests/unit/test_wsgi.py |  2 +-
+ neutron/wsgi.py                 |  4 +++-
+ 3 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/common/utils.py b/neutron/common/utils.py
+index ec11652..51bf2ab 100644
+--- a/neutron/common/utils.py
++++ b/neutron/common/utils.py
+@@ -849,3 +849,38 @@ def resolve_ref(ref):
+     if isinstance(ref, weakref.ref):
+         ref = ref()
+     return ref
++
++
++class GuaranteedGreenPool(eventlet.GreenPool):
++    """
++    Same as GreenPool but guarantees that spawn_n will not block.  It does
++    so by blocking a previous call to spawn_n() from returning until it is
++    known that another spawn_n() will succeed.  The previous spawn_n is
++    blocked after having already initiated the greenthread therefore it is
++    executing while blocked rather than blocking before executing.
++
++    The usecase for this is a server that is in a loop to call accept() and
++    then spawn a thread to deal with the incoming socket request.  We are
++    trying to avoid doing the accept() until we know that a worker is
++    available to do the work.  Since some clients maintain their socket
++    indefinitely it is possible that the full thread pool is used by
++    persistent connections that will never stop running and so it is
++    possible that a worker gets stuck.
++    """
++
++    def spawn(self, function, *args, **kwargs):
++        self.sem.release()
++        gt = super(GuaranteedGreenPool, self).spawn(function, *args, **kwargs)
++        # At this point the greenthread is executing 'function'.  We do not
++        # want to return until we know that at least one greenthread has
++        # finished and another call to spawn_n() will success.
++        self.sem.acquire()
++        return gt
++
++    def spawn_n(self, function, *args, **kwargs):
++        self.sem.release()
++        super(GuaranteedGreenPool, self).spawn_n(function, *args, **kwargs)
++        # At this point the greenthread is executing 'function'.  We do not
++        # want to return until we know that at least one greenthread has
++        # finished and another call to spawn_n() will success.
++        self.sem.acquire()
+diff --git a/neutron/tests/unit/test_wsgi.py b/neutron/tests/unit/test_wsgi.py
+index c7e60c2..1e5630f 100644
+--- a/neutron/tests/unit/test_wsgi.py
++++ b/neutron/tests/unit/test_wsgi.py
+@@ -202,7 +202,7 @@ class TestWSGIServer(base.BaseTestCase):
+         eventlet_mock.wsgi.server.assert_called_once_with(
+             'socket',
+             'app',
+-            max_size=server.num_threads,
++            custom_pool=mock.ANY,
+             log=mock.ANY,
+             keepalive=CONF.wsgi_keep_alive,
+             log_format=CONF.wsgi_log_format,
+diff --git a/neutron/wsgi.py b/neutron/wsgi.py
+index a17ff5e..7cca29a 100644
+--- a/neutron/wsgi.py
++++ b/neutron/wsgi.py
+@@ -43,6 +43,7 @@ from neutron._i18n import _
+ from neutron.common import config
+ from neutron.common import exceptions as n_exc
+ from neutron.conf import wsgi as wsgi_config
++from neutron.common import utils
+ from neutron.db import api
+ 
+ CONF = cfg.CONF
+@@ -108,6 +109,7 @@ class Server(object):
+         self.disable_ssl = disable_ssl
+         # Pool for a greenthread in which wsgi server will be running
+         self.pool = eventlet.GreenPool(1)
++        self.thread_pool = utils.GuaranteedGreenPool(self.num_threads)
+         self.name = name
+         self._server = None
+         # A value of 0 is converted to None because None is what causes the
+@@ -218,7 +220,7 @@ class Server(object):
+     def _run(self, application, socket):
+         """Start a WSGI server in a new green thread."""
+         eventlet.wsgi.server(socket, application,
+-                             max_size=self.num_threads,
++                             custom_pool=self.thread_pool,
+                              log=LOG,
+                              keepalive=CONF.wsgi_keep_alive,
+                              log_format=CONF.wsgi_log_format,
+-- 
+2.7.4
+

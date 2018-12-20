@@ -1,0 +1,372 @@
+From 18fdb3827a71272199e5e0b05f1e68e7106a4a38 Mon Sep 17 00:00:00 2001
+From: Matt Peters <matt.peters@windriver.com>
+Date: Thu, 19 May 2016 13:00:02 -0400
+Subject: [PATCH 009/155] sg: security group enhancements
+
+Introduces enhancements to the security group code base to more easily
+interop with AVS.
+
+Conflicts:
+	etc/neutron/plugins/ml2/ml2_conf.ini
+	neutron/agent/securitygroups_rpc.py
+	neutron/db/securitygroups_rpc_base.py
+	neutron/plugins/ml2/plugin.py
+	neutron/tests/unit/agent/test_securitygroups_rpc.py
+
+Conflicts:
+	neutron/api/rpc/handlers/securitygroups_rpc.py
+	neutron/db/securitygroups_rpc_base.py
+---
+ neutron/api/rpc/handlers/securitygroups_rpc.py |  40 +++++-
+ neutron/conf/agent/securitygroups_rpc.py       |  17 ++-
+ neutron/db/securitygroups_rpc_base.py          |  10 ++
+ neutron/plugins/ml2/plugin.py                  |   3 +-
+ neutron/plugins/wrs/drivers/firewall.py        | 174 +++++++++++++++++++++++++
+ 5 files changed, 240 insertions(+), 4 deletions(-)
+ create mode 100644 neutron/plugins/wrs/drivers/firewall.py
+
+diff --git a/neutron/api/rpc/handlers/securitygroups_rpc.py b/neutron/api/rpc/handlers/securitygroups_rpc.py
+index 44d0ecf..670d33e 100644
+--- a/neutron/api/rpc/handlers/securitygroups_rpc.py
++++ b/neutron/api/rpc/handlers/securitygroups_rpc.py
+@@ -14,8 +14,11 @@
+ 
+ import collections
+ 
++import eventlet
++
+ from neutron_lib.plugins import directory
+ from neutron_lib.utils import net
++from oslo_config import cfg
+ from oslo_log import log as logging
+ import oslo_messaging
+ 
+@@ -25,10 +28,14 @@ from neutron.callbacks import registry
+ from neutron.common import constants
+ from neutron.common import rpc as n_rpc
+ from neutron.common import topics
++from neutron.conf.agent import securitygroups_rpc as sc_cfg
+ from neutron.db import securitygroups_rpc_base as sg_rpc_base
+ 
++
+ LOG = logging.getLogger(__name__)
+ 
++sc_cfg.register_securitygroups_opts()
++
+ 
+ class SecurityGroupServerRpcApi(object):
+     """RPC client for security group methods in the plugin.
+@@ -133,6 +140,9 @@ class SecurityGroupAgentRpcApiMixin(object):
+     #   1.1 Support Security Group RPC
+     SG_RPC_VERSION = "1.1"
+ 
++    defer_notify_suppress = False
++    defer_notify_delay = cfg.CONF.SECURITYGROUP.notify_interval
++
+     def _get_security_group_topic(self):
+         return topics.get_topic_name(self.topic,
+                                      topics.SECURITY_GROUP,
+@@ -158,8 +168,8 @@ class SecurityGroupAgentRpcApiMixin(object):
+         cctxt.cast(context, 'security_groups_member_updated',
+                    security_groups=security_groups)
+ 
+-    def security_groups_provider_updated(self, context,
+-                                         devices_to_update=None):
++    def _security_groups_provider_updated(self, context,
++                                          devices_to_update=None):
+         """Notify provider updated security groups."""
+         # TODO(kevinbenton): remove in Queens
+         # NOTE(ihrachys) the version here should really be 1.3, but since we
+@@ -177,6 +187,32 @@ class SecurityGroupAgentRpcApiMixin(object):
+         cctxt.cast(context, 'security_groups_provider_updated',
+                    devices_to_update=devices_to_update)
+ 
++    def security_groups_provider_updated(self, context,
++                                         devices_to_update=None):
++        """Notify provider updated security groups."""
++        if not self.defer_notify_delay:
++            self._security_groups_provider_updated(
++                context, devices_to_update=devices_to_update)
++            return
++        # defer the notification, subsequent calls will not be sent
++        # until the previous notification has completed
++        if not self.defer_notify_suppress:
++            self.defer_notify_suppress = True
++            LOG.debug("spawning deferred security_groups_provider_updated")
++            try:
++                eventlet.spawn_after(self.defer_notify_delay,
++                                     self._security_groups_provider_updated,
++                                     context,
++                                     devices_to_update=devices_to_update)
++            except Exception:
++                LOG.error("failed to spawn "
++                          "security_groups_provider_updated thread")
++                self._security_groups_provider_updated(
++                    context, devices_to_update=devices_to_update)
++                self.defer_notify_suppress = False
++        else:
++            LOG.debug("suppressing security_groups_provider_updated")
++
+ 
+ class SecurityGroupAgentRpcCallbackMixin(object):
+     """A mix-in that enable SecurityGroup support in agent implementations.
+diff --git a/neutron/conf/agent/securitygroups_rpc.py b/neutron/conf/agent/securitygroups_rpc.py
+index b49592e..17a11fd 100644
+--- a/neutron/conf/agent/securitygroups_rpc.py
++++ b/neutron/conf/agent/securitygroups_rpc.py
+@@ -13,6 +13,12 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
++# Copyright (c) 2013-2014,2017 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ 
+ from oslo_config import cfg
+@@ -36,7 +42,16 @@ security_group_opts = [
+         default=True,
+         help=_('Use ipset to speed-up the iptables based security groups. '
+                'Enabling ipset support requires that ipset is installed on L2 '
+-               'agent node.'))
++               'agent node.')),
++    cfg.BoolOpt(
++        'ensure_default_security_group',
++        default=True,
++        help=_("Enable/Disable association of default security group "
++               "on port during port creation")),
++    cfg.IntOpt(
++        'notify_interval',
++        default=0,
++        help=_('Throttled firewall rule update notification interval')),
+ ]
+ 
+ 
+diff --git a/neutron/db/securitygroups_rpc_base.py b/neutron/db/securitygroups_rpc_base.py
+index 55406ed..afbce41 100644
+--- a/neutron/db/securitygroups_rpc_base.py
++++ b/neutron/db/securitygroups_rpc_base.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ import netaddr
+ from neutron_lib import constants as const
+@@ -323,6 +330,9 @@ class SecurityGroupInfoAPIMixin(object):
+ 
+     def _apply_provider_rule(self, context, ports):
+         for port in ports.values():
++            # DO NOT CREATE GENERATED RULES IF NO RULES CONFIGURED
++            if not port['security_group_rules']:
++                continue
+             self._add_ingress_ra_rule(port)
+             self._add_ingress_dhcp_rule(port)
+ 
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index aea6ba3..cacb603 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -1217,7 +1217,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             attrs[addr_pair.ADDRESS_PAIRS] = []
+ 
+         if port_security:
+-            self._ensure_default_security_group_on_port(context, port)
++            if cfg.CONF.SECURITYGROUP.ensure_default_security_group:
++                self._ensure_default_security_group_on_port(context, port)
+         elif self._check_update_has_security_groups(port):
+             raise psec_exc.PortSecurityAndIPRequiredForSecurityGroups()
+ 
+diff --git a/neutron/plugins/wrs/drivers/firewall.py b/neutron/plugins/wrs/drivers/firewall.py
+new file mode 100644
+index 0000000..ada14b2
+--- /dev/null
++++ b/neutron/plugins/wrs/drivers/firewall.py
+@@ -0,0 +1,174 @@
++# Copyright (c) 2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import uuid
++
++import netaddr
++
++from oslo_log import log as logging
++
++from neutron.agent import firewall
++from neutron.common import constants as q_const
++
++LOG = logging.getLogger(__name__)
++
++DIRECTION_IP_PREFIX = {'ingress': 'source_ip_prefix',
++                       'egress': 'dest_ip_prefix'}
++
++METADATA_DEFAULT_PREFIX = 32
++METADATA_DEFAULT_IP = '169.254.169.254'
++METADATA_DEFAULT_CIDR = '%s/%d' % (METADATA_DEFAULT_IP,
++                                   METADATA_DEFAULT_PREFIX)
++METADATA_DEFAULT_PORT = 80
++
++
++class VSwitchFirewallDriver(firewall.FirewallDriver):
++    """VSwitch Firewall Driver."""
++
++    vswitch_mgr = None
++
++    def __init__(self):
++        # list of port which has security groups
++        self.filtered_ports = {}
++
++    def add_ingress_metadata_rule(self, port):
++        rule = {'direction': 'ingress',
++                'ethertype': q_const.IPv4,
++                'protocol': 'tcp',
++                'source_ip_prefix': METADATA_DEFAULT_CIDR,
++                'port_range_min': METADATA_DEFAULT_PORT,
++                'port_range_max': METADATA_DEFAULT_PORT}
++        #Required to avoid duplicates of rule
++        if rule not in port['security_group_rules']:
++            port['security_group_rules'].append(rule)
++
++    def register_manager(self, manager):
++        self.vswitch_mgr = manager
++
++    def update_security_group_rules(self, sg_id, sg_rules):
++        LOG.debug("Update rules of security group (%s)", sg_id)
++
++    def update_security_group_members(self, sg_id, sg_members):
++        LOG.debug("Update members of security group (%s)", sg_id)
++
++    def prepare_port_filter(self, port):
++        LOG.debug("Preparing port (%s) filter", port['device'])
++        self.filtered_ports[port['device']] = port
++        self._update_port_rules(port)
++
++    def update_port_filter(self, port):
++        LOG.debug("Update port (%s) filter", port['device'])
++        self.filtered_ports[port['device']] = port
++        self._update_port_rules(port)
++
++    def remove_port_filter(self, port):
++        LOG.debug("Remove port (%s) filter", port['device'])
++        self.filtered_ports.pop(port['device'], None)
++        self._remove_port_rules(port)
++
++    @property
++    def ports(self):
++        return self.filtered_ports
++
++    def _update_port_rules(self, port):
++        rules = []
++        if port['security_group_rules']:
++            self.add_ingress_metadata_rule(port)
++        for sg_rule in port['security_group_rules']:
++            rules.append(self._convert_security_group_rule(sg_rule))
++        self.vswitch_mgr.update_port_filters(port['id'], rules)
++
++    def _remove_port_rules(self, port):
++        rules = []
++        for sg_rule in port['security_group_rules']:
++            rules.append({'uuid': sg_rule['id']})
++        self.vswitch_mgr.remove_port_filters(port['id'], rules)
++
++    @classmethod
++    def _convert_security_group_rule(cls, sg_rule):
++
++        # build match criteria
++        direction = str(sg_rule.get('direction')).lower()
++        ethertype = str(sg_rule.get('ethertype')).lower()
++
++        match = {
++            "direction": direction,
++            "ethernet": {
++                "type-name": ethertype
++            }
++        }
++
++        ip_protocol = sg_rule.get('protocol', None)
++        ip_prefix = sg_rule.get(DIRECTION_IP_PREFIX[direction], None)
++        if ip_protocol or ip_prefix:
++            match['ip'] = {}
++            if ip_protocol:
++                if ip_protocol in ["tcp", "udp"]:
++                    match['ip']['protocol-name'] = ip_protocol
++
++                    # setup destination port range
++                    port_min = sg_rule.get('port_range_min', None)
++                    port_max = sg_rule.get('port_range_max', None)
++                    if port_min is not None:
++                        match.setdefault(ip_protocol, {})
++                        match[ip_protocol]['dst-port-min'] = port_min
++                    if port_max is not None:
++                        match.setdefault(ip_protocol, {})
++                        match[ip_protocol]['dst-port-max'] = port_max
++
++                elif ip_protocol == "icmp":
++                    if ethertype == q_const.IPv4.lower():
++                        match['ip']['protocol-name'] = "icmpv4"
++                    else:
++                        match['ip']['protocol-name'] = "icmpv6"
++
++                    # setup icmp type/code (stored in min/max range field)
++                    icmp_type = sg_rule.get('port_range_min', None)
++                    icmp_code = sg_rule.get('port_range_max', None)
++                    if (icmp_type is not None) and (icmp_code is not None):
++                        match['icmp'] = {
++                            'type': icmp_type,
++                            'code': icmp_code
++                        }
++                else:
++                    # custom protocol, if it is not valid, then an exception
++                    # will be raised
++                    match['ip']['protocol-value'] = int(ip_protocol)
++
++            if ip_prefix:
++                ip_network = netaddr.IPNetwork(ip_prefix)
++                match['ip']['remote-network'] = {
++                    'family': 'ipv{}'.format(ip_network.version),
++                    'prefix-length': ip_network.prefixlen,
++                    'address': str(ip_network.ip)
++                }
++
++        # generate a unique rule identifier for generated rule
++        rule_id = str(uuid.uuid5(uuid.NAMESPACE_OID,
++                                 str(match).encode('utf-8')))
++        sg_rule['id'] = rule_id
++
++        rule = {"uuid": rule_id, "match": match}
++
++        LOG.debug("sg_rule {} converted to rule {}".format(sg_rule, rule))
++
++        return rule
+-- 
+2.7.4
+

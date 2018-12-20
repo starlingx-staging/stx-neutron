@@ -1,0 +1,28 @@
+From 3469c43eaa7c38d4d2c7cd950b3d7a18c0b5da37 Mon Sep 17 00:00:00 2001
+From: Lin Shuicheng <shuicheng.lin@intel.com>
+Date: Thu, 10 May 2018 16:20:50 +0800
+Subject: [PATCH 154/155] remove avs/avr agent It is part of OTCMWA-198
+
+Verified ovs multinode virtualbox deployment.
+
+Signed-off-by: Lin Shuicheng <shuicheng.lin@intel.com>
+---
+ setup.cfg | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/setup.cfg b/setup.cfg
+index 5a050c2..a90c7c4 100644
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -67,8 +67,6 @@ console_scripts =
+     neutron-metering-agent = neutron.cmd.eventlet.services.metering_agent:main
+     neutron-sriov-nic-agent = neutron.cmd.eventlet.plugins.sriov_nic_neutron_agent:main
+     neutron-sanity-check = neutron.cmd.sanity_check:main
+-    neutron-avs-agent = neutron.plugins.wrs.agent.avs.agent:main
+-    neutron-avr-agent = neutron.plugins.wrs.agent.avr.agent:main
+ 
+ neutron.core_plugins =
+     ml2 = neutron.plugins.ml2.plugin:Ml2Plugin
+-- 
+2.7.4
+

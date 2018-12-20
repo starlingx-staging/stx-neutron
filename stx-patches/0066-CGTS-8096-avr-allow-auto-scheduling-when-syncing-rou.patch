@@ -1,0 +1,52 @@
+From f96076e41bb99267025e3577e67bc1deaeaf2733 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 1 Nov 2017 17:53:59 -0500
+Subject: [PATCH 066/155] CGTS-8096: avr: allow auto scheduling when syncing
+ routers
+
+We are currently using "get_routers()" to fetch the list of active routers for
+an agent.  This only returns currently scheduled routers and makes no attempt
+at auto scheduling any unscheduled routers.  The upstream layer3 agent uses a
+different api when it wants a full sync.  That is, the "get_router_ids()" which
+call auto_schedule_routers.
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index 55f6a9f..f445bc1 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -311,8 +311,10 @@ class AVRAgentManager(manager.Manager):
+         try:
+             configurations = self.agent_state['configurations']
+             configurations['routers'] = len(self.routers)
+-            self.state_rpc.report_state(self.context, self.agent_state,
+-                                        self.use_call)
++            status = self.state_rpc.report_state(
++                self.context, self.agent_state, self.use_call)
++            if status == n_const.AGENT_REVIVED:
++                self._event_notify(SYNC_EVENT, ROUTER_SYNC_PRIORITY)
+             self.agent_state.pop('start_flag', None)
+             self.use_call = False
+         except AttributeError:
+@@ -398,9 +400,14 @@ class AVRAgentManager(manager.Manager):
+         """
+         LOG.debug("AVR syncing routers: router_ids={}".format(router_ids))
+         try:
++            # NOTE(alegacy): An empty list is a request to audit all
++            # routers.  In this case, we invoke the get_router_ids API because
++            # it calls auto_schedule_routers to pick up any unscheduled
++            # routers.
++            ids = router_ids or self.plugin_rpc.get_router_ids(self.context)
+             # retrieve the latest list of routers keyed by id
+-            routers = {router['id']: router for router in
+-                       self.plugin_rpc.get_routers(self.context, router_ids)}
++            routers = dict((r['id'], r) for r in
++                           self.plugin_rpc.get_routers(self.context, ids))
+             router_ids = set(router_ids or [])
+ 
+             # adjust routers to remove components not owned or assigned to
+-- 
+2.7.4
+

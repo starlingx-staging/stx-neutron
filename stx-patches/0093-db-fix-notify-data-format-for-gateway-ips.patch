@@ -1,0 +1,35 @@
+From e547a7eea9de9f4f52dc1c96dffc81f4dff33859 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 28 Nov 2017 13:50:24 -0600
+Subject: [PATCH 093/155] db: fix notify data format for gateway ips
+
+An upstream commit [1] changed how the gw_ips passed information thru the
+notify mechanism.  It changed the data from a dict to a list of IP addresses
+but missed one line which is causing an exception in the
+neutron-dynamic-routing subproject in _handle_router_gateway_after_create.
+
+[1] efe1c3087c1b47b67acc121b0f31e04c9fa0dd72
+---
+ neutron/db/l3_db.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/db/l3_db.py b/neutron/db/l3_db.py
+index 3acd401..d9aca36 100644
+--- a/neutron/db/l3_db.py
++++ b/neutron/db/l3_db.py
+@@ -496,10 +496,11 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+                                                include_gateway=True)
+             self._create_router_gw_port(context, router,
+                                         new_network_id, ext_ips)
++            gw_ips = [x['ip_address'] for x in ext_ips or []]
+             registry.notify(resources.ROUTER_GATEWAY,
+                             events.AFTER_CREATE,
+                             self._create_gw_port,
+-                            gw_ips=ext_ips,
++                            gw_ips=gw_ips,
+                             network_id=new_network_id,
+                             router_id=router_id)
+ 
+-- 
+2.7.4
+

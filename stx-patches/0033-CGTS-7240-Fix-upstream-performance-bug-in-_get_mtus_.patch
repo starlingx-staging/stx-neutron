@@ -1,0 +1,32 @@
+From 29dc4f03080b53a49f5335694310025e46786bc1 Mon Sep 17 00:00:00 2001
+From: Al Bailey <al.bailey@windriver.com>
+Date: Wed, 9 Aug 2017 07:15:48 -0500
+Subject: [PATCH 033/155] CGTS-7240 Fix upstream performance bug in
+ _get_mtus_by_network_list
+
+Upstream code provides an invalid key for the filter passed into the DB get_networks
+This means that all networks are returned, and iterated over to determine the mtu.
+In Large Office this causes the _get_mtus_by_network_list to be one of the more expensive routines.
+
+This is an upstream issue introduced in 2015 by changeID I50d40cd3b8eabf1899461a80e729d5bd1e727f28 for bug 1495444
+Inspected by Allain
+---
+ neutron/db/l3_db.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/db/l3_db.py b/neutron/db/l3_db.py
+index 69d7bee..6097d95 100644
+--- a/neutron/db/l3_db.py
++++ b/neutron/db/l3_db.py
+@@ -1679,7 +1679,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+     def _get_mtus_by_network_list(self, context, network_ids):
+         if not network_ids:
+             return {}
+-        filters = {'network_id': network_ids}
++        filters = {'id': list(set(network_ids))}
+         fields = ['id', 'mtu']
+         networks = self._core_plugin.get_networks(context, filters=filters,
+                                                   fields=fields)
+-- 
+2.7.4
+

@@ -1,0 +1,361 @@
+From c383f61e454c6944eb6988e3f781a508ad4f9a1d Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 3 Aug 2017 08:56:22 -0500
+Subject: [PATCH 032/155] pnet: pnet test support for static vxlan
+
+Because static VXLAN interface do not learn endpoints dynamically and cannot
+flood unless they have static peers defined it is not posssible to run the
+connectivity tests in the same fashion as on dynamic VXLAN interfaces.  For
+simplicity we are converting all VXLAN tests to be run over the transport IP
+addresses instead of the VXLAN link-local addresses.  This won't validate the
+UDP path but will validate that the nodes can reach each other on the data
+interface IP layer.
+
+CGTS-7240: avs: cache providernet details
+
+When configuring a new port or interface the agent invokes an RPC on the server
+to query the providernet details.  This is done repeatedly as the agent
+discovers a port for the first time and then later handles update events on
+that same port.  To reduce the number of providernet RPC calls we are now
+caching the data in the agent and purging it when the related network is
+deleted.
+
+The providernet details will never change over the lifetime of the network so
+this should not be leading to any stale data.
+---
+ neutron/db/providernet_db.py           | 42 ++++++++++++----
+ neutron/plugins/wrs/agent/avs/agent.py | 87 ++++++++++++++++++++++------------
+ 2 files changed, 90 insertions(+), 39 deletions(-)
+
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 8bfa2f3..16927ed 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -13,7 +13,7 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2013-2016 Wind River Systems, Inc.
++# Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -50,6 +50,7 @@ from neutron.db import models_v2
+ from neutron.db import segments_db
+ from neutron.drivers import fm
+ from neutron.extensions import wrs_provider as ext_providernet
++from neutron.plugins.ml2.drivers.l2pop import db as l2pop_db
+ 
+ 
+ LOG = logging.getLogger(__name__)
+@@ -286,11 +287,13 @@ class ProviderNet(model_base.BASEV2, model_base.HasId):
+ 
+ class ProvidernetIndividualConnectivityTest(object):
+ 
+-    def __init__(self, audit_uuid, providernet_id, providernet_type,
++    def __init__(self, audit_uuid, providernet_id,
++                 providernet_name, providernet_type,
+                  segments, extra_data):
+         self.audit_uuid = audit_uuid
+         self.providernet_id = providernet_id
+         self.providernet_type = providernet_type
++        self.providernet_name = providernet_name
+         self.segments = segments
+         self.extra_data = extra_data
+ 
+@@ -1313,7 +1316,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         mtu = providernet['mtu']
+ 
+         audit = ProvidernetIndividualConnectivityTest(
+-            audit_uuid, providernet_id, constants.PROVIDERNET_FLAT,
++            audit_uuid, providernet_id, providernet['name'],
++            constants.PROVIDERNET_FLAT,
+             [constants.PROVIDERNET_FLAT], {ext_providernet.MTU: mtu}
+         )
+         pending_audits.append(audit)
+@@ -1341,7 +1345,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         for segmentation_range in segmentation_ranges:
+             if len(audit_queue) >= batch_size:
+                 audit = ProvidernetIndividualConnectivityTest(
+-                    audit_uuid, providernet_id, constants.PROVIDERNET_VXLAN,
++                    audit_uuid, providernet_id, providernet['name'],
++                    constants.PROVIDERNET_VXLAN,
+                     audit_queue, {ext_providernet.MTU: mtu}
+                 )
+                 pending_audits.append(audit)
+@@ -1349,7 +1354,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             audit_queue.append(segmentation_range)
+         if audit_queue:
+             audit = ProvidernetIndividualConnectivityTest(
+-                audit_uuid, providernet_id, constants.PROVIDERNET_VXLAN,
++                audit_uuid, providernet_id, providernet['name'],
++                constants.PROVIDERNET_VXLAN,
+                 audit_queue, {ext_providernet.MTU: mtu}
+             )
+             pending_audits.append(audit)
+@@ -1380,7 +1386,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                                                    r["maximum"] + 1):
+                 if len(audit_queue) >= batch_size:
+                     audit = ProvidernetIndividualConnectivityTest(
+-                        audit_uuid, providernet_id,
++                        audit_uuid, providernet_id, providernet['name'],
+                         constants.PROVIDERNET_VLAN,
+                         audit_queue, {ext_providernet.MTU: mtu}
+                     )
+@@ -1391,7 +1397,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                     audit_queue.append(segmentation_id)
+         if audit_queue:
+             audit = ProvidernetIndividualConnectivityTest(
+-                audit_uuid, providernet_id,
++                audit_uuid, providernet_id, providernet['name'],
+                 constants.PROVIDERNET_VLAN,
+                 audit_queue, {ext_providernet.MTU: mtu}
+             )
+@@ -1406,7 +1412,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         # Empty audit is added to signal to analyse results for alarms
+         empty_audit = ProvidernetIndividualConnectivityTest(None,
+                                                             providernet_id,
+-                                                            None, None,
++                                                            None, None, None,
+                                                             None)
+         self.scheduled_audits.insert(0, empty_audit)
+         self.scheduled_audits.append(empty_audit)
+@@ -1549,7 +1555,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             )
+ 
+     def _run_individual_audit(self, context, audit_uuid, providernet_id,
+-                              providernet_type, segments, extra_data):
++                              providernet_name, providernet_type, segments,
++                              extra_data):
+         """
+         Runs audits for give segmentation IDs
+         """
+@@ -1562,6 +1569,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         compute_hostnames = []
+         # tuple containing (hostname, link-local-address) pairs
+         self.compute_masters_addresses = []
++        self.compute_agent_addresses = {}
+ 
+         for host in compute_hosts:
+             if host.availability == constants.HOST_UP:
+@@ -1587,12 +1595,27 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                     context, audit_uuid, compute_master,
+                     providernet_id, segments, extra_data
+                 )
++                agent_ips = None
++                if providernet_type == constants.PROVIDERNET_VXLAN:
++                    # Use the transport layer address instead, but if it not
++                    #  available (i.e., in an upgrade) then use the link
++                    # local address.  A newer compute node will expect the
++                    # transport address but an older compute node will only
++                    # be able to handle the link local.
++                    agent_ips = l2pop_db.get_agent_ip_by_host(
++                        context.session,
++                        compute_master,
++                        physical_network=providernet_name)
++                    self.compute_agent_addresses[compute_master] = agent_ips
+                 self.compute_masters_addresses.append(
+                     (compute_master, link_local_address)
+                 )
+         except oslo_messaging.MessagingTimeout:
+             setup_passed = False
+ 
++        # Add the master agent address for those nodes that support it
++        extra_data['agent-ips'] = self.compute_agent_addresses
++
+         # Only run connectivity tests if all masters were setup correctly
+         if setup_passed:
+             self._start_connectivity_audit(context, audit_uuid,
+@@ -1646,6 +1669,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                     self._run_individual_audit(context,
+                                                audit.audit_uuid,
+                                                audit.providernet_id,
++                                               audit.providernet_name,
+                                                audit.providernet_type,
+                                                audit.segments,
+                                                audit.extra_data)
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index a63c340..30ef7fe 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -253,7 +253,9 @@ class VSwitchBaseRpcCallbacksMixin(object):
+             if network['type'] == avs_constants.VSWITCH_LAYER2_NETWORK:
+                 self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
+                 self.virtual_networks.pop(network_id, None)
+-                self.segment_cache.pop(network_id, None)
++                segment = self.segment_cache.pop(network_id, None)
++                self.providernet_cache.pop(
++                    self.get_providernet_key(segment), None)
+ 
+     def agent_updated(self, context, payload):
+         """Handle the agent_updated notification event."""
+@@ -378,7 +380,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             in_use_interfaces = self._pnet_connectivity_interface_uuids()
+             self.vswitch_mgr.delete_network(network_uuid, in_use_interfaces)
+             self.virtual_networks.pop(network_uuid, None)
+-            self.segment_cache.pop(network_uuid, None)
++            segment = self.segment_cache.pop(network_uuid, None)
++            self.providernet_cache.pop(self.get_providernet_key(segment), None)
+ 
+         except manager.VSwitchManagerError as e:
+             # network may not exist if subnet is not associated with a
+@@ -590,12 +593,13 @@ class VSwitchSecurityGroupAgentRpc(sg_rpc.SecurityGroupAgentRpc):
+ class VSwitchNetworkSegmentInterface(object):
+ 
+     def __init__(self, providernet_id, providernet_name, providernet_type,
+-                 segment, interface_uuid):
++                 segment, interface_uuid, lower_uuid=None):
+         self.providernet_id = providernet_id
+         self.providernet_name = providernet_name
+         self.providernet_type = providernet_type
+         self.segment = segment
+         self.interface_uuid = interface_uuid
++        self.lower_uuid = lower_uuid
+ 
+ 
+ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+@@ -1273,7 +1277,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+                         port_uuid, network_id))
+             self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
+             self.virtual_networks.pop(network_id, None)
+-            self.segment_cache.pop(network_id, None)
++            segment = self.segment_cache.pop(network_id, None)
++            self.providernet_cache.pop(self.get_providernet_key(segment), None)
+             for uuid, iface in self.interface_details.items():
+                 if iface['network_id'] == network_id:
+                     self.interface_details.pop(uuid, None)
+@@ -1936,9 +1941,15 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+                                 'vxlan': segment['vxlan']})
+                 interface_uuid = self.vswitch_mgr.setup_provider_interface(
+                     lower_uuid, network)
++                # Rather than run the test over the VXLAN interface we run
++                # it on the lower interface.  This is to support static
++                # VXLAN mode where, without learning or static endpoints,
++                # it is not possible to ping an arbitrary node.  We would
++                # need to preprovision a mesh of static endpoints and that
++                # is not practical.
+                 segment_iface = VSwitchNetworkSegmentInterface(
+                     providernet_id, providernet_name, providernet_type,
+-                    segment['id'], interface_uuid
++                    segment['id'], interface_uuid, lower_uuid=lower_uuid
+                 )
+                 self.pnet_connectivity_interfaces.append(segment_iface)
+         elif providernet_type == n_const.PROVIDERNET_FLAT:
+@@ -1968,17 +1979,12 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+             length = avs_constants.VSWITCH_PING_MINIMUM_SIZE
+         return length
+ 
+-    def _test_interface_connectivity_to_address(self, link_local_address,
+-                                                interface_uuid, mtu=None):
++    def _test_interface_connectivity_to_address(self, destination_address,
++                                                interface_uuid, length=None):
+         """Returns whether an interface can ping a given address"""
+-        # Don't try pinging if address is local
+-        if link_local_address == self.link_local_address:
+-            return True
+-        # Calculate maximum size based on MTU if exists, should be IPv6
+-        length = self._calculate_packet_size_for_ping(mtu)
+-
++        length = length or avs_constants.VSWITCH_PING_MINIMUM_SIZE
+         for i in range(n_const.PROVIDERNET_CONNECTIVITY_TEST_ATTEMPTS):
+-            if self.vswitch_mgr.ping(link_local_address,
++            if self.vswitch_mgr.ping(destination_address,
+                                      interface_uuid, length):
+                 return True
+         return False
+@@ -1989,26 +1995,50 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+             return "Failed with MTU %s" % str(mtu)
+         return "Failed to ping target"
+ 
+-    def _run_connectivity_tests(self, common_tuple, link_local_address,
++    def _run_connectivity_tests(self, common_tuple, master_address,
+                                 extra_data):
+         """
+         Test connectivity to address for all interfaces and return a list
+          of tuples with the results of each test containing:
+-         (local_hostname, master_hostname, provdernet_id, segment, state).
++         (local_hostname, master_hostname, providernet_id, segment, state).
+         """
+         mtu = extra_data[wrs_provider.MTU]
+         test_results = []
+         for segment_iface in self.pnet_connectivity_interfaces:
+             segment_details = (segment_iface.providernet_id,
+                                segment_iface.segment)
++            length = self._calculate_packet_size_for_ping(mtu)
++            interface_uuid = segment_iface.interface_uuid
++            physical_network = segment_iface.providernet_name
++            if segment_iface.providernet_type == n_const.PROVIDERNET_VXLAN:
++                # Pick a compatible IP address for this provider network.
++                agent_ips = extra_data.get('agent-ips', {})
++                agent_ip = agent_ips[common_tuple[1]]
++                if agent_ip:
++                    # TODO(alegacy): this can be removed in R6 because by
++                    # then this data will always be present.  Currently it
++                    # is only present when the master nodes have been
++                    # upgraded to R5 and until then we need to continue
++                    # using the original link-local address test over a VNI.
++                    master_address = self._select_local_agent_ip(
++                        physical_network, agent_ip)
++                    interface_uuid = segment_iface.lower_uuid
++                    # Inflate the size of the packet to simulate what it
++                    # would look like if it was originated from behind the
++                    # VXLAN interface.
++                    length += n_const.VXLAN_MTU_OVERHEAD
++
++            if (master_address == self.link_local_address or
++                    self._is_local_agent_ip(physical_network, master_address)):
++                # Fake tests to our own address
++                test_results.append(
++                    common_tuple + segment_details +
++                    (n_const.PROVIDERNET_CONNECTIVITY_PASS, ""))
++                continue
+ 
+             if self._test_interface_connectivity_to_address(
+-                link_local_address, segment_iface.interface_uuid
+-            ):
+-                test_result = (
+-                    n_const.PROVIDERNET_CONNECTIVITY_PASS,
+-                    ""
+-                )
++                    master_address, interface_uuid):
++                test_result = (n_const.PROVIDERNET_CONNECTIVITY_PASS, "")
+             else:
+                 test_result = (
+                     n_const.PROVIDERNET_CONNECTIVITY_FAIL,
+@@ -2019,12 +2049,8 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+                 continue
+ 
+             if self._test_interface_connectivity_to_address(
+-                link_local_address, segment_iface.interface_uuid, mtu
+-            ):
+-                test_result = (
+-                    n_const.PROVIDERNET_CONNECTIVITY_PASS,
+-                    ""
+-                )
++                    master_address, interface_uuid, length):
++                test_result = (n_const.PROVIDERNET_CONNECTIVITY_PASS, "")
+             else:
+                 test_result = (
+                     n_const.PROVIDERNET_CONNECTIVITY_FAIL,
+@@ -2038,7 +2064,7 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+                                 test_result)
+         return test_results
+ 
+-    def _run_connectivity_audit(self, masters, extra_data):
++    def _run_connectivity_audit(self, providernet, masters, extra_data):
+         """Run tests to a given list of masters"""
+         connectivity_tests_results = []
+         local_hostname = self.host
+@@ -2084,7 +2110,8 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+         time.sleep(2)
+ 
+         # Run on all nodes including masters
+-        results = self._run_connectivity_audit(masters, extra_data)
++        results = self._run_connectivity_audit(
++            providernet, masters, extra_data)
+ 
+         # On masters, run separately and wait for response
+         if local_hostname not in master_hostnames:
+-- 
+2.7.4
+

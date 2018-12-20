@@ -1,0 +1,44 @@
+From ab181581c2df2e210711efe3edf04086eb79bd07 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 24 Nov 2017 14:48:22 -0500
+Subject: [PATCH 079/155] fixup firewall driver.
+
+At next rebase, squash with 18fdb382
+---
+ neutron/plugins/wrs/drivers/firewall.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/plugins/wrs/drivers/firewall.py b/neutron/plugins/wrs/drivers/firewall.py
+index ada14b2..00754cd 100644
+--- a/neutron/plugins/wrs/drivers/firewall.py
++++ b/neutron/plugins/wrs/drivers/firewall.py
+@@ -27,7 +27,7 @@ import netaddr
+ from oslo_log import log as logging
+ 
+ from neutron.agent import firewall
+-from neutron.common import constants as q_const
++from neutron_lib import constants as n_const
+ 
+ LOG = logging.getLogger(__name__)
+ 
+@@ -52,7 +52,7 @@ class VSwitchFirewallDriver(firewall.FirewallDriver):
+ 
+     def add_ingress_metadata_rule(self, port):
+         rule = {'direction': 'ingress',
+-                'ethertype': q_const.IPv4,
++                'ethertype': n_const.IPv4,
+                 'protocol': 'tcp',
+                 'source_ip_prefix': METADATA_DEFAULT_CIDR,
+                 'port_range_min': METADATA_DEFAULT_PORT,
+@@ -136,7 +136,7 @@ class VSwitchFirewallDriver(firewall.FirewallDriver):
+                         match[ip_protocol]['dst-port-max'] = port_max
+ 
+                 elif ip_protocol == "icmp":
+-                    if ethertype == q_const.IPv4.lower():
++                    if ethertype == n_const.IPv4.lower():
+                         match['ip']['protocol-name'] = "icmpv4"
+                     else:
+                         match['ip']['protocol-name'] = "icmpv6"
+-- 
+2.7.4
+

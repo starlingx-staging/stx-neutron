@@ -1,0 +1,199 @@
+From fd6cfc005fd43f148e526a1891cdcce95546560e Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 1 Dec 2015 14:49:04 -0500
+Subject: [PATCH 014/155] CGTS-3059: prevent dhcp agent from processing stale
+ RPC messages
+
+When the DHCP starts up it now waits for an arbitrary amount of time before
+reporting state to the server and starting the sync_state procedure.  This is
+to allow stale RPC messages (messages that were sent to the agent before the
+node was rebooted but were not processed by the agent because it was shutdown
+at the time) to be synced before we start processing new RPC messages.  This is
+a bit arbitrary but necessary to avoid cases where the agent has received a
+stale network create/end notification which causes it start servicing a network
+even though the server has assigned that network to a different agent.  Since
+the agent does not periodically audit the list of networks that it is servicing
+it could potentially continuing servicing a network that was not assigned to it
+forever.  Similarly, it is possible that a stale delete message is processed
+thus causing the agent to stop servicing a network that it was actually
+supposed to service.
+
+It would have been a better solution to have changed the protocol between the
+server and agent to include a sequence/lifetime number so that stale messages
+could be discarded with more certainty.  But in the spirit of avoiding
+compatibility changes and changes that would impact running against an
+unmodified server we are opting to handle this condition strictly in the agent
+with an arbitrary startup delay.
+
+This addresses specific DOR scenarios in the large office where the server is
+discovering that agents are down at the same time as mtce is rebooting those
+same nodes.  Those two actions together resulted in the server sending
+notifications to agents that just got rebooted which led to stale RPC messages
+when those agents returned to service.
+
+Conflicts:
+	neutron/agent/dhcp/agent.py
+	neutron/agent/dhcp_agent.py
+
+Conflicts:
+	neutron/agent/dhcp/agent.py
+---
+ neutron/agent/dhcp/agent.py | 49 ++++++++++++++++++++++++++++++++++++++++++---
+ neutron/agent/dhcp_agent.py |  2 +-
+ 2 files changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index 7b3e1b0..1267adb 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -14,6 +14,7 @@
+ #    under the License.
+ 
+ import collections
++import functools
+ import os
+ 
+ import eventlet
+@@ -68,6 +69,25 @@ def _net_lock(network_id):
+     lock_name = 'dhcp-agent-network-lock-%s' % network_id
+     return lockutils.lock(lock_name, utils.SYNCHRONIZED_PREFIX)
+ 
++# Wait for a short interval before running agent startup (in seconds)
++DHCP_AGENT_INITIAL_DELAY = 15
++
++
++def run_if_rpc_enabled():
++    """Control whether RPC methods should be invoked based on whether the
++    initial state synchronization has completed or not.
++    """
++    def decorator(func):
++        @functools.wraps(func)
++        def inner(self, *args, **kwargs):
++            if getattr(self, 'enable_rpc', True):
++                func(self, *args, **kwargs)
++            else:
++                LOG.warning("{} RPC method ignored before initial state"
++                            " synchronization".format(func.__name__))
++        return inner
++    return decorator
++
+ 
+ class DhcpAgent(manager.Manager):
+     """DHCP agent service manager.
+@@ -125,6 +145,7 @@ class DhcpAgent(manager.Manager):
+ 
+     def run(self):
+         """Activate the DHCP agent."""
++        self.sync_state()
+         self.periodic_resync()
+         self.start_ready_ports_loop()
+ 
+@@ -405,6 +426,7 @@ class DhcpAgent(manager.Manager):
+         self.update_isolated_metadata_proxy(network)
+ 
+     @_wait_if_syncing
++    @run_if_rpc_enabled()
+     def network_create_end(self, context, payload):
+         """Handle the network.create.end notification event."""
+         network_id = payload['network']['id']
+@@ -412,6 +434,7 @@ class DhcpAgent(manager.Manager):
+             self.enable_dhcp_helper(network_id)
+ 
+     @_wait_if_syncing
++    @run_if_rpc_enabled()
+     def network_update_end(self, context, payload):
+         """Handle the network.update.end notification event."""
+         network_id = payload['network']['id']
+@@ -422,6 +445,7 @@ class DhcpAgent(manager.Manager):
+                 self.disable_dhcp_helper(network_id)
+ 
+     @_wait_if_syncing
++    @run_if_rpc_enabled()
+     def network_delete_end(self, context, payload):
+         """Handle the network.delete.end notification event."""
+         network_id = payload['network_id']
+@@ -429,6 +453,7 @@ class DhcpAgent(manager.Manager):
+             self.disable_dhcp_helper(network_id)
+ 
+     @_wait_if_syncing
++    @run_if_rpc_enabled()
+     def subnet_update_end(self, context, payload):
+         """Handle the subnet.update.end notification event."""
+         network_id = payload['subnet']['network_id']
+@@ -439,6 +464,7 @@ class DhcpAgent(manager.Manager):
+     subnet_create_end = subnet_update_end
+ 
+     @_wait_if_syncing
++    @run_if_rpc_enabled()
+     def subnet_delete_end(self, context, payload):
+         """Handle the subnet.delete.end notification event."""
+         subnet_id = payload['subnet_id']
+@@ -468,7 +494,7 @@ class DhcpAgent(manager.Manager):
+                          if s.id in subnet_ids and s.enable_dhcp]))
+ 
+     @_wait_if_syncing
+-    @utils.synchronized('dhcp-agent')
++    @run_if_rpc_enabled()
+     def port_update_end(self, context, payload):
+         """Handle the port.update.end notification event."""
+         updated_port = dhcp.DictModel(payload['port'])
+@@ -531,6 +557,7 @@ class DhcpAgent(manager.Manager):
+     port_create_end = port_update_end
+ 
+     @_wait_if_syncing
++    @run_if_rpc_enabled()
+     def port_delete_end(self, context, payload):
+         """Handle the port.delete.end notification event."""
+         port = self.cache.get_port_by_id(payload['port_id'])
+@@ -795,7 +822,7 @@ class NetworkCache(object):
+ 
+ 
+ class DhcpAgentWithStateReport(DhcpAgent):
+-    def __init__(self, host=None, conf=None):
++    def __init__(self, host=None, conf=None, initial_delay=None):
+         super(DhcpAgentWithStateReport, self).__init__(host=host, conf=conf)
+         self.state_rpc = agent_rpc.PluginReportStateAPI(topics.REPORTS)
+         self.agent_state = {
+@@ -813,7 +840,8 @@ class DhcpAgentWithStateReport(DhcpAgent):
+         if report_interval:
+             self.heartbeat = loopingcall.FixedIntervalLoopingCall(
+                 self._report_state)
+-            self.heartbeat.start(interval=report_interval)
++            self.heartbeat.start(interval=report_interval,
++                                 initial_delay=initial_delay)
+ 
+     def _report_state(self):
+         try:
+@@ -851,3 +879,18 @@ class DhcpAgentWithStateReport(DhcpAgent):
+ 
+     def after_start(self):
+         LOG.info("DHCP agent started")
++
++
++class DhcpAgentWithDelayedStart(DhcpAgentWithStateReport):
++    def __init__(self, host=None):
++        self.enable_rpc = False
++        super(DhcpAgentWithDelayedStart, self).__init__(
++            host=host, initial_delay=DHCP_AGENT_INITIAL_DELAY)
++
++    def init_host(self):
++        # Do not run the sync_state until we have called report_state
++        return
++
++    def _report_state(self):
++        super(DhcpAgentWithDelayedStart, self)._report_state()
++        self.enable_rpc = True
+diff --git a/neutron/agent/dhcp_agent.py b/neutron/agent/dhcp_agent.py
+index 6096a13..69c66cb 100644
+--- a/neutron/agent/dhcp_agent.py
++++ b/neutron/agent/dhcp_agent.py
+@@ -45,5 +45,5 @@ def main():
+         binary='neutron-dhcp-agent',
+         topic=topics.DHCP_AGENT,
+         report_interval=cfg.CONF.AGENT.report_interval,
+-        manager='neutron.agent.dhcp.agent.DhcpAgentWithStateReport')
++        manager='neutron.agent.dhcp.agent.DhcpAgentWithDelayedStart')
+     service.launch(cfg.CONF, server).wait()
+-- 
+2.7.4
+

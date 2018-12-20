@@ -1,0 +1,54 @@
+From e070d209404f3927a91383228729004b35408aba Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Wed, 15 Nov 2017 09:40:39 -0500
+Subject: [PATCH 063/155] Handle new format for database table dvr_host_macs
+
+---
+ neutron/plugins/wrs/agent/avs/dvr.py | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/dvr.py b/neutron/plugins/wrs/agent/avs/dvr.py
+index bef1eca..e6e7aae 100644
+--- a/neutron/plugins/wrs/agent/avs/dvr.py
++++ b/neutron/plugins/wrs/agent/avs/dvr.py
+@@ -26,6 +26,8 @@
+ # Based on the structure of the OpenVSwitch DVR agent in the
+ # Neutron OpenVSwitch Plugin.
+ 
++import netaddr
++
+ import six
+ 
+ from oslo_log import log as logging
+@@ -97,6 +99,10 @@ class VswitchDVRNeutronAgent(object):
+     def register_manager(self, manager):
+         self.vswitch_mgr = manager
+ 
++    @staticmethod
++    def _format_mac_avs(mac_address):
++        return str(netaddr.EUI(mac_address, dialect=netaddr.mac_unix))
++
+     def get_peer_dvr_mac_addresses(self):
+         """Find our local unique mac address as well as those of other hosts"""
+         # get the list of local/unique DVR MAC addresses
+@@ -124,7 +130,7 @@ class VswitchDVRNeutronAgent(object):
+                 self.context, self.host)
+             LOG.info("DVR: local MAC address for host {} is {}".format(
+                 self.host, details['mac_address']))
+-            self.dvr_mac_address = details['mac_address']
++            self.dvr_mac_address = self._format_mac_avs(details['mac_address'])
+         return self.dvr_mac_address
+ 
+     def _get_interfaces_on_dvr_subnet(self, subnet_uuid):
+@@ -138,7 +144,7 @@ class VswitchDVRNeutronAgent(object):
+         return local_ports
+ 
+     def _get_peer_mac_addresses(self):
+-        return [{'hostname': k, 'mac-address': v}
++        return [{'hostname': k, 'mac-address': self._format_mac_avs(v)}
+                 for k, v in six.iteritems(self.registered_dvr_macs)]
+ 
+     def _configure_avs_host_macs(self):
+-- 
+2.7.4
+

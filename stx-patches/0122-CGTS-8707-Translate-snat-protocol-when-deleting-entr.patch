@@ -1,0 +1,33 @@
+From 0abb0a91d51dd63042b36d5b170eb0e7da9d8b9a Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Thu, 18 Jan 2018 11:37:35 -0500
+Subject: [PATCH 122/155] CGTS-8707: Translate snat protocol when deleting
+ entry
+
+Because UDP-Lite is defined as 'udplite' by neutron, and 'udp-lite' by AVS,
+a translation of the protocol is required.  In order to do this, we call
+_convert_protocol_to_avs whem adding an snat entry, which makes this
+translation.  We should also be calling _convert_protocol_to_avs when we are
+deleting the snat entry.  This commit makes that change.
+---
+ neutron/agent/vswitch/manager.py | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index f69d7d3..cbbe673 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -1246,9 +1246,7 @@ class VSwitchManager(object):
+         """
+         try:
+             return self.api.delete_snat_entry(interface_uuid,
+-                                              src_address,
+-                                              src_port,
+-                                              protocol)
++                src_address, src_port, self._convert_protocol_to_avs(protocol))
+         except exceptions.VSwitchError as e:
+             msg = ("Failed to delete static SNAT entry {}:{} {} on {}: {}".
+                    format(src_address, src_port, protocol, interface_uuid, e))
+-- 
+2.7.4
+

@@ -1,0 +1,1180 @@
+From a16d331fa848ab00dabebc04f734b287b2e6e229 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Mon, 27 Jul 2015 10:50:37 -0400
+Subject: [PATCH 013/155] dnat: virtual router dnat implementation
+
+initial implementation of virtual router port forwarding
+
+The neutron virtual router functionality is being enhanced with the ability to
+provision static port forwarding rules (DNAT).  This functionality is not yet
+part of regular upstream neutron but work has started on an official
+subproject.  At this point the status of the subproject appears to be suspended
+but since this is the most official version of an a port forwarding API that
+exists we are modeling our implementation after it.  This is to ensure that if
+the API ever becomes official at least we made an effort to try an align with
+upstream.
+
+The code has been taken from the following subproject location.  Because the
+project is not structured as a true standalone extension it was not possible to
+simply take the project as-is and install it as an extension.  It was necessary
+to hand merge some of the files with existing neutron content as well as take
+some of the (db) files and put them in the neutron file hierarchy.
+
+  Upstream subproject:
+    https://git.openstack.org/cgit/stackforge/networking-portforwarding/
+    commit: 00947b19b3be89022b283ce3ee7d6e2f583f4162
+
+Since our L3 agent is custom and not part of the upstream neutron code base we
+did not have to merge any of the subproject agent code and instead just
+implemented equivalent functionality in our own agent.
+
+titanium implementation of virtual router port forwarding
+
+A previous commit added the virtual router port forwarding as-is (or
+more-or-less as-is) from an upstream subproject (networking_portforwarding).
+The intent was to try and add it with the least number of titanium enhancements
+as possible so that the GIT history would reflect the state of the code from
+upstream.
+
+This commit builds on that previous commit by adding the code to properly
+integrate that functionality with our look-and-feel and our layer3 agent
+implementation.  We have made some DB schema changes to better align with how
+other neutron tables work.
+
+port-id attribute added to router forwarding rules
+
+A "port_id" attribute has been added to each forwarding rule.  This has 3 purposes.
+
+  1) enforce that port forwarding rules must specify real IP addresses; not just
+     IP addresses that fall within the scope of a valid subnet.
+  2) enforce that port forwarding rules are only created against "compute:*" ports
+  3) enforce that forwarding rules are cleaned up whenever the associated port
+     is deleted
+
+CGTS-4251: dnat: outside port updates not pushed to AVS
+
+The AVR agent audit/update mechanism that pushes rule updates to AVS was not
+including the "outside_port" attribute when comparing rules.  Any changes that
+only included the outside port was ignored.  The effect being that the previous
+rule would remaining in AVS.  The only recovery mechanism was to delete the
+rule and re-add it (or change one of the fields that were included in the
+comparison).
+
+Conflicts:
+	etc/policy.json
+	neutron/db/migration/alembic_migrations/versions/HEAD
+	neutron/plugins/common/constants.py
+	neutron/services/l3_router/l3_router_plugin.py
+	neutron/tests/etc/policy.json
+
+CGTS-4379: dnat: constrain port lookup to router scope
+
+The lookup function that maps a requested IP address to a port object allowed
+the search to include all allocated IP addresses.  This only works when there
+are no overlapping subnets in the system.  The search is now scoped to the
+router to which the port forwarding rule is associated.  This means that for a
+port forwarding rule create request to be valid it must include an IP address
+that is directly attached to the router specified.
+
+Conflicts:
+	neutron/common/constants.py
+	neutron/db/migration/models/head.py
+	neutron/services/l3_router/l3_router_plugin.py
+---
+ LICENSE.networking_portforwarding                  | 176 ++++++++++++
+ README.rst.networking_portforwarding               |  15 +
+ etc/policy.json                                    |   6 +
+ neutron/common/constants.py                        |   1 +
+ ...38c55b05413c_add_router_portforwarding_table.py |  67 +++++
+ .../wrs_kilo_shipped/expand/wrs_kilo_shipped.py    |   4 +-
+ .../777864baa973_dnat_protocol_value_conversion.py |  53 ++++
+ .../wrs_mitaka/expand/wrs_mitaka_release.py        |   4 +-
+ neutron/db/migration/models/head.py                |   1 +
+ neutron/db/portforwardings_db.py                   | 317 +++++++++++++++++++++
+ neutron/extensions/portforwardings.py              | 240 ++++++++++++++++
+ neutron/plugins/ml2/plugin.py                      |  10 +
+ neutron/services/l3_router/l3_router_plugin.py     |   7 +-
+ neutron/tests/etc/policy.json                      |   6 +
+ 14 files changed, 901 insertions(+), 6 deletions(-)
+ create mode 100644 LICENSE.networking_portforwarding
+ create mode 100644 README.rst.networking_portforwarding
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/38c55b05413c_add_router_portforwarding_table.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py
+ create mode 100644 neutron/db/portforwardings_db.py
+ create mode 100644 neutron/extensions/portforwardings.py
+
+diff --git a/LICENSE.networking_portforwarding b/LICENSE.networking_portforwarding
+new file mode 100644
+index 0000000..68c771a
+--- /dev/null
++++ b/LICENSE.networking_portforwarding
+@@ -0,0 +1,176 @@
++
++                                 Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding those notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
+diff --git a/README.rst.networking_portforwarding b/README.rst.networking_portforwarding
+new file mode 100644
+index 0000000..e45ea0e
+--- /dev/null
++++ b/README.rst.networking_portforwarding
+@@ -0,0 +1,15 @@
++===============================
++networking-portforwarding
++===============================
++
++APIs and implementations to support portforwarding feature in Neutron.
++
++* Free software: Apache license
++* Documentation: http://docs.openstack.org/developer/networking-portforwarding
++* Source: http://git.openstack.org/cgit/stackforge/networking-portforwarding
++* Bugs: http://bugs.launchpad.net/networking-portforwarding
++
++Features
++--------
++
++* TODO
+diff --git a/etc/policy.json b/etc/policy.json
+index 8c36949..5da4ec9 100644
+--- a/etc/policy.json
++++ b/etc/policy.json
+@@ -91,6 +91,12 @@
+     "get_providernet_types": "rule:admin_only",
+     "get_providernet-bindings": "rule:admin_only",
+ 
++    "get_portforwarding": "rule:admin_or_owner or rule:context_is_advsvc",
++    "get_portforwardings": "rule:admin_or_owner or rule:context_is_advsvc",
++    "create_portforwarding": "",
++    "update_portforwarding": "rule:admin_or_owner",
++    "delete_portforwarding": "rule:admin_or_owner",
++
+     "network_device": "field:port:device_owner=~^network:",
+     "create_port": "",
+     "create_port:device_owner": "not rule:network_device or rule:context_is_advsvc or rule:admin_or_network_owner",
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index ff9e514..b9d9703 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -38,6 +38,7 @@ FLOATINGIP_AGENT_INTF_KEY = '_floatingip_agent_interfaces'
+ SNAT_ROUTER_INTF_KEY = '_snat_router_interfaces'
+ DVR_SNAT_BOUND = 'dvr_snat_bound'
+ L3_AGENT_MODE_DVR_NO_EXTERNAL = 'dvr_no_external'
++PORTFORWARDING_KEY = 'portforwardings'
+ 
+ HA_NETWORK_NAME = 'HA network tenant %s'
+ HA_SUBNET_NAME = 'HA subnet tenant %s'
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/38c55b05413c_add_router_portforwarding_table.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/38c55b05413c_add_router_portforwarding_table.py
+new file mode 100644
+index 0000000..2e7fe7b
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/38c55b05413c_add_router_portforwarding_table.py
+@@ -0,0 +1,67 @@
++# Copyright 2014 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++
++"""Add router portforwarding capabilities
++
++Revision ID: 38c55b05413c
++Revises: 433d66aa0f74
++Create Date: 2014-08-26 16:52:19.478696
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = '38c55b05413c'
++down_revision = '433d66aa0f74'
++
++# Change to ['*'] if this migration applies to all plugins
++
++migration_for_plugins = [
++    'neutron.plugins.ml2.plugin.Ml2Plugin'
++]
++
++from alembic import op
++import sqlalchemy as sa
++
++
++def upgrade(active_plugins=None, options=None):
++    # commands auto generated by Alembic - please adjust!
++    op.create_table('portforwardingrules',
++        sa.Column('tenant_id', sa.String(length=255), nullable=True),
++        sa.Column('id', sa.String(length=36), nullable=False),
++        sa.Column('port_id', sa.String(length=36), nullable=False),
++        sa.Column('router_id', sa.String(length=36), nullable=False),
++        sa.Column('outside_port', sa.Integer(), nullable=False),
++        sa.Column('inside_addr', sa.String(length=16), nullable=False),
++        sa.Column('inside_port', sa.Integer(), nullable=False),
++        sa.Column('protocol', sa.String(length=16), nullable=False),
++        sa.Column('description', sa.String(length=255), nullable=True),
++        sa.ForeignKeyConstraint(['port_id'], ['ports.id'],
++                                ondelete="CASCADE"),
++        sa.ForeignKeyConstraint(['router_id'], ['routers.id'],
++                                ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('id'),
++        sa.UniqueConstraint('router_id', 'protocol', 'outside_port',
++                            name='outside_port'),
++        sa.UniqueConstraint('router_id', 'inside_addr',
++                            'protocol', 'inside_port',
++                            name='inside_port')
++                    )
++    # end Alembic commands
++
++
++def downgrade(active_plugins=None, options=None):
++    # commands auto generated by Alembic - please adjust!
++    op.drop_table('portforwardingrules')
++    # end Alembic commands
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+index 35d9322..c912db2 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+@@ -22,14 +22,14 @@
+ """WRS Kilo Revision placeholder
+ 
+ Revision ID: wrs_kilo_shipped
+-Revises: 433d66aa0f74
++Revises: 38c55b05413c
+ Create Date: 2016-05-25 00:00:01.000000
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_kilo_shipped'
+-down_revision = '433d66aa0f74'
++down_revision = '38c55b05413c'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py
+new file mode 100644
+index 0000000..8c3b0b0
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/777864baa973_dnat_protocol_value_conversion.py
+@@ -0,0 +1,53 @@
++# Copyright 2016 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""Port forwarding rule protocol conversion
++
++Revision ID: 777864baa973
++Revises: ca1fb1471d20
++Create Date: 2016-05-30 00:00:01.000000
++
++"""
++
++from alembic import op
++
++
++# revision identifiers, used by Alembic.
++revision = '777864baa973'
++down_revision = 'ca1fb1471d20'
++
++
++def upgrade():
++    # The original feature code used 'udp-lite' as the user visible name of the
++    # UDP Lite protocol.  At that time there was no upstream definition for
++    # this protocol.  As of Liberty upstream now defines UDP lite as "udplite"
++    # without a hyphen.  To align with them we need to reformat our data.
++    op.execute(
++        "UPDATE portforwardingrules "
++        "SET protocol = 'udplite' "
++        "WHERE protocol = 'udp-lite'")
++
++    # The original feature code had a descrepancy between the DB model (which
++    # has an index on tenant-id), and the DB migration code which did not have
++    # an index defined.  Defining one now after the fact to avoid migration
++    # warnings.
++    op.create_index('ix_portforwardingrules_tenant_id',
++                    'portforwardingrules', ['tenant_id'], unique=False)
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+index 116697b..16ddafe 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+@@ -22,14 +22,14 @@
+ """WRS Mitaka Revision placeholder
+ 
+ Revision ID: wrs_mitaka
+-Revises:ca1fb1471d20
++Revises:777864baa973
+ Create Date: 2016-05-27 00:00:01.000000
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_mitaka'
+-down_revision = 'ca1fb1471d20'
++down_revision = '777864baa973'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/models/head.py b/neutron/db/migration/models/head.py
+index d319523..0ab799b 100644
+--- a/neutron/db/migration/models/head.py
++++ b/neutron/db/migration/models/head.py
+@@ -41,6 +41,7 @@ from neutron.db import l3_gwmode_db  # noqa
+ from neutron.db import models
+ from neutron.db import models_v2  # noqa
+ from neutron.db.port_security import models as ps_models  # noqa
++from neutron.db import portforwardings_db  # noqa
+ from neutron.db.qos import models as qos_models  # noqa
+ from neutron.db import qos_db  # noqa
+ from neutron.db.quota import models as quota_models  # noqa
+diff --git a/neutron/db/portforwardings_db.py b/neutron/db/portforwardings_db.py
+new file mode 100644
+index 0000000..5271896
+--- /dev/null
++++ b/neutron/db/portforwardings_db.py
+@@ -0,0 +1,317 @@
++# Copyright 2013 UnitedStack, Inc.
++# Copyright 2014 INFN
++# All rights reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++
++import netaddr
++import sqlalchemy as sa
++from sqlalchemy import and_
++
++from neutron_lib.db import model_base
++
++from neutron.db import api as db_api
++from neutron.db import l3_db
++from neutron.db.models import l3 as l3_model
++from neutron.db import models_v2
++from neutron.extensions import portforwardings
++from oslo_db import exception as db_exc
++from oslo_log import log as logging
++from oslo_utils import excutils
++from sqlalchemy import orm
++from sqlalchemy.orm import exc
++
++
++LOG = logging.getLogger(__name__)
++
++
++class PortForwardingRule(model_base.BASEV2, model_base.HasId,
++                         model_base.HasProject):
++
++    port_id = sa.Column(sa.String(36),
++                        sa.ForeignKey('ports.id', ondelete="CASCADE"),
++                        nullable=False)
++
++    router_id = sa.Column(sa.String(36),
++                          sa.ForeignKey('routers.id', ondelete="CASCADE"),
++                          nullable=False)
++
++    router = orm.relationship(l3_model.Router,
++                              backref=orm.backref("portforwarding_list",
++                                                  lazy='joined',
++                                                  cascade='delete'))
++    outside_port = sa.Column(sa.Integer(), nullable=False)
++    inside_addr = sa.Column(sa.String(16), nullable=False)
++    inside_port = sa.Column(sa.Integer(), nullable=False)
++    protocol = sa.Column(sa.String(16), nullable=False)
++    description = sa.Column(sa.String(255), nullable=True)
++    __table_args__ = (sa.schema.UniqueConstraint('router_id',
++                                                 'protocol',
++                                                 'outside_port',
++                                                 name='outside_port'),
++                      sa.schema.UniqueConstraint('router_id',
++                                                 'inside_addr',
++                                                 'protocol',
++                                                 'inside_port',
++                                                 name='inside_port'))
++
++
++class PortForwardingDbMixin(l3_db.L3_NAT_db_mixin,
++                            portforwardings.PortforwardingsPluginBase):
++    """Mixin class to support nat rule configuration on router."""
++    __native_bulk_support = True
++
++    def _validate_fwds(self, context, router, portfwds):
++        query = context.session.query(models_v2.Network).join(models_v2.Port)
++        networks = query.filter_by(device_id=router['id'])
++        subnets = []
++        for network in networks:
++            subnets.extend(map(lambda x: x['cidr'], network.subnets))
++
++        ip_addr, ip_net = netaddr.IPAddress, netaddr.IPNetwork
++        for portfwd in portfwds:
++            ip_str = portfwd['inside_addr']
++            valid = any([ip_addr(ip_str) in ip_net(x) for x in subnets])
++            if not valid:
++                raise portforwardings.InvalidInsideAddress(inside_addr=ip_str)
++
++    @staticmethod
++    def _make_extra_portfwd_list(portforwardings):
++        return [{'id': portfwd['id'],
++                 'outside_port': portfwd['outside_port'],
++                 'inside_addr': portfwd['inside_addr'],
++                 'inside_port': portfwd['inside_port'],
++                 'protocol': portfwd['protocol']
++                 }
++                for portfwd in portforwardings]
++
++    def _make_portforwarding_rule_dict(self, portforwarding_rule, fields=None):
++        res = {'tenant_id': portforwarding_rule['tenant_id'],
++               'id': portforwarding_rule['id'],
++               'router_id': portforwarding_rule['router_id'],
++               'port_id': portforwarding_rule['port_id'],
++               'protocol': portforwarding_rule['protocol'],
++               'inside_addr': portforwarding_rule['inside_addr'],
++               'inside_port': portforwarding_rule['inside_port'],
++               'outside_port': portforwarding_rule['outside_port'],
++               'description': portforwarding_rule['description']
++               }
++        return self._fields(res, fields)
++
++    def _get_rule(self, context, id):
++        try:
++            return self._get_by_id(context, PortForwardingRule, id)
++        except exc.NoResultFound:
++            raise portforwardings.PortForwardingRuleNotFound(
++                                  port_forwarding_rule_id=id)
++
++    def _create_bulk(self, resource, context, request_items):
++        objects = []
++        collection = "%ss" % resource
++        items = request_items[collection]
++        context.session.begin(subtransactions=True)
++        try:
++            for item in items:
++                obj_creator = getattr(self, 'create_%s' % resource)
++                objects.append(obj_creator(context, item))
++            context.session.commit()
++        except Exception:
++            context.session.rollback()
++            with excutils.save_and_reraise_exception():
++                LOG.error("An exception occurred while creating "
++                          "the %(resource)s:%(item)s",
++                          {'resource': resource, 'item': item})
++        return objects
++
++    def create_portforwarding_bulk(self, context, portforwarding):
++        return self._create_bulk('portforwarding', context,
++                                 portforwarding)
++
++    def _get_port_from_address(self, context, router_id, ip_address):
++        """Find the port that is associated to the requested ip_address.  The
++        search is constrained to only those ports that are behind the specified
++        router.  This ensures that if there are multiple matching IP addresses
++        because of overlapping subnets that we find the one that is unique to
++        this router (i.e., routers cannot be attached to multiple overlapping
++        subnets).
++        """
++        try:
++            subnets = (self._model_query(context,
++                                         models_v2.IPAllocation.subnet_id)
++                       .select_from(l3_model.Router)
++                       .join(l3_model.RouterPort,
++                             and_(l3_model.RouterPort.router_id ==
++                                  l3_model.Router.id,
++                                  l3_model.Router.id == router_id))
++                       .join(models_v2.IPAllocation,
++                             (models_v2.IPAllocation.port_id ==
++                              l3_model.RouterPort.port_id))
++                       .group_by(models_v2.IPAllocation.subnet_id))
++            query = (self._model_query(context, models_v2.IPAllocation)
++                     .filter(models_v2.IPAllocation.subnet_id
++                             .in_(subnets.subquery()))
++                     .filter(models_v2.IPAllocation.ip_address == ip_address))
++            allocation = query.one()
++        except exc.NoResultFound:
++            raise portforwardings.NoAddressAllocationFound(
++                ip_address=ip_address, router_id=router_id)
++        try:
++            port_db = self._core_plugin._get_port(context, allocation.port_id)
++            return port_db
++        except exc.NoResultFound:
++            raise portforwardings.NoPortFound(portid=allocation.port_id)
++
++    @db_api.retry_if_session_inactive()
++    def create_portforwarding(self, context, portforwarding):
++        with context.session.begin(subtransactions=True):
++            LOG.debug('create_portforwarding ->  portforwarding: %s',
++                      portforwarding)
++
++            rule_data = portforwarding['portforwarding']
++            router = self._get_router(context, rule_data['router_id'])
++            port_db = self._get_port_from_address(
++                context, rule_data['router_id'], rule_data['inside_addr'])
++            if not port_db.device_owner.startswith('compute:'):
++                raise portforwardings.MustAssignRuleToComputePort()
++            try:
++                    self._validate_fwds(context, router, [rule_data])
++                    rule = PortForwardingRule(
++                            tenant_id=router['tenant_id'],
++                            router_id=rule_data['router_id'],
++                            port_id=port_db.id,
++                            outside_port=rule_data['outside_port'],
++                            inside_addr=rule_data['inside_addr'],
++                            inside_port=rule_data['inside_port'],
++                            protocol=rule_data['protocol'],
++                            description=rule_data['description'])
++                    context.session.add(rule)
++                    context.session.flush()
++                    LOG.debug('router type: %s', router)
++                    self.notify_router_updated(context, router['id'])
++
++                    return self._make_portforwarding_rule_dict(rule)
++            except db_exc.DBDuplicateEntry as e:
++                LOG.info('Exception: %s', e.inner_exception.message)
++                if 'outside_port' in e.inner_exception.message:
++                    raise portforwardings.DuplicatedOutsidePort(
++                        port=(rule_data['protocol'] + ' ' +
++                              rule_data['outside_port']))
++                if 'inside_port' in e.inner_exception.message:
++                    raise portforwardings.DuplicatedInsidePort(
++                        port=(rule_data['protocol'] + ' ' +
++                              rule_data['inside_port']),
++                        address=rule_data['inside_addr'])
++                # Re-raise for unknown DB exception
++                raise
++
++    @db_api.retry_if_session_inactive()
++    def update_portforwarding(self, context, id, portforwarding):
++        try:
++            rule = portforwarding['portforwarding']
++            with context.session.begin(subtransactions=True):
++                portforwarding_db = self._get_by_id(context,
++                                                    PortForwardingRule, id)
++
++                if 'inside_addr' in rule:
++                    router = self._get_router(context,
++                                              portforwarding_db['router_id'])
++                    self._validate_fwds(context, router, [rule])
++
++                portforwarding_db.update(rule)
++                self.notify_router_updated(context,
++                                           portforwarding_db['router_id'])
++
++                return self._make_portforwarding_rule_dict(portforwarding_db)
++        except db_exc.DBDuplicateEntry as e:
++            LOG.info('Exception: %s', e.inner_exception.message)
++            protocol = rule.get('protocol', portforwarding_db['protocol'])
++            if 'outside_port' in e.inner_exception.message:
++                outside_port = rule.get('outside_port',
++                                        str(portforwarding_db['outside_port']))
++                raise portforwardings.DuplicatedOutsidePort(
++                    port=protocol + ' ' + outside_port)
++            if 'inside_port' in e.inner_exception.message:
++                inside_port = rule.get('inside_port',
++                                       str(portforwarding_db['inside_port']))
++                inside_addr = rule.get('inside_addr',
++                                       str(portforwarding_db['inside_addr']))
++                raise portforwardings.DuplicatedInsidePort(
++                    port=protocol + ' ' + inside_port,
++                    address=inside_addr)
++            # Re-raise for unknown DB exception
++            raise
++
++    @db_api.retry_if_session_inactive()
++    def delete_portforwarding(self, context, id):
++        try:
++            rule = self.get_portforwarding(context, id)
++            router_id = rule['router_id']
++            del_context = context.session.query(PortForwardingRule)
++            del_context.filter_by(id=id).delete()
++            self.notify_router_updated(context, router_id)
++        except exc.NoResultFound:
++            raise portforwardings.PortForwardingRuleNotFound(
++                                  port_forwarding_rule_id=id)
++
++    @db_api.retry_if_session_inactive()
++    def get_portforwardings(self, context, filters=None, fields=None,
++                            sorts=None, limit=None, marker=None,
++                            page_reverse=False):
++        marker_obj = self._get_marker_obj(context, 'portforwarding',
++                                          limit, marker)
++        return self._get_collection(context, PortForwardingRule,
++                                    self._make_portforwarding_rule_dict,
++                                    filters=filters, fields=fields,
++                                    sorts=sorts, limit=limit,
++                                    marker_obj=marker_obj,
++                                    page_reverse=page_reverse)
++
++    @db_api.retry_if_session_inactive()
++    def get_portforwarding(self, context, id, fields=None):
++        rule = self._get_rule(context, id)
++        return self._make_portforwarding_rule_dict(rule, fields)
++
++    def _remove_affected_portforwarding_rules(self, context,
++                                              router_interface_info):
++        subnet_ids = router_interface_info['subnet_ids']
++        with context.session.begin(subtransactions=True):
++            rule_ids = (self._model_query(context, PortForwardingRule.id)
++                        .join(models_v2.IPAllocation,
++                              and_(models_v2.IPAllocation.port_id ==
++                                   PortForwardingRule.port_id,
++                                   models_v2.IPAllocation.ip_address ==
++                                   PortForwardingRule.inside_addr))
++                        .filter(models_v2.IPAllocation.subnet_id
++                                .in_(subnet_ids)))
++            count = len(rule_ids.all())
++            if count > 0:
++                LOG.warning("deleting {} port forwarding rules related to "
++                            "subnet ids {}").format(count, subnet_ids)
++                rules = (self._model_query(context, PortForwardingRule)
++                         .filter(PortForwardingRule.id
++                                 .in_(rule_ids.subquery())))
++                rules.delete(synchronize_session=False)
++
++    def remove_router_interface(self, context, router_id, interface_info):
++        router_interface_info = super(
++            PortForwardingDbMixin, self).remove_router_interface(
++                context, router_id, interface_info)
++        self._remove_affected_portforwarding_rules(
++            context, router_interface_info)
++        return router_interface_info
+diff --git a/neutron/extensions/portforwardings.py b/neutron/extensions/portforwardings.py
+new file mode 100644
+index 0000000..6d02223
+--- /dev/null
++++ b/neutron/extensions/portforwardings.py
+@@ -0,0 +1,240 @@
++# Copyright 2013 UnitedStack, Inc.
++# Copyright 2014 INFN
++# All rights reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2015,2017 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++
++import abc
++
++import netaddr
++import six
++
++from neutron_lib.api import extensions as api_extensions
++from neutron_lib.api import validators
++from neutron_lib import constants
++from neutron_lib import exceptions as exc
++from neutron_lib.plugins import constants as plugin_constants
++
++from neutron._i18n import _
++from neutron.api.v2 import resource_helper
++from oslo_log import log as logging
++
++LOG = logging.getLogger(__name__)
++
++# TODO(alegacy): upstream defined 'udp-lite' as 'udplite' so we have to move
++# away from our value.  We have DB migration code that converts old values to
++# new values, and we have AVR agent code that converts new values to have AVS
++# is expecting so we should be convered for upgrades.
++deprecated_protocol_values = ['udp-lite']
++
++deprecated_protocol_map = {
++    'udp-lite': constants.PROTO_NAME_UDPLITE,
++}
++
++valid_protocol_values = [constants.PROTO_NAME_TCP,
++                         constants.PROTO_NAME_UDP,
++                         constants.PROTO_NAME_UDPLITE,
++                         constants.PROTO_NAME_SCTP,
++                         constants.PROTO_NAME_DCCP,
++                         constants.PROTO_NAME_ICMP]
++
++
++class PortForwardingRuleNotFound(exc.NotFound):
++    message = _("Port Forwarding Rule %(port_forwarding_rule_id)s could not be"
++                " found.")
++
++
++class DuplicatedOutsidePort(exc.InvalidInput):
++    message = _("Outside port %(port)s has already been used.")
++
++
++class DuplicatedInsidePort(exc.InvalidInput):
++    message = _("Inside port %(port)s has already been used on %(address)s.")
++
++
++class InvalidInsideAddress(exc.InvalidInput):
++    message = _("inside address %(inside_addr)s does not match "
++                "any subnets in this router.")
++
++
++class InvalidProtocol(exc.InvalidInput):
++    message = _("Invalid Protocol, allowed value are: {}").format(
++        ', '.join(valid_protocol_values))
++
++
++class MustAssignRuleToComputePort(exc.InvalidInput):
++    message = _("Port Forwarding rules can only be applied to compute ports")
++
++
++class NoAddressAllocationFound(exc.InvalidInput):
++    message = _("No address allocation found for %(ip_address)s "
++                "behind router %(router_id)s")
++
++
++class NoPortFound(exc.InvalidInput):
++    message = _("No port object found for %(portid)s")
++
++
++def convert_port_to_string(value):
++    if value is None:
++        return
++    else:
++        return str(value)
++
++
++def convert_protocol(value):
++    if value is None:
++        return
++    value = value.lower()
++    if value in deprecated_protocol_values:
++        return deprecated_protocol_map[value]
++    elif value in valid_protocol_values:
++        return value
++    else:
++        raise InvalidProtocol()
++
++
++def validate_port_range(data, key_specs=None):
++    if data is None:
++        return
++    data = str(data)
++    ports = data.split(':')
++    for p in ports:
++        try:
++            val = int(p)
++        except (ValueError, TypeError):
++            msg = _("Port '%s' is not a valid number") % p
++            LOG.debug(msg)
++            return msg
++        if val <= 0 or val > 65535:
++            msg = _("Invalid port '%s'") % p
++            LOG.debug(msg)
++            return msg
++
++
++def validate_ipv4_address_or_none(data, valid_values=None):
++    if data is None:
++        return None
++    msg_ip = validators.validate_ip_address(data, valid_values)
++    if not msg_ip:
++        if netaddr.valid_ipv4(data):
++            return None
++        msg_ip = _("'%s' is not an IPv4 address") % data
++    return msg_ip
++
++
++validators.add_validator('ipv4_address_or_none', validate_ipv4_address_or_none)
++
++
++# Attribute Map
++RESOURCE_ATTRIBUTE_MAP = {
++    'portforwardings': {
++            'id': {'allow_post': False, 'allow_put': False,
++                   'validate': {'type:uuid': None},
++                   'is_visible': True, 'primary_key': True},
++            'tenant_id': {'allow_post': True, 'allow_put': False,
++                          'required_by_policy': True,
++                          'is_visible': True},
++            'router_id': {'allow_post': True, 'allow_put': False,
++                          'required_by_policy': True,
++                          'is_visible': True},
++            'port_id': {'allow_post': False, 'allow_put': False,
++                        'is_visible': True},
++            'protocol': {'allow_post': True, 'allow_put': True,
++                         'is_visible': True, 'default': None,
++                         'convert_to': convert_protocol,
++                         'validate': {'type:values': valid_protocol_values}},
++            'inside_addr': {'allow_post': True, 'allow_put': True,
++                            'validate': {'type:ipv4_address_or_none': None},
++                            'is_visible': True, 'default': None},
++            'inside_port': {'allow_post': True, 'allow_put': True,
++                            'validate': {'type:port_range': None},
++                            'convert_to': convert_port_to_string,
++                            'default': None, 'is_visible': True},
++            'outside_port': {'allow_post': True, 'allow_put': True,
++                             'validate': {'type:port_range': None},
++                             'convert_to': convert_port_to_string,
++                             'default': None, 'is_visible': True},
++            'description': {'allow_post': True, 'allow_put': True,
++                            'is_visible': True,
++                            'default': None},
++    }
++}
++
++
++class Portforwardings(api_extensions.ExtensionDescriptor):
++
++    @classmethod
++    def get_name(cls):
++        return "Port Forwarding"
++
++    @classmethod
++    def get_alias(cls):
++        return "portforwarding"
++
++    @classmethod
++    def get_description(cls):
++        return "Expose internal TCP/UDP port to external network"
++
++    @classmethod
++    def get_namespace(cls):
++        return "http://docs.openstack.org/ext/neutron/portforwarding/api/v1.0"
++
++    @classmethod
++    def get_updated(cls):
++        return "2015-03-25T10:00:00-00:00"
++
++    @classmethod
++    def get_resources(cls):
++        plural_mappings = resource_helper.build_plural_mappings(
++                            {}, RESOURCE_ATTRIBUTE_MAP)
++        LOG.info('PortForwarding_plural_mappings:%s', plural_mappings)
++
++        maps = resource_helper.build_resource_info(plural_mappings,
++                                            RESOURCE_ATTRIBUTE_MAP,
++                                            plugin_constants.L3,
++                                            allow_bulk=True)
++        LOG.info('PortForwarding_get_resources:%s', maps)
++        return maps
++
++
++@six.add_metaclass(abc.ABCMeta)
++class PortforwardingsPluginBase(object):
++
++    @abc.abstractmethod
++    def create_portforwarding(self, context, portforwarding):
++        pass
++
++    @abc.abstractmethod
++    def update_portforwarding(self, context, id, portforwarding):
++        pass
++
++    @abc.abstractmethod
++    def delete_portforwarding(self, context, id):
++        pass
++
++    @abc.abstractmethod
++    def get_portforwardings(self, context, filters=None, fields=None,
++                            sorts=None, limit=None, marker=None,
++                            page_reverse=False):
++        pass
++
++    @abc.abstractmethod
++    def get_portforwarding(self, context, id, fields=None):
++        pass
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index eaf4693..171fbaa 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -84,6 +84,7 @@ from neutron.db import extradhcpopt_db
+ from neutron.db import hosts_db
+ from neutron.db.models import securitygroup as sg_models
+ from neutron.db import models_v2
++from neutron.db import portforwardings_db
+ from neutron.db import providernet_db
+ from neutron.db import provisioning_blocks
+ from neutron.db import qos_db
+@@ -95,6 +96,7 @@ from neutron.db import subnet_service_type_db_models as service_type_db
+ from neutron.db import vlantransparent_db
+ from neutron.extensions import allowedaddresspairs as addr_pair
+ from neutron.extensions import availability_zone as az_ext
++from neutron.extensions import l3
+ from neutron.extensions import netmtu_writable as mtu_ext
+ from neutron.extensions import providernet as provider
+ from neutron.extensions import vlantransparent
+@@ -731,6 +733,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             return
+         plugin.extend_port_dict_qos(port_res, port_db)
+ 
++    # Register dict extend functions for routers
++    @staticmethod
++    @resource_extend.extends([l3.ROUTERS])
++    def _extend_router_dict_portforwarding(router_res, router_db):
++        router_res['portforwardings'] = (
++            portforwardings_db.PortForwardingDbMixin._make_extra_portfwd_list(
++                router_db['portforwarding_list']))
++
+     @staticmethod
+     def _object_session_or_new_session(sql_obj):
+         session = sqlalchemy.inspect(sql_obj).session
+diff --git a/neutron/services/l3_router/l3_router_plugin.py b/neutron/services/l3_router/l3_router_plugin.py
+index 3a07318..89e0024 100644
+--- a/neutron/services/l3_router/l3_router_plugin.py
++++ b/neutron/services/l3_router/l3_router_plugin.py
+@@ -36,6 +36,7 @@ from neutron.db import l3_hamode_db
+ from neutron.db import l3_hascheduler_db
+ from neutron.db import l3_host_db
+ from neutron.db.models import l3 as l3_models
++from neutron.db import portforwardings_db
+ from neutron.extensions import l3
+ from neutron.quota import resource_registry
+ from neutron import service
+@@ -56,8 +57,9 @@ def disable_dvr_extension_by_config(aliases):
+ class L3RouterPlugin(service_base.ServicePluginBase,
+                      common_db_mixin.CommonDbMixin,
+                      extraroute_db.ExtraRoute_db_mixin,
+-                     l3_hamode_db.L3_HA_NAT_db_mixin,
+                      l3_host_db.L3HostSchedulerDbMixin,
++                     portforwardings_db.PortForwardingDbMixin,
++                     l3_hamode_db.L3_HA_NAT_db_mixin,
+                      l3_gwmode_db.L3_NAT_db_mixin,
+                      l3_dvr_ha_scheduler_db.L3_DVR_HA_scheduler_db_mixin,
+                      dns_db.DNSDbMixin):
+@@ -73,7 +75,8 @@ class L3RouterPlugin(service_base.ServicePluginBase,
+     """
+     _supported_extension_aliases = ["dvr", "router", "ext-gw-mode",
+                                     "extraroute", "l3_agent_scheduler",
+-                                    "l3-ha", "router_availability_zone"]
++                                    "l3-ha", "router_availability_zone",
++                                    "portforwarding"]
+     # NOTE(alegacy): removed l3-flavors because it requires "router" and
+     # "flavors" but "flavors" is not part of the default set.
+ 
+diff --git a/neutron/tests/etc/policy.json b/neutron/tests/etc/policy.json
+index 8c36949..5da4ec9 100644
+--- a/neutron/tests/etc/policy.json
++++ b/neutron/tests/etc/policy.json
+@@ -91,6 +91,12 @@
+     "get_providernet_types": "rule:admin_only",
+     "get_providernet-bindings": "rule:admin_only",
+ 
++    "get_portforwarding": "rule:admin_or_owner or rule:context_is_advsvc",
++    "get_portforwardings": "rule:admin_or_owner or rule:context_is_advsvc",
++    "create_portforwarding": "",
++    "update_portforwarding": "rule:admin_or_owner",
++    "delete_portforwarding": "rule:admin_or_owner",
++
+     "network_device": "field:port:device_owner=~^network:",
+     "create_port": "",
+     "create_port:device_owner": "not rule:network_device or rule:context_is_advsvc or rule:admin_or_network_owner",
+-- 
+2.7.4
+

@@ -1,0 +1,62 @@
+From 69ba8ebfeb1fb3482c5dd3046a3a1ffbaca58486 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 6 Mar 2018 12:20:08 -0600
+Subject: [PATCH 143/155] CGTS-9145: dhcp: exclude vlan subnets from networks
+
+Earlier in this release we should have removed all of the code related to guest
+vlan subnets from the agent.  Unfortunately, that work item was missed.  This
+is causing issues on upgrades because the neutron-avs-agent has been updated to
+ignore vlan based subnet information so it is not expecting any other agents to
+created vlan based ports.  Because the dhcp agent still processes the vlan
+based subnets it is creating multiple ports on each network and the
+neutron-avs-agent is hooking them all up to the same network segment.  That
+leads to the wrong dhcp server responding to a VM dhcp request.
+
+Rather than try to remove all of the guest vlan code now (at final compile) we
+are going to simply exclude any vlan subnets from being processed that way the
+code all stays the same as what we tested but we guarantee that there will not
+be any vlan subnets.
+---
+ neutron/agent/dhcp/agent.py | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index 46cbba3..9a84ae8 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -689,12 +689,22 @@ class DhcpPluginApi(object):
+         # can be independently tracked server side.
+         return context.get_admin_context_without_session()
+ 
++    @staticmethod
++    def _remove_vlan_subnets(network):
++        # TODO(alegacy): Can be removed in R6 since no subnets will have VLAN
++        # values at that point.  Only maintained in R5 so that we exclude
++        # VLAN based subnets from being handled prior to the upgrade activation
++        # at which point they will be deleted from the database.
++        network['subnets'] = [s for s in network['subnets']
++                              if not s.get(wrs_net.VLAN)]
++        return network
++
+     def get_active_networks_info(self):
+         """Make a remote process call to retrieve all network info."""
+         cctxt = self.client.prepare(version='1.1')
+         networks = cctxt.call(self.context, 'get_active_networks_info',
+                               host=self.host)
+-        return [dhcp.NetModel(n) for n in networks]
++        return [dhcp.NetModel(self._remove_vlan_subnets(n)) for n in networks]
+ 
+     def get_network_info(self, network_id):
+         """Make a remote process call to retrieve network info."""
+@@ -702,7 +712,7 @@ class DhcpPluginApi(object):
+         network = cctxt.call(self.context, 'get_network_info',
+                              network_id=network_id, host=self.host)
+         if network:
+-            return dhcp.NetModel(network)
++            return dhcp.NetModel(self._remove_vlan_subnets(network))
+ 
+     def create_dhcp_port(self, port):
+         """Make a remote process call to create the dhcp port."""
+-- 
+2.7.4
+

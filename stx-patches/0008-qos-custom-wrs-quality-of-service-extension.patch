@@ -1,0 +1,2017 @@
+From 8098d0ed747a5383ee0841055aec501aaf48d1d5 Mon Sep 17 00:00:00 2001
+From: Matt Peters <matt.peters@windriver.com>
+Date: Thu, 19 May 2016 12:42:55 -0400
+Subject: [PATCH 008/155] qos: custom wrs quality of service extension
+
+This commit introduces a quality of service extension.  It was
+originally taken from an upstream project that was not yet integrated
+with neutron.  This will now need to be adjusted as that extension is
+now part of neutron but in a modified/updated form.
+
+Conflicts:
+	etc/policy.json
+	neutron/common/constants.py
+	neutron/db/db_base_plugin_v2.py
+	neutron/db/migration/models/frozen.py
+	neutron/db/migration/models/head.py
+	neutron/plugins/ml2/plugin.py
+	neutron/plugins/ml2/rpc.py
+	neutron/tests/etc/policy.json
+
+CGTS-7041: qos: fix qos update validation to exclude name
+
+A fix for CGTS-6161 caused an issue whereby the 'name' attribute was assume to
+be there for all update requests.  Because it is not an exception is thrown.
+The proper resolution is to only validate the name attribute if it is present
+in the update request.
+
+Conflicts:
+	etc/policy.json
+	neutron/common/constants.py
+	neutron/plugins/ml2/plugin.py
+	neutron/plugins/ml2/rpc.py
+	neutron/tests/etc/policy.json
+	neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
+---
+ etc/policy.json                                    |   9 +
+ neutron/agent/qos.py                               |  53 +++
+ .../api/rpc/agentnotifiers/qos_rpc_agent_api.py    |  56 +++
+ neutron/api/rpc/handlers/qos_rpc.py                | 160 ++++++++
+ neutron/common/constants.py                        |   9 +
+ neutron/common/topics.py                           |   1 +
+ .../expand/41038c0cd102_wrs_qos_table_renaming.py  |  57 +++
+ .../wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py    |   4 +-
+ .../alembic_migrations/vswitch_init_ops.py         |  38 ++
+ neutron/db/migration/models/head.py                |   1 +
+ neutron/db/qos_db.py                               | 436 +++++++++++++++++++++
+ neutron/extensions/wrs_tm.py                       | 175 +++++++++
+ neutron/plugins/ml2/plugin.py                      |  34 +-
+ neutron/plugins/ml2/rpc.py                         |  23 +-
+ neutron/plugins/wrs/drivers/qos.py                 |  54 +++
+ neutron/tests/etc/policy.json                      |   9 +
+ .../plugins/wrs/drivers/test_type_managed_flat.py  |   1 +
+ .../plugins/wrs/drivers/test_type_managed_vlan.py  |   1 +
+ .../plugins/wrs/drivers/test_type_managed_vxlan.py |   1 +
+ .../tests/unit/plugins/wrs/test_extension_qos.py   | 356 +++++++++++++++++
+ neutron/tests/unit/plugins/wrs/test_qos_rpc.py     | 139 +++++++
+ 21 files changed, 1611 insertions(+), 6 deletions(-)
+ create mode 100644 neutron/agent/qos.py
+ create mode 100644 neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py
+ create mode 100644 neutron/api/rpc/handlers/qos_rpc.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py
+ create mode 100644 neutron/db/qos_db.py
+ create mode 100644 neutron/extensions/wrs_tm.py
+ create mode 100644 neutron/plugins/wrs/drivers/qos.py
+ create mode 100644 neutron/tests/unit/plugins/wrs/test_extension_qos.py
+ create mode 100644 neutron/tests/unit/plugins/wrs/test_qos_rpc.py
+
+diff --git a/etc/policy.json b/etc/policy.json
+index df2f686..9e1caf9 100644
+--- a/etc/policy.json
++++ b/etc/policy.json
+@@ -5,6 +5,7 @@
+     "context_is_advsvc":  "role:advsvc",
+     "admin_or_network_owner": "rule:context_is_admin or tenant_id:%(network:tenant_id)s",
+     "admin_owner_or_network_owner": "rule:owner or rule:admin_or_network_owner",
++    "admin_or_qos_owner": "rule:context_is_admin or tenant_id:%(qos:tenant_id)s",
+     "admin_only": "rule:context_is_admin",
+     "regular_user": "",
+     "admin_or_data_plane_int": "rule:context_is_admin or role:data_plane_integrator",
+@@ -46,6 +47,7 @@
+     "get_network:provider:physical_network": "rule:admin_only",
+     "get_network:provider:segmentation_id": "rule:admin_only",
+     "get_network:queue_id": "rule:admin_only",
++    "get_network:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "get_network_ip_availabilities": "rule:admin_only",
+     "get_network_ip_availability": "rule:admin_only",
+     "create_network:shared": "rule:admin_only",
+@@ -55,6 +57,7 @@
+     "create_network:provider:network_type": "rule:admin_only",
+     "create_network:provider:physical_network": "rule:admin_only",
+     "create_network:provider:segmentation_id": "rule:admin_only",
++    "create_network:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "update_network": "rule:admin_or_owner",
+     "update_network:segments": "rule:admin_only",
+     "update_network:shared": "rule:admin_only",
+@@ -62,6 +65,7 @@
+     "update_network:provider:physical_network": "rule:admin_only",
+     "update_network:provider:segmentation_id": "rule:admin_only",
+     "update_network:router:external": "rule:admin_only",
++    "update_network:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "delete_network": "rule:admin_or_owner",
+ 
+     "create_segment": "rule:admin_only",
+@@ -139,6 +143,11 @@
+     "create_router:external_gateway_info:external_fixed_ips": "rule:admin_only",
+     "update_router:external_gateway_info:external_fixed_ips": "rule:admin_only",
+ 
++    "get_qos": "rule:admin_or_owner",
++    "create_qos": "rule:admin_only",
++    "update_qos": "rule:admin_only",
++    "delete_qos": "rule:admin_only",
++
+     "create_qos_queue": "rule:admin_only",
+     "get_qos_queue": "rule:admin_only",
+ 
+diff --git a/neutron/agent/qos.py b/neutron/agent/qos.py
+new file mode 100644
+index 0000000..9924af7
+--- /dev/null
++++ b/neutron/agent/qos.py
+@@ -0,0 +1,53 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++
++import abc
++
++import six
++
++
++@six.add_metaclass(abc.ABCMeta)
++class QoSDriver(object):
++
++    @abc.abstractmethod
++    def delete_qos_for_network(self, network_id):
++        pass
++
++    @abc.abstractmethod
++    def delete_qos_for_port(self, port_id):
++        pass
++
++    @abc.abstractmethod
++    def network_qos_updated(self, policy, network_id):
++        pass
++
++    @abc.abstractmethod
++    def port_qos_updated(self, policy, port_id):
++        pass
++
++
++class NoopQoSDriver(QoSDriver):
++
++    def delete_qos_for_network(self, network_id):
++        pass
++
++    def delete_qos_for_port(self, port_id):
++        pass
++
++    def network_qos_updated(self, policy, network_id):
++        pass
++
++    def port_qos_updated(self, policy, port_id):
++        pass
+diff --git a/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py
+new file mode 100644
+index 0000000..9905804
+--- /dev/null
++++ b/neutron/api/rpc/agentnotifiers/qos_rpc_agent_api.py
+@@ -0,0 +1,56 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import oslo_messaging
++
++from neutron.common import rpc as n_rpc
++from neutron.common import topics
++
++
++class QoSAgentNotifyAPI(object):
++    """Plugin-side RPC (stub) for plugin-to-agent interaction."""
++
++    def __init__(self, topic=topics.AGENT):
++        target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.client = n_rpc.get_client(target)
++        self.topic_qos_update = topics.get_topic_name(topic,
++                                                      topics.QOS,
++                                                      topics.UPDATE)
++
++    def network_qos_deleted(self, context, qos_id, network_id):
++        cctxt = self.client.prepare(topic=self.topic_qos_update, fanout=True)
++        cctxt.cast(context, 'network_qos_deleted',
++                   qos_id=qos_id, network_id=network_id)
++
++    def network_qos_updated(self, context, qos_id, network_id):
++        cctxt = self.client.prepare(topic=self.topic_qos_update, fanout=True)
++        cctxt.cast(context, 'network_qos_updated',
++                   qos_id=qos_id, network_id=network_id)
++
++    def port_qos_deleted(self, context, qos_id, port_id):
++        cctxt = self.client.prepare(topic=self.topic_qos_update, fanout=True)
++        cctxt.cast(context, 'port_qos_deleted',
++                   qos_id=qos_id, port_id=port_id)
++
++    def port_qos_updated(self, context, qos_id, port_id):
++        cctxt = self.client.prepare(topic=self.topic_qos_update, fanout=True)
++        cctxt.cast(context, 'port_qos_updated',
++                   qos_id=qos_id, port_id=port_id)
+diff --git a/neutron/api/rpc/handlers/qos_rpc.py b/neutron/api/rpc/handlers/qos_rpc.py
+new file mode 100644
+index 0000000..9688617
+--- /dev/null
++++ b/neutron/api/rpc/handlers/qos_rpc.py
+@@ -0,0 +1,160 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from neutron_lib.plugins import directory
++from oslo_config import cfg
++from oslo_log import log as logging
++import oslo_messaging
++from oslo_utils import importutils
++
++from neutron._i18n import _
++from neutron.common import constants
++from neutron.common import rpc as n_rpc
++
++
++LOG = logging.getLogger(__name__)
++
++QoSOpts = [
++    cfg.StrOpt(
++        'qos_driver',
++        default='neutron.agent.qos.NoopQoSDriver',
++        help=_("Default driver to use for quality of service")),
++]
++
++cfg.CONF.register_opts(QoSOpts, "agent")
++
++
++class QoSServerRpcApi(object):
++    """Agent-side RPC (stub) for agent-to-plugin interaction."""
++
++    def __init__(self, topic):
++        target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.client = n_rpc.get_client(target)
++
++    def get_policy_for_qos(self, context, qos_id):
++        LOG.debug("Get policy for QoS ID: %s via RPC", qos_id)
++        cctxt = self.client.prepare()
++        return cctxt.call(context, 'get_policy_for_qos', qos_id=qos_id)
++
++    def get_qos_by_network(self, context, network_id):
++        LOG.debug("Checking for QoS policy for net: %s", network_id)
++        cctxt = self.client.prepare()
++        return cctxt.call(context, 'get_qos_by_network', network_id=network_id)
++
++    def get_qos_by_port(self, context, port_id):
++        LOG.debug("Checking for QoS policy for port: %s", port_id)
++        cctxt = self.client.prepare()
++        return cctxt.call(context, 'get_qos_by_port', port_id=port_id)
++
++
++class QoSServerRpcCallback(object):
++    """Plugin-side RPC (implementation) for agent-to-plugin interaction."""
++
++    # History
++    #   1.0 Initial version
++
++    target = oslo_messaging.Target(version='1.0',
++                                   namespace=constants.RPC_NAMESPACE_QOS)
++
++    @property
++    def plugin(self):
++        if not getattr(self, '_plugin', None):
++            self._plugin = directory.get_plugin()
++        return self._plugin
++
++    def get_policy_for_qos(self, context, **kwargs):
++        qos_id = kwargs.get('qos_id')
++        LOG.debug("QoS Agent requests policy qos %s", qos_id)
++        return self.plugin.get_policy_for_qos(context, qos_id)
++
++    def get_qos_by_network(self, context, **kwargs):
++        network_id = kwargs.get('network_id')
++        LOG.debug("QoS Agent requests qos for network %s", network_id)
++        return self.plugin.get_qos_by_network(context, network_id)
++
++    def get_qos_by_port(self, context, **kwargs):
++        port_id = kwargs.get('port_id')
++        LOG.debug("QoS Agent requests qos for port %s", port_id)
++        return self.plugin.get_qos_by_port(context, port_id)
++
++
++class QoSAgentRpc(object):
++    """Agent-side RPC (implementation) for plugin-to-agent interaction."""
++
++    def __init__(self, context, plugin_rpc):
++        self.context = context
++        self.plugin_rpc = plugin_rpc
++        self.init_qos()
++
++    def init_qos(self, *args, **kwargs):
++        qos_driver = cfg.CONF.agent.qos_driver
++        LOG.debug("Starting QoS driver %s", qos_driver)
++        self.qos = importutils.import_object(qos_driver, *args, **kwargs)
++
++    def register_manager(self, manager):
++        if hasattr(self.qos, 'register_manager'):
++            self.qos.register_manager(manager)
++
++    def network_qos_deleted(self, context, qos_id, network_id):
++        self.qos.delete_qos_for_network(network_id)
++
++    def network_qos_updated(self, context, qos_id, network_id):
++        qos_policy = self.plugin_rpc.get_policy_for_qos(context, qos_id)
++        self.qos.network_qos_updated(qos_policy, network_id)
++
++    def port_qos_updated(self, context, qos_id, port_id):
++        qos_policy = self.plugin_rpc.get_policy_for_qos(context, qos_id)
++        self.qos.port_qos_updated(qos_policy, port_id)
++
++    def port_qos_deleted(self, context, qos_id, port_id):
++        self.qos.delete_qos_for_port(port_id)
++
++
++class QoSAgentRpcCallbackMixin(object):
++    """Agent-side RPC (callback) for plugin-to-agent interaction."""
++
++    qos_agent = None
++
++    def network_qos_updated(self, context, **kwargs):
++        qos_id = kwargs.get('qos_id', '')
++        network_id = kwargs.get('network_id', '')
++        LOG.debug('QoS %(qos_id)s updated on network: %(network_id)s', kwargs)
++        self.qos_agent.network_qos_updated(context, qos_id, network_id)
++
++    def network_qos_deleted(self, context, **kwargs):
++        qos_id = kwargs.get('qos_id', '')
++        network_id = kwargs.get('network_id', '')
++        LOG.debug('QoS %(qos_id)s deleted on network: %(network_id)s', kwargs)
++        self.qos_agent.network_qos_deleted(context, qos_id, network_id)
++
++    def port_qos_deleted(self, context, **kwargs):
++        qos_id = kwargs.get('qos_id', '')
++        port_id = kwargs.get('port_id', '')
++        if self.get_vif_port_by_id(port_id):
++            LOG.debug('QoS %(qos_id)s deleted on port: %(port_id)s', kwargs)
++            self.qos_agent.port_qos_deleted(context, qos_id, port_id)
++
++    def port_qos_updated(self, context, **kwargs):
++        qos_id = kwargs.get('qos_id', '')
++        port_id = kwargs.get('port_id', '')
++        if self.get_vif_port_by_id(port_id):
++            LOG.debug('QoS %(qos_id)s updated on port: %(port_id)s', kwargs)
++            self.qos_agent.port_qos_updated(context, qos_id, port_id)
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index c89c9a1..76cf54f 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -118,6 +118,8 @@ RPC_NAMESPACE_DVR = None
+ RPC_NAMESPACE_STATE = None
+ # RPC interface for agent to plugin resources API
+ RPC_NAMESPACE_RESOURCES = None
++# RPC interface for agent to plugin QOS api
++RPC_NAMESPACE_QOS = None
+ 
+ # Default network MTU value when not configured
+ DEFAULT_NETWORK_MTU = 1500
+@@ -249,3 +251,10 @@ VALID_VXLAN_UDP_PORTS = [4789, 8472]
+ # interface must support an MTU of 1574 bytes.
+ #
+ VXLAN_MTU_OVERHEAD = 74
++
++# QoS Extension constants
++TYPE_QOS_DSCP = "dscp"
++TYPE_QOS_RATELIMIT = "ratelimit"
++TYPE_QOS_SCHEDULER = "scheduler"
++
++QOS_SCHEDULER_POLICY_WEIGHT = "weight"
+diff --git a/neutron/common/topics.py b/neutron/common/topics.py
+index a337ed9..36a8ff2 100644
+--- a/neutron/common/topics.py
++++ b/neutron/common/topics.py
+@@ -28,6 +28,7 @@ L2POPULATION = 'l2population'
+ DVR = 'dvr'
+ RESOURCES = 'resources'
+ HOST = 'host'
++QOS = 'qos'
+ 
+ CREATE = 'create'
+ DELETE = 'delete'
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py
+new file mode 100644
+index 0000000..c79b4e0
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/41038c0cd102_wrs_qos_table_renaming.py
+@@ -0,0 +1,57 @@
++# Copyright 2015 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""WRS QoS table renaming
++
++Revision ID: 41038c0cd102
++Revises: wrs_kilo_shipped
++Create Date: 2016-05-27 00:00:01.000000
++
++"""
++
++from alembic import op
++
++
++# revision identifiers, used by Alembic.
++revision = '41038c0cd102'
++down_revision = 'wrs_kilo_shipped'
++
++
++# NOTE(alegacy): The original Quality of Service feature was introduced by
++# WRS in Havana/Juno.  At that time it was derived based on upstream content
++# but it used the same table names.  Now that the QoS feature has been
++# officially added to the neutron project we have table conflicts that need to
++# be resolved before we can run the upgrade scripts for Liberty.  Otherwise, we
++# will collide on the table name and the upgrade will stop.
++
++def upgrade():
++    op.execute(
++        'ALTER TABLE qoses RENAME TO wrs_qoses')
++    op.execute(
++        'ALTER TABLE qos_policies RENAME TO wrs_qos_policies')
++    op.execute(
++        'ALTER TABLE networkqosmappings RENAME TO wrs_network_qos_mappings')
++    op.execute(
++        'ALTER TABLE portqosmappings RENAME TO wrs_port_qos_mappings')
++    op.execute(
++        'ALTER TYPE qos_types RENAME TO wrs_qos_types')
++    op.create_index(
++        'ix_wrs_qoses_tenant_id', 'wrs_qoses', ['tenant_id'], unique=False)
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+index 3d32c2c..29b73d4 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_upgrade/expand/wrs_kilo_upgrade.py
+@@ -22,14 +22,14 @@
+ """WRS Kilo Revision placeholder
+ 
+ Revision ID: wrs_kilo_upgrade
+-Revises: wrs_kilo_shipped
++Revises: 41038c0cd102
+ Create Date: 2016-05-25 00:00:01.000000
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_kilo_upgrade'
+-down_revision = 'wrs_kilo_shipped'
++down_revision = '41038c0cd102'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+index 168f182..1dab67f 100644
+--- a/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
++++ b/neutron/db/migration/alembic_migrations/vswitch_init_ops.py
+@@ -109,3 +109,41 @@ def upgrade():
+     op.add_column(
+         'ml2_port_bindings',
+         sa.Column('mtu', sa.Integer(), nullable=True))
++
++    op.create_table(
++        'qoses',
++        sa.Column('tenant_id', sa.String(length=255), nullable=True),
++        sa.Column('id', sa.String(length=36), nullable=False),
++        sa.Column('name', sa.String(length=255), nullable=False),
++        sa.Column('description', sa.String(length=255), nullable=False),
++        sa.PrimaryKeyConstraint('id'),
++        sa.UniqueConstraint('name'))
++
++    op.create_table(
++        'qos_policies',
++        sa.Column('id', sa.String(length=36), nullable=False),
++        sa.Column('qos_id', sa.String(length=36), nullable=False),
++        sa.Column('type',
++                  sa.Enum('dscp', 'ratelimit', 'scheduler', name='qos_types'),
++                  nullable=True),
++        sa.Column('key', sa.String(length=255), nullable=False),
++        sa.Column('value', sa.String(length=255), nullable=False),
++        sa.ForeignKeyConstraint(['qos_id'], ['qoses.id'], ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('id', 'qos_id', 'key'))
++
++    op.create_table(
++        'networkqosmappings',
++        sa.Column('network_id', sa.String(length=36), nullable=False),
++        sa.Column('qos_id', sa.String(length=36), nullable=False),
++        sa.ForeignKeyConstraint(['network_id'], ['networks.id'],
++                                ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['qos_id'], ['qoses.id'], ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('network_id', 'qos_id'))
++
++    op.create_table(
++        'portqosmappings',
++        sa.Column('port_id', sa.String(length=36), nullable=False),
++        sa.Column('qos_id', sa.String(length=36), nullable=False),
++        sa.ForeignKeyConstraint(['port_id'], ['ports.id'], ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['qos_id'], ['qoses.id'], ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('port_id', 'qos_id'))
+diff --git a/neutron/db/migration/models/head.py b/neutron/db/migration/models/head.py
+index 55c55f6..d319523 100644
+--- a/neutron/db/migration/models/head.py
++++ b/neutron/db/migration/models/head.py
+@@ -42,6 +42,7 @@ from neutron.db import models
+ from neutron.db import models_v2  # noqa
+ from neutron.db.port_security import models as ps_models  # noqa
+ from neutron.db.qos import models as qos_models  # noqa
++from neutron.db import qos_db  # noqa
+ from neutron.db.quota import models as quota_models  # noqa
+ from neutron.db import rbac_db_models  # noqa
+ from neutron.db import settings_db  # noqa
+diff --git a/neutron/db/qos_db.py b/neutron/db/qos_db.py
+new file mode 100644
+index 0000000..ca875e4
+--- /dev/null
++++ b/neutron/db/qos_db.py
+@@ -0,0 +1,436 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import six
++
++from neutron_lib.db import model_base
++from neutron_lib import exceptions as exc
++
++from neutron._i18n import _
++from neutron.api.rpc.agentnotifiers import qos_rpc_agent_api
++from neutron.common import constants
++from neutron.db import api as db_api
++from neutron.db import models_v2
++from neutron.extensions import wrs_tm as ext_qos
++
++import sqlalchemy as sa
++from sqlalchemy import orm
++
++
++class QoSNotFound(exc.NotFound):
++    message = _("QoS %(qos_id)s could not be found")
++
++
++class QoSAlreadyExists(exc.Conflict):
++    message = _("QoS policy with name %(name)s already exists")
++
++
++class QoSPortMappingNotFound(exc.NotFound):
++    message = _("QoS mapping for port %(port_id)s could not be found")
++
++
++class QoSNetworkMappingNotFound(exc.NotFound):
++    message = _("QoS mapping for network %(net_id)s could not be found")
++
++
++class WrsQoS(model_base.BASEV2, model_base.HasId, model_base.HasProject):
++    __tablename__ = 'wrs_qoses'
++    name = sa.Column(sa.String(255), unique=True, nullable=False)
++    description = sa.Column(sa.String(255), nullable=False)
++    policies = orm.relationship('WrsQoSPolicy',
++                                cascade='all, delete, delete-orphan')
++    ports = orm.relationship('WrsPortQoSMapping',
++                             cascade='all, delete, delete-orphan')
++    networks = orm.relationship('WrsNetworkQoSMapping',
++                                cascade='all, delete, delete-orphan')
++
++
++class WrsQoSPolicy(model_base.BASEV2, model_base.HasId):
++    __tablename__ = 'wrs_qos_policies'
++    qos_id = sa.Column(sa.String(36),
++                       sa.ForeignKey('wrs_qoses.id', ondelete='CASCADE'),
++                       nullable=False,
++                       primary_key=True)
++    type = sa.Column(sa.Enum(constants.TYPE_QOS_DSCP,
++                             constants.TYPE_QOS_RATELIMIT,
++                             constants.TYPE_QOS_SCHEDULER,
++                             name='wrs_qos_types'))
++    key = sa.Column(sa.String(255), nullable=False,
++                    primary_key=True)
++    value = sa.Column(sa.String(255), nullable=False)
++
++
++class WrsNetworkQoSMapping(model_base.BASEV2):
++    __tablename__ = 'wrs_network_qos_mappings'
++    network_id = sa.Column(sa.String(36), sa.ForeignKey('networks.id',
++                           ondelete='CASCADE'), nullable=False,
++                           primary_key=True)
++    qos_id = sa.Column(sa.String(36), sa.ForeignKey('wrs_qoses.id',
++                       ondelete='CASCADE'), nullable=False, primary_key=True)
++
++    # Add a relationship to the Network model in order to instruct SQLAlchemy
++    # to eagerly load qos bindings
++    networks = orm.relationship(
++        models_v2.Network,
++        backref=orm.backref("wrs_qos", lazy='joined', cascade='delete'))
++
++
++class WrsPortQoSMapping(model_base.BASEV2):
++    __tablename__ = 'wrs_port_qos_mappings'
++    port_id = sa.Column(sa.String(36), sa.ForeignKey('ports.id',
++                        ondelete='CASCADE'), nullable=False, primary_key=True)
++    qos_id = sa.Column(sa.String(36), sa.ForeignKey('wrs_qoses.id',
++                       ondelete='CASCADE'), nullable=False, primary_key=True)
++
++    # Add a relationship to the Port model in order to instruct SQLAlchemy to
++    # eagerly load qos bindings
++    ports = orm.relationship(
++        models_v2.Port,
++        backref=orm.backref("wrs_qos", lazy='joined', cascade='delete'))
++
++
++class QoSDbMixin(ext_qos.QoSPluginBase):
++
++    @property
++    def qos_rpc(self):
++        if not getattr(self, '_qos_rpc', None):
++            self._qos_rpc = qos_rpc_agent_api.QoSAgentNotifyAPI()
++        return self._qos_rpc
++
++    def _process_create_qos_for_network(self, context, qos_id, network_id):
++        self.create_qos_for_network(context, qos_id, network_id)
++        self.qos_rpc.network_qos_updated(context, qos_id, network_id)
++
++    def _process_create_qos_for_port(self, context, qos_id, port_id):
++        self.create_qos_for_port(context, qos_id, port_id)
++        self.qos_rpc.port_qos_updated(context, qos_id, port_id)
++
++    def _process_delete_qos_for_network(self, context, qos_id, network_id):
++        self.delete_qos_for_network(context, network_id)
++        self.qos_rpc.network_qos_deleted(context, qos_id, network_id)
++
++    def _process_delete_qos_for_port(self, context, qos_id, port_id):
++        self.delete_qos_for_port(context, port_id)
++        self.qos_rpc.port_qos_deleted(context, qos_id, port_id)
++
++    def _process_update_mapping_for_network(self, context, mapping):
++        self.update_mapping_for_network(context, mapping)
++        self.qos_rpc.network_qos_updated(context,
++                                         mapping.qos_id,
++                                         mapping.network_id)
++
++    def _process_update_mapping_for_port(self, context, mapping):
++        self.update_mapping_for_port(context, mapping)
++        self.qos_rpc.port_qos_updated(context,
++                                      mapping.qos_id,
++                                      mapping.port_id)
++
++    def _process_qos_network_update(self, context, network, req_data):
++        if ext_qos.QOS not in req_data:
++            return
++        qos_id = req_data.get(ext_qos.QOS, None)
++        mapping = self.get_mapping_for_network(context, network['id'])
++        if qos_id and not mapping:
++            self._process_create_qos_for_network(context,
++                                                 qos_id,
++                                                 network['id'])
++        elif not qos_id and mapping:
++            self._process_delete_qos_for_network(context,
++                                                 mapping[0].qos_id,
++                                                 network['id'])
++        elif qos_id:
++            qos_id = req_data[ext_qos.QOS]
++            mapping = mapping[0]
++            mapping.qos_id = qos_id
++            self._process_update_mapping_for_network(context, mapping)
++
++        if qos_id:
++            # update network dictionary to include qos policy
++            network[ext_qos.QOS] = qos_id
++
++    def _process_qos_port_update(self, context, port, req_data):
++        if ext_qos.QOS not in req_data:
++            return False
++
++        qos_id = req_data.get(ext_qos.QOS, None)
++        mapping = self.get_mapping_for_port(context, port['id'])
++
++        if qos_id and not mapping:
++            self._process_create_qos_for_port(context,
++                                              qos_id,
++                                              port['id'])
++        elif not qos_id and mapping:
++            self._process_delete_qos_for_port(context,
++                                              mapping[0].qos_id,
++                                              port['id'])
++        elif qos_id:
++            qos_id = req_data[ext_qos.QOS]
++            mapping = mapping[0]
++            mapping.qos_id = qos_id
++            self._process_update_mapping_for_port(context, mapping)
++
++        if qos_id:
++            # update port dictionary to include qos policy
++            port[ext_qos.QOS] = qos_id
++
++        return True
++
++    def _create_qos_dict(self, qos, fields=None):
++        res = {'id': qos['id'],
++               'tenant_id': qos['tenant_id'],
++               'name': qos['name'],
++               'description': qos['description'],
++               'policies': {}}
++        for item in qos.policies:
++            res['policies'].setdefault(item['type'], {}).update(
++                {item['key']: item['value']})
++        return self._fields(res, fields)
++
++    def _db_delete(self, context, item):
++        with context.session.begin(subtransactions=True):
++            context.session.delete(item)
++
++    def _update_qos(self, context, id, qos):
++        self.validate_qos(context, id, qos)
++        db = self._get_by_id(context, WrsQoS, id)
++        with context.session.begin(subtransactions=True):
++            db.policies = []
++            for type, policies in six.iteritems(qos['qos']['policies']):
++                for k, v in six.iteritems(policies):
++                    db.policies.append(
++                        WrsQoSPolicy(qos_id=db, type=type, key=k, value=v))
++            del qos['qos']['policies']
++            db.update(qos['qos'])
++        return self._create_qos_dict(db)
++
++    def _delete_qos(self, context, id):
++        try:
++            self._db_delete(context, self._get_by_id(context, WrsQoS, id))
++        except orm.exc.NoResultFound:
++            raise QoSNotFound(qos_id=id)
++
++    @db_api.retry_if_session_inactive()
++    def create_qos(self, context, qos):
++        self.validate_qos(context, id, qos)
++        with context.session.begin(subtransactions=True):
++            qos_db_item = WrsQoS(name=qos['qos']['name'],
++                                 description=qos['qos']['description'],
++                                 tenant_id=qos['qos']['tenant_id'])
++            for type, policies in six.iteritems(qos['qos']['policies']):
++                for k, v in six.iteritems(policies):
++                    qos_db_item.policies.append(
++                        WrsQoSPolicy(qos_id=qos_db_item.id,
++                                     type=type, key=k, value=v))
++            context.session.add(qos_db_item)
++        return self._create_qos_dict(qos_db_item)
++
++    def create_qos_for_network(self, context, qos_id, network_id):
++        with context.session.begin(subtransactions=True):
++            db = WrsNetworkQoSMapping(qos_id=qos_id, network_id=network_id)
++            context.session.add(db)
++        return db.qos_id
++
++    def create_qos_for_port(self, context, qos_id, port_id):
++        with context.session.begin(subtransactions=True):
++            db = WrsPortQoSMapping(qos_id=qos_id, port_id=port_id)
++            context.session.add(db)
++        return db.qos_id
++
++    @db_api.retry_if_session_inactive()
++    def update_qos(self, context, id, qos):
++        result = self._update_qos(context, id, qos)
++        qos_item = self._get_by_id(context, WrsQoS, id)
++        for port_mapping in qos_item.ports:
++            self.qos_rpc.port_qos_updated(context,
++                                          id,
++                                          port_mapping['port_id'])
++        for net_mapping in qos_item.networks:
++            self.qos_rpc.network_qos_updated(context,
++                                             id,
++                                             net_mapping['network_id'])
++        return result
++
++    @db_api.retry_if_session_inactive()
++    def delete_qos(self, context, id):
++        qos_item = self._get_by_id(context, WrsQoS, id)
++        for port_mapping in qos_item.ports:
++            self.qos_rpc.port_qos_deleted(context,
++                                          id,
++                                          port_mapping['port_id'])
++
++        for net_mapping in qos_item.networks:
++            self.qos_rpc.network_qos_deleted(context,
++                                             id,
++                                             net_mapping['network_id'])
++        self._delete_qos(context, id)
++
++    def delete_qos_for_network(self, context, network_id):
++        try:
++            self._db_delete(context,
++                            self._model_query(context,
++                                              WrsNetworkQoSMapping)
++                            .filter_by(network_id=network_id).one())
++        except orm.exc.NoResultFound:
++            raise QoSNetworkMappingNotFound(net_id=network_id)
++
++    def delete_qos_for_port(self, context, port_id):
++        try:
++            self._db_delete(context,
++                            self._model_query(context, WrsPortQoSMapping)
++                            .filter_by(port_id=port_id).one())
++        except orm.exc.NoResultFound:
++            raise QoSPortMappingNotFound(port_id=port_id)
++
++    def get_mapping_for_network(self, context, network_id):
++        try:
++            with context.session.begin(subtransactions=True):
++                return (self._model_query(context, WrsNetworkQoSMapping)
++                        .filter_by(network_id=network_id).all())
++        except orm.exc.NoResultFound:
++            raise QoSNetworkMappingNotFound(net_id=network_id)
++
++    def get_mapping_for_port(self, context, port_id):
++        try:
++            with context.session.begin(subtransactions=True):
++                return self._model_query(context, WrsPortQoSMapping).filter_by(
++                    port_id=port_id).all()
++        except orm.exc.NoResultFound:
++            raise QoSPortMappingNotFound(port_id=port_id)
++
++    @db_api.retry_if_session_inactive()
++    def get_qos(self, context, id, fields=None):
++        try:
++            with context.session.begin(subtransactions=True):
++                return self._create_qos_dict(
++                    self._get_by_id(context, WrsQoS, id), fields)
++        except orm.exc.NoResultFound:
++            raise QoSNotFound(qos_id=id)
++
++    @db_api.retry_if_session_inactive()
++    def get_qoses(self, context, filters=None, fields=None,
++                  sorts=None, limit=None,
++                  marker=None, page_reverse=False, default_sg=False):
++        marker_obj = self._get_marker_obj(context, 'qos', limit, marker)
++
++        return self._get_collection(context,
++                                    WrsQoS,
++                                    self._create_qos_dict,
++                                    filters=filters, fields=fields,
++                                    sorts=sorts,
++                                    limit=limit, marker_obj=marker_obj,
++                                    page_reverse=page_reverse)
++
++    def update_mapping_for_network(self, context, mapping):
++        db = self.get_mapping_for_network(context, mapping.network_id)[0]
++        with context.session.begin(subtransactions=True):
++            db.update(mapping)
++
++    def update_mapping_for_port(self, context, mapping):
++        db = self.get_mapping_for_port(context, mapping.port_id)[0]
++        with context.session.begin(subtransactions=True):
++            db.update(mapping)
++
++    def _get_qos_by_name(self, context, name):
++        query = self._model_query(context, WrsQoS)
++        return query.filter(WrsQoS.name == name).one()
++
++    def _validate_qos_exists(self, context, id, qos):
++        try:
++            if 'name' in qos:
++                other = self._get_qos_by_name(context, qos['name'])
++                if other['id'] != id:
++                    raise QoSAlreadyExists(name=qos['name'])
++        except orm.exc.NoResultFound:
++            pass
++
++    def _validate_qos_types(self, context, qos):
++        if 'policies' not in qos:
++            raise ext_qos.QoSValidationError()
++        for type, policies in six.iteritems(qos['policies']):
++            try:
++                validator = getattr(self, 'validate_policy_' + type)
++            except AttributeError:
++                raise Exception(_('No validator found for type: %s') % type)
++            validator(policies)
++
++    def validate_qos(self, context, id, qos):
++        qos = qos['qos']
++        self._validate_qos_exists(context, id, qos)
++        self._validate_qos_types(context, qos)
++
++    def validate_policy_dscp(self, policy):
++        try:
++            dscp = int(policy[constants.TYPE_QOS_DSCP])
++            if dscp < 0 or dscp > 63:
++                raise ext_qos.QoSValidationError()
++        except ValueError:
++            raise ext_qos.QoSValidationError()
++
++    def validate_policy_scheduler(self, policy):
++        try:
++            weight = int(policy[constants.QOS_SCHEDULER_POLICY_WEIGHT])
++            if weight < 0:
++                raise ext_qos.QoSValidationError()
++        except ValueError:
++            raise ext_qos.QoSValidationError()
++
++    def get_policy_for_qos(self, context, qos_id):
++        result = {}
++        query = context.session.query(WrsQoS)
++        results = query.filter_by(id=qos_id)
++        for item in results.one().policies:
++            result.setdefault(item['type'], {})
++            result[item['type']].update({item['key']: item['value']})
++        return result
++
++    def get_qos_by_network(self, context, network_id):
++        query = context.session.query(WrsNetworkQoSMapping)
++        try:
++            mapping = query.filter_by(network_id=network_id).one()
++            return mapping.qos_id
++        except orm.exc.NoResultFound:
++            return None
++
++    def get_qos_by_port(self, context, port_id):
++        query = context.session.query(WrsPortQoSMapping)
++        try:
++            mapping = query.filter_by(port_id=port_id).one()
++            return mapping.qos_id
++        except orm.exc.NoResultFound:
++            return None
++
++    def extend_network_dict_qos(self, network_res, network_db):
++        # QoS bindings will be retrieved from the sqlalchemy
++        # model. As they're loaded eagerly with networks because of the
++        # joined load they will not cause an extra query.
++        if network_db.wrs_qos:
++            # currently only one QoS policy can be mapped
++            network_res[ext_qos.QOS] = network_db.wrs_qos[0].qos_id
++        return network_res
++
++    def extend_port_dict_qos(self, port_res, port_db):
++        # QoS bindings will be retrieved from the sqlalchemy
++        # model. As they're loaded eagerly with ports because of the
++        # joined load they will not cause an extra query.
++        if port_db.wrs_qos:
++            # currently only one QoS policy can be mapped
++            port_res[ext_qos.QOS] = port_db.wrs_qos[0].qos_id
++        return port_res
+diff --git a/neutron/extensions/wrs_tm.py b/neutron/extensions/wrs_tm.py
+new file mode 100644
+index 0000000..fd31dcc
+--- /dev/null
++++ b/neutron/extensions/wrs_tm.py
+@@ -0,0 +1,175 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import abc
++
++from neutron_lib.api import extensions as api_extensions
++from neutron_lib import exceptions as exc
++from neutron_lib.plugins import directory
++
++from neutron._i18n import _
++from neutron.api import extensions
++from neutron.api.v2 import attributes as attr
++from neutron.api.v2 import base
++
++import six
++
++
++RESOURCE_ATTRIBUTE_MAP = {
++    'qos': {
++        'id': {'allow_post': False,
++               'allow_put': False,
++               'validate': {'type:uuid': None},
++               'is_visible': True,
++               'primary_key': True},
++        'name': {'allow_post': True,
++                 'allow_put': True,
++                 'is_visible': True},
++        'description': {'allow_post': True,
++                        'allow_put': True,
++                        'is_visible': True,
++                        'default': '',
++                        'validate': {'type:string': None}},
++        'tenant_id': {'allow_post': True,
++                      'allow_put': False,
++                      'is_visible': True,
++                      'default': None},
++        'policies': {'allow_post': True,
++                     'allow_put': True,
++                     'is_visible': True,
++                     'validate': {'type:dict': None}},
++    },
++}
++
++QOS = "wrs-tm:qos"
++
++EXTENDED_ATTRIBUTES_2_0 = {
++    'ports': {QOS: {'allow_post': True,
++                    'allow_put': True,
++                    'enforce_policy': True,
++                    'is_visible': True,
++                    'default': None,
++                    'validate': {'type:uuid_or_none': None}}},
++    'networks': {QOS: {'allow_post': True,
++                       'allow_put': True,
++                       'enforce_policy': True,
++                       'is_visible': True,
++                       'default': None,
++                       'validate': {'type:uuid_or_none': None}}},
++}
++
++
++class QoSValidationError(exc.InvalidInput):
++    message = _("Invalid QoS Policy")
++
++
++class Wrs_tm(api_extensions.ExtensionDescriptor):
++    """Quality of Service extension."""
++
++    @classmethod
++    def get_name(cls):
++        return "wrs-traffic-management"
++
++    @classmethod
++    def get_alias(cls):
++        return "wrs-tm"
++
++    @classmethod
++    def get_description(cls):
++        return "WRS Traffic Management Extensions."
++
++    @classmethod
++    def get_namespace(cls):
++        return "http://docs.windriver.org/tis/ext/wrs-tm/v1"
++
++    @classmethod
++    def get_updated(cls):
++        return "2014-10-01T12:00:00-00:00"
++
++    @classmethod
++    def get_resources(cls):
++        #TODO(scollins)
++        #my_plurals = [(key + 'es', key) for key in
++        #              RESOURCE_ATTRIBUTE_MAP.keys()]
++        attr.RESOURCE_FOREIGN_KEYS.update({'qoss': QOS})
++        exts = []
++        plugin = directory.get_plugin()
++        resource = "qos"
++        params = RESOURCE_ATTRIBUTE_MAP.get(resource, dict())
++        collection = "qoses"
++        controller = base.create_resource(collection, resource,
++                                          plugin, params, allow_bulk=True,
++                                          allow_pagination=True,
++                                          allow_sorting=True)
++        collection = "%s/%s" % (cls.get_alias(), collection)
++        ex = extensions.ResourceExtension(collection,
++                                          controller,
++                                          attr_map=params)
++        exts.append(ex)
++        return exts
++
++    def get_extended_resources(self, version):
++        if version == "2.0":
++            return EXTENDED_ATTRIBUTES_2_0
++        else:
++            return {}
++
++
++@six.add_metaclass(abc.ABCMeta)
++class QoSPluginBase(object):
++
++    @abc.abstractmethod
++    def get_qoses(self, context, filters=None, fields=None,
++                  sorts=None, limit=None, marker=None,
++                  page_reverse=False):
++        pass
++
++    @abc.abstractmethod
++    def create_qos(self, context, qos):
++        pass
++
++    @abc.abstractmethod
++    def delete_qos(self, context, id):
++        pass
++
++    @abc.abstractmethod
++    def update_qos(self, context, id, qos):
++        pass
++
++    @abc.abstractmethod
++    def create_qos_for_network(self, context, qos_id, network_id):
++        pass
++
++    @abc.abstractmethod
++    def delete_qos_for_network(self, context, network_id):
++        pass
++
++    @abc.abstractmethod
++    def create_qos_for_port(self, context, qos_id, port_id):
++        pass
++
++    @abc.abstractmethod
++    def delete_qos_for_port(self, context, port_id):
++        pass
++
++    @abc.abstractmethod
++    def validate_qos(self, context, qos):
++        pass
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 9936a77..aea6ba3 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -61,6 +61,7 @@ from neutron.api.rpc.agentnotifiers import host_rpc_agent_api
+ from neutron.api.rpc.handlers import dhcp_rpc
+ from neutron.api.rpc.handlers import dvr_rpc
+ from neutron.api.rpc.handlers import metadata_rpc
++from neutron.api.rpc.handlers import qos_rpc
+ from neutron.api.rpc.handlers import resources_rpc
+ from neutron.api.rpc.handlers import securitygroups_rpc
+ from neutron.common import constants as n_const
+@@ -84,6 +85,7 @@ from neutron.db.models import securitygroup as sg_models
+ from neutron.db import models_v2
+ from neutron.db import providernet_db
+ from neutron.db import provisioning_blocks
++from neutron.db import qos_db
+ from neutron.db.quota import driver  # noqa
+ from neutron.db import securitygroups_rpc_base as sg_db_rpc
+ from neutron.db import segments_db
+@@ -143,7 +145,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 address_scope_db.AddressScopeDbMixin,
+                 service_type_db.SubnetServiceTypeMixin,
+                 hosts_db.HostSchedulerDbMixin,
+-                providernet_db.ProviderNetDbMixin):
++                providernet_db.ProviderNetDbMixin,
++                qos_db.QoSDbMixin):
+ 
+     """Implement the Neutron L2 abstractions using modules.
+ 
+@@ -175,7 +178,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                                     "default-subnetpools",
+                                     "subnet-service-types",
+                                     "host", "wrs-provider", "wrs-tenant",
+-                                    "wrs-binding"]
++                                    "wrs-binding", "wrs-tm"]
+ 
+     @property
+     def supported_extension_aliases(self):
+@@ -229,7 +232,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             dhcp_rpc.DhcpRpcCallback(),
+             agents_db.AgentExtRpcCallback(),
+             metadata_rpc.MetadataRpcCallback(),
+-            resources_rpc.ResourcesPullRpcCallback()
++            resources_rpc.ResourcesPullRpcCallback(),
++            qos_rpc.QoSServerRpcCallback()
+         ]
+ 
+     def _setup_dhcp(self):
+@@ -703,6 +707,24 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         session = plugin._object_session_or_new_session(subnetdb)
+         plugin.extension_manager.extend_subnet_dict(session, subnetdb, result)
+ 
++    # Register dict extend functions for networks
++    @staticmethod
++    @resource_extend.extends([net_def.COLLECTION_NAME])
++    def _extend_network_dict_qos(network_res, network_db):
++        plugin = directory.get_plugin()
++        if not isinstance(plugin, qos_db.QoSDbMixin):
++            return
++        plugin.extend_network_dict_qos(network_res, network_db)
++
++    # Register dict extend functions for ports
++    @staticmethod
++    @resource_extend.extends([port_def.COLLECTION_NAME])
++    def _extend_port_dict_qos(port_res, port_db):
++        plugin = directory.get_plugin()
++        if not isinstance(plugin, qos_db.QoSDbMixin):
++            return
++        plugin.extend_port_dict_qos(port_res, port_db)
++
+     @staticmethod
+     def _object_session_or_new_session(sql_obj):
+         session = sqlalchemy.inspect(sql_obj).session
+@@ -858,6 +880,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 result)
+ 
+             self._process_l3_create(context, result, net_data)
++            self._process_qos_network_update(context, result, net_data)
+             self.type_manager.extend_network_dict_provider(context, result)
+ 
+             # Update the transparent vlan if configured
+@@ -924,6 +947,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             self.extension_manager.process_update_network(context, net_data,
+                                                           updated_network)
+             self._process_l3_update(context, updated_network, net_data)
++            self._process_qos_network_update(context, updated_network,
++                                             net_data)
+ 
+             # ToDO(QoS): This would change once EngineFacade moves out
+             db_network = self._get_network(context, id)
+@@ -1246,6 +1271,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             # sgids must be got after portsec checked with security group
+             sgids = self._get_security_groups_on_port(context, port)
+             self._process_port_create_security_group(context, result, sgids)
++            self._process_qos_port_update(context, result, port['port'])
+             network = self.get_network(context, result['network_id'])
+             binding = db.add_port_binding(context, result['id'])
+             mech_context = driver_context.PortContext(self, context, result,
+@@ -1400,6 +1426,8 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                                                       updated_port))
+             need_port_update_notify |= self.update_security_group_on_port(
+                 context, id, port, original_port, updated_port)
++            need_port_update_notify |= self._process_qos_port_update(
++                context, updated_port, port['port'])
+             network = self.get_network(context, original_port['network_id'])
+             need_port_update_notify |= self._update_extra_dhcp_opts_on_port(
+                 context, id, port, updated_port)
+diff --git a/neutron/plugins/ml2/rpc.py b/neutron/plugins/ml2/rpc.py
+index a539da4..9cc0845 100644
+--- a/neutron/plugins/ml2/rpc.py
++++ b/neutron/plugins/ml2/rpc.py
+@@ -13,7 +13,7 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2013-2014 Wind River Systems, Inc.
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -171,17 +171,38 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
+                          'vif_type': port_context.vif_type})
+             return {'device': device}
+ 
++        # obtain WRS qos policies
++        plugin = directory.get_plugin()
++        port_qos_id = plugin.get_qos_by_port(rpc_context, port['id'])
++        if port_qos_id is not None:
++            port_qos_policy = plugin.get_policy_for_qos(rpc_context,
++                                                        port_qos_id)
++        else:
++            port_qos_policy = None
++
++        # obtain WRS qos policies
++        network_qos_id = plugin.get_qos_by_network(rpc_context,
++                                                   port['network_id'])
++        if network_qos_id is not None:
++            network_qos_policy = plugin.get_policy_for_qos(rpc_context,
++                                                           network_qos_id)
++        else:
++            network_qos_policy = None
++
+         network_qos_policy_id = port_context.network._network.get(
+             qos_consts.QOS_POLICY_ID)
+         entry = {'device': device,
+                  'network_id': port['network_id'],
+                  'port_id': port['id'],
++                 'tenant_id': port['tenant_id'],
+                  'mac_address': port['mac_address'],
+                  'admin_state_up': port['admin_state_up'],
+                  'network_type': segment[api.NETWORK_TYPE],
+                  'segmentation_id': segment[api.SEGMENTATION_ID],
+                  'physical_network': segment[api.PHYSICAL_NETWORK],
+                  'mtu': port_context.network._network.get('mtu'),
++                 'port_qos_policy': port_qos_policy,
++                 'network_qos_policy': network_qos_policy,
+                  'fixed_ips': port['fixed_ips'],
+                  'device_owner': port['device_owner'],
+                  'allowed_address_pairs': port['allowed_address_pairs'],
+diff --git a/neutron/plugins/wrs/drivers/qos.py b/neutron/plugins/wrs/drivers/qos.py
+new file mode 100644
+index 0000000..86a4488
+--- /dev/null
++++ b/neutron/plugins/wrs/drivers/qos.py
+@@ -0,0 +1,54 @@
++# Copyright (c) 2014 OpenStack Foundation
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2013-2015 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++from neutron.agent import qos
++
++
++class VSwitchQoSDriver(qos.QoSDriver):
++
++    vswitch_mgr = None
++
++    def register_manager(self, manager):
++        self.vswitch_mgr = manager
++
++    def delete_qos_for_network(self, network_id):
++        params = {'qos-policy': None}
++        networks = self.vswitch_mgr.get_networks()
++        if network_id in networks:
++            self.vswitch_mgr.update_network(network_id, params)
++
++    def delete_qos_for_port(self, port_id):
++        # TODO(alegacy) port qos-policy is currently not supported
++        # params = {'qos-policy': None}
++        # self.vswitch_mgr.update_port(port_id, params)
++        pass
++
++    def network_qos_updated(self, policy, network_id):
++        params = {'qos-policy': policy}
++        networks = self.vswitch_mgr.get_networks()
++        if network_id in networks:
++            self.vswitch_mgr.update_network(network_id, params)
++
++    def port_qos_updated(self, policy, port_id):
++        # TODO(alegacy) port qos-policy is currently not supported
++        # params = {'qos-policy': policy}
++        # self.vswitch_mgr.update_port(port_id, params)
++        pass
+diff --git a/neutron/tests/etc/policy.json b/neutron/tests/etc/policy.json
+index df2f686..9e1caf9 100644
+--- a/neutron/tests/etc/policy.json
++++ b/neutron/tests/etc/policy.json
+@@ -5,6 +5,7 @@
+     "context_is_advsvc":  "role:advsvc",
+     "admin_or_network_owner": "rule:context_is_admin or tenant_id:%(network:tenant_id)s",
+     "admin_owner_or_network_owner": "rule:owner or rule:admin_or_network_owner",
++    "admin_or_qos_owner": "rule:context_is_admin or tenant_id:%(qos:tenant_id)s",
+     "admin_only": "rule:context_is_admin",
+     "regular_user": "",
+     "admin_or_data_plane_int": "rule:context_is_admin or role:data_plane_integrator",
+@@ -46,6 +47,7 @@
+     "get_network:provider:physical_network": "rule:admin_only",
+     "get_network:provider:segmentation_id": "rule:admin_only",
+     "get_network:queue_id": "rule:admin_only",
++    "get_network:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "get_network_ip_availabilities": "rule:admin_only",
+     "get_network_ip_availability": "rule:admin_only",
+     "create_network:shared": "rule:admin_only",
+@@ -55,6 +57,7 @@
+     "create_network:provider:network_type": "rule:admin_only",
+     "create_network:provider:physical_network": "rule:admin_only",
+     "create_network:provider:segmentation_id": "rule:admin_only",
++    "create_network:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "update_network": "rule:admin_or_owner",
+     "update_network:segments": "rule:admin_only",
+     "update_network:shared": "rule:admin_only",
+@@ -62,6 +65,7 @@
+     "update_network:provider:physical_network": "rule:admin_only",
+     "update_network:provider:segmentation_id": "rule:admin_only",
+     "update_network:router:external": "rule:admin_only",
++    "update_network:wrs-tm:qos": "rule:admin_or_qos_owner",
+     "delete_network": "rule:admin_or_owner",
+ 
+     "create_segment": "rule:admin_only",
+@@ -139,6 +143,11 @@
+     "create_router:external_gateway_info:external_fixed_ips": "rule:admin_only",
+     "update_router:external_gateway_info:external_fixed_ips": "rule:admin_only",
+ 
++    "get_qos": "rule:admin_or_owner",
++    "create_qos": "rule:admin_only",
++    "update_qos": "rule:admin_only",
++    "delete_qos": "rule:admin_only",
++
+     "create_qos_queue": "rule:admin_only",
+     "get_qos_queue": "rule:admin_only",
+ 
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py
+index 3869b02..47ee9c1 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_flat.py
+@@ -27,6 +27,7 @@ from neutron.common import constants as n_const
+ from neutron.common import exceptions as n_exc
+ from neutron.db import api as db
+ from neutron.db.models.plugins.ml2 import flatallocation
++from neutron.db import qos_db  # noqa
+ from neutron.db import settings_db  # noqa
+ from neutron.plugins.common import constants as p_const
+ from neutron.plugins.ml2 import driver_api as api
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
+index e967091..ace2903 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vlan.py
+@@ -29,6 +29,7 @@ from neutron.common import constants
+ from neutron.common import exceptions as n_exc
+ from neutron.db import api as db
+ from neutron.db.models.plugins.ml2 import vlanallocation as vlan_alloc_model
++from neutron.db import qos_db  # noqa
+ from neutron.db import settings_db  # noqa
+ from neutron.plugins.ml2 import driver_api as api
+ from neutron.plugins.wrs.drivers import type_managed_vlan
+diff --git a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py
+index 7fc1f75..0ede30b 100644
+--- a/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py
++++ b/neutron/tests/unit/plugins/wrs/drivers/test_type_managed_vxlan.py
+@@ -22,6 +22,7 @@
+ from oslo_log import log as logging
+ 
+ from neutron.common import constants
++from neutron.db import qos_db  # noqa
+ from neutron.db import settings_db  # noqa
+ from neutron.plugins.ml2 import driver_api as api
+ from neutron.plugins.wrs.drivers import type_managed_vxlan
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_qos.py b/neutron/tests/unit/plugins/wrs/test_extension_qos.py
+new file mode 100644
+index 0000000..caf3174
+--- /dev/null
++++ b/neutron/tests/unit/plugins/wrs/test_extension_qos.py
+@@ -0,0 +1,356 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++
++import contextlib
++
++import webob.exc
++
++from neutron_lib.api import validators
++
++from neutron.db import db_base_plugin_v2
++from neutron.db import qos_db
++from neutron.extensions import wrs_tm as ext_qos
++from neutron.tests.unit.db import test_db_base_plugin_v2 as test_plugin
++
++
++DB_PLUGIN_KLASS = ('neutron.tests.unit.plugins.wrs.test_extension_qos.'
++                   'QoSTestPlugin')
++
++SAMPLE_QOS = {'name': 'scheduler1',
++              'description': 'test policy',
++              'policies': {'scheduler': {'weight': '32'}}}
++
++SAMPLE_UPDATE_QOS = {'name': 'scheduler2',
++                     'description': 'weighted policy',
++                     'policies': {'scheduler': {'weight': '99'}}}
++
++SAMPLE_INVALID_QOS = {'name': 'scheduler3', 'description':
++                      'sample invalid policy',
++                      'policies': {'scheduler': {'weight': '-1'}}}
++
++
++class QoSTestExtensionManager(object):
++
++    def get_resources(self):
++        return ext_qos.Wrs_tm.get_resources()
++
++    def get_actions(self):
++        return []
++
++    def get_request_extensions(self):
++        return []
++
++
++class QoSTestCase(test_plugin.NeutronDbPluginV2TestCase):
++
++    def _create_qos(self, name, description, policy):
++        data = {'qos': {'name': name,
++                        'policies': policy,
++                        'tenant_id': 'test_tenant',
++                        'description': description}
++                }
++
++        qos_req = self.new_create_request('wrs-tm/qoses', data)
++        return qos_req.get_response(self.ext_api)
++
++    def _make_qos(self, qos):
++        res = self._create_qos(qos['name'], qos['description'],
++                               qos['policies'])
++        if res.status_int >= 400:
++            raise webob.exc.HTTPClientError(code=res.status_int)
++        return self.deserialize(self.fmt, res)
++
++    @contextlib.contextmanager
++    def qos(self, policy, no_delete=False):
++        qos = self._make_qos(policy)
++        try:
++            yield qos
++        finally:
++            if not no_delete:
++                self._delete('wrs-tm/qoses', qos['qos']['id'])
++
++
++class QoSTestPlugin(db_base_plugin_v2.NeutronDbPluginV2,
++                    qos_db.QoSDbMixin):
++    """Test plugin that implements necessary calls on create/delete port
++    for associating ports with a QoS policy
++    """
++
++    supported_extension_aliases = ["wrs-tm"]
++
++    def get_networks(self, context, filters=None, fields=None,
++                     sorts=None, limit=None, marker=None,
++                     page_reverse=None):
++        neutron_networks = super(QoSTestPlugin, self).get_networks(
++            context, filters, sorts=sorts, limit=limit, marker=marker,
++            page_reverse=page_reverse)
++        if neutron_networks:
++            for network in neutron_networks:
++                mapping = self.get_mapping_for_network(context, network['id'])
++                if mapping:
++                    network[ext_qos.QOS] = mapping[0].qos_id
++        return neutron_networks
++
++    def get_ports(self, context, filters=None, fields=None,
++                  sorts=None, limit=None, marker=None,
++                  page_reverse=False):
++        neutron_lports = super(QoSTestPlugin, self).get_ports(
++            context, filters, sorts=sorts, limit=limit, marker=marker,
++            page_reverse=page_reverse)
++        if neutron_lports:
++            for port in neutron_lports:
++                mapping = self.get_mapping_for_port(context, port['id'])
++                if mapping:
++                    port[ext_qos.QOS] = mapping[0].qos_id
++        return neutron_lports
++
++    def update_port(self, context, id, port):
++        qos_id = validators.is_attr_set(port['port'].get(ext_qos.QOS))
++        mapping = self.get_mapping_for_port(context, id)
++        if qos_id and not mapping:
++            self.create_qos_for_port(context, port['port'][ext_qos.QOS], id)
++        elif not qos_id and mapping:
++            self.delete_qos_for_port(context, id)
++        else:
++            qos_id = port['port'][ext_qos.QOS]
++            mapping = mapping[0]
++            mapping.qos_id = port['port'][ext_qos.QOS]
++            self.update_mapping_for_port(context, mapping)
++        port = super(QoSTestPlugin, self).update_port(context, id, port)
++        mapping = self.get_mapping_for_port(context, id)
++        if mapping:
++            port[ext_qos.QOS] = mapping[0].qos_id
++        return port
++
++    def update_network(self, context, id, network):
++        qos_id = validators.is_attr_set(network['network'].get(ext_qos.QOS))
++        mapping = self.get_mapping_for_network(context, id)
++        if qos_id and not mapping:
++            self.create_qos_for_network(context,
++                                        network['network'][ext_qos.QOS], id)
++        elif not qos_id and mapping:
++            self.delete_qos_for_network(context, id)
++        else:
++            qos_id = network['network'][ext_qos.QOS]
++            mapping = mapping[0]
++            mapping.qos_id = qos_id
++            self.update_mapping_for_network(context, mapping)
++        network = super(QoSTestPlugin, self).update_network(context,
++                                                            id, network)
++        mapping = self.get_mapping_for_network(context, id)
++        if mapping:
++            network[ext_qos.QOS] = mapping[0].qos_id
++        return network
++
++
++class QoSDBTestCase(QoSTestCase):
++    def setUp(self, plugin=None, ext_mgr=None):
++        self.default_qos = SAMPLE_QOS
++        self.update_qos = SAMPLE_UPDATE_QOS
++        self.invalid_policy = SAMPLE_INVALID_QOS
++        plugin = plugin or DB_PLUGIN_KLASS
++        ext_mgr = ext_mgr or QoSTestExtensionManager()
++        super(QoSDBTestCase, self).setUp(plugin=plugin, ext_mgr=ext_mgr)
++
++    def tearDown(self):
++        super(QoSDBTestCase, self).tearDown()
++
++
++class TestQoS(QoSDBTestCase):
++
++    def test_add_mapping_to_network(self):
++        with self.network() as n:
++            with self.qos(self.default_qos) as qos:
++                data = {'network': {ext_qos.QOS: qos['qos']['id']}}
++                req = self.new_update_request('networks', data,
++                                              n['network']['id'])
++                res = self.deserialize(self.fmt, req.get_response(self.api))
++                self.assertEqual(res['network'][ext_qos.QOS], qos['qos']['id'])
++
++    def test_add_mapping_to_port(self):
++        with self.network() as n:
++            with self.subnet(n):
++                with self.qos(self.default_qos) as qos:
++                    res = self._create_port(self.fmt, n['network']['id'])
++                    port = self.deserialize(self.fmt, res)
++                    data = {'port': {'name': port['port']['name'],
++                                     ext_qos.QOS: qos['qos']['id']}}
++                    req = self.new_update_request('ports', data,
++                                                  port['port']['id'])
++                    res = self.deserialize(self.fmt,
++                                           req.get_response(self.api))
++                    self.assertEqual(res['port'][ext_qos.QOS],
++                                     qos['qos']['id'])
++                    self._delete('ports', res['port']['id'])
++
++    def test_create_qos(self):
++        with self.qos(self.default_qos) as qos:
++            self.assertEqual(qos['qos']['policies'],
++                             self.default_qos['policies'])
++            self.assertIsNotNone(qos['qos']['id'])
++
++    def test_delete_mapping_for_network(self):
++        with self.network() as n:
++            with self.subnet(n):
++                with self.qos(self.default_qos) as qos:
++                    data = {'network': {ext_qos.QOS: str(qos['qos']['id'])}}
++                    req = self.new_update_request('networks', data,
++                                                  n['network']['id'])
++                    res = self.deserialize(self.fmt,
++                                           req.get_response(self.api))
++                    self.assertEqual(res['network'][ext_qos.QOS],
++                                     qos['qos']['id'])
++                    del data['network'][ext_qos.QOS]
++                    req = self.new_update_request('networks',
++                                                  data,
++                                                  n['network']['id'])
++                    res = self.deserialize(self.fmt,
++                                           req.get_response(self.api))
++                    self.assertNotIn(ext_qos.QOS, res['network'])
++
++    def test_delete_mapping_for_port(self):
++        with self.network() as n:
++            with self.subnet(n):
++                with self.qos(self.default_qos) as qos:
++                    res = self._create_port(self.fmt, n['network']['id'])
++                    port = self.deserialize(self.fmt, res)
++                    data = {'port': {'fixed_ips': port['port']['fixed_ips'],
++                                     'name': port['port']['name'],
++                                     ext_qos.QOS: qos['qos']['id']}}
++                    req = self.new_update_request('ports', data,
++                                                  port['port']['id'])
++                    res = self.deserialize(self.fmt,
++                                           req.get_response(self.api))
++                    del data['port'][ext_qos.QOS]
++                    req = self.new_update_request('ports', data,
++                                                  port['port']['id'])
++                    res = self.deserialize(self.fmt, req.get_response(
++                                           self.api))
++                    self.assertNotIn(ext_qos.QOS, res['port'])
++                self._delete('ports', res['port']['id'])
++
++    def test_get_network_qos(self):
++        with self.network() as n:
++            with self.qos(self.default_qos) as qos:
++                data = {'network': {ext_qos.QOS: qos['qos']['id']}}
++                req = self.new_update_request('networks', data,
++                                              n['network']['id'])
++                res = req.get_response(self.api)
++                req = self.new_list_request('networks')
++                res = req.get_response(self.api)
++                networks = self.deserialize(self.fmt, res)
++                network = networks['networks'][0]
++                self.assertIsNotNone(network[ext_qos.QOS])
++
++    def test_get_port_qos(self):
++        with self.network() as n:
++            with self.subnet(n):
++                with self.qos(self.default_qos) as qos:
++                    req = self._create_port(self.fmt, n['network']['id'])
++                    port = self.deserialize(self.fmt, req)
++                    data = {'port': {'name': port['port']['name'],
++                                     ext_qos.QOS: qos['qos']['id']}}
++                    req = self.new_update_request('ports', data,
++                                                  port['port']['id'])
++                    res = req.get_response(self.api)
++                    req = self.new_list_request('ports')
++                    res = req.get_response(self.api)
++                    ports = self.deserialize(self.fmt, res)
++                    port = ports['ports'][0]
++                    self.assertIsNotNone(port[ext_qos.QOS])
++                    self._delete('ports', port['id'])
++
++    def test_get_qos(self):
++        with self.qos(self.default_qos) as qos:
++            res = self.new_show_request('wrs-tm/qoses', qos['qos']['id'])
++            qos_resp = self.deserialize(self.fmt,
++                                        res.get_response(self.ext_api))
++            self.assertEqual(qos_resp['qos']['policies'],
++                             self.default_qos['policies'])
++
++    def test_invalid_policy(self):
++        resp = self._create_qos(self.invalid_policy['name'],
++                                self.invalid_policy['description'],
++                                self.invalid_policy['policies'])
++        self.assertIn(ext_qos.QoSValidationError.message, resp.body)
++
++    def test_invalid_update_qos(self):
++        with self.qos(self.default_qos) as qos:
++            data = {'qos': self.invalid_policy}
++            res = self.new_update_request('wrs-tm/qoses', data,
++                                          qos['qos']['id'])
++            resp = self.deserialize(self.fmt,
++                                    res.get_response(self.ext_api))
++            self.assertEqual(ext_qos.QoSValidationError.message,
++                             resp['NeutronError']['message'])
++
++    def test_update_mapping_for_network(self):
++        with self.network() as n:
++            with self.qos(self.default_qos) as qos:
++                data = {'network': {ext_qos.QOS: qos['qos']['id']}}
++                req = self.new_update_request('networks', data,
++                                              n['network']['id'])
++                res = self.deserialize(self.fmt, req.get_response(self.api))
++                self.assertEqual(res['network'][ext_qos.QOS], qos['qos']['id'])
++
++                with self.qos(self.update_qos) as new_qos:
++                    data['network'][ext_qos.QOS] = new_qos['qos']['id']
++                    req = self.new_update_request('networks',
++                                                  data,
++                                                  n['network']['id'])
++                    res = self.deserialize(self.fmt,
++                                           req.get_response(self.api))
++                    self.assertNotEqual(res['network'][ext_qos.QOS],
++                                        qos['qos']['id'])
++                    self.assertEqual(res['network'][ext_qos.QOS],
++                                     new_qos['qos']['id'])
++
++    def test_update_mapping_for_port(self):
++        with self.network() as n:
++            with self.subnet(n):
++                with self.qos(self.default_qos) as qos:
++                    res = self._create_port(self.fmt, n['network']['id'])
++                    port = self.deserialize(self.fmt, res)
++                    data = {'port': {'fixed_ips': port['port']['fixed_ips'],
++                                     'name': port['port']['name'],
++                                     ext_qos.QOS: qos['qos']['id']}}
++                    req = self.new_update_request('ports', data,
++                                                  port['port']['id'])
++                    res = self.deserialize(self.fmt,
++                                           req.get_response(self.api))
++
++                    with self.qos(self.update_qos) as new_qos:
++                        data['port'][ext_qos.QOS] = new_qos['qos']['id']
++                        req = self.new_update_request('ports', data,
++                                                      port['port']['id'])
++                        res = self.deserialize(self.fmt, req.get_response(
++                                               self.api))
++                        self.assertNotEqual(res['port'][ext_qos.QOS],
++                                            qos['qos']['id'])
++                        self.assertEqual(res['port'][ext_qos.QOS],
++                                         new_qos['qos']['id'])
++                self._delete('ports', res['port']['id'])
++
++    def test_update_qos(self):
++        with self.qos(self.default_qos) as qos:
++            data = {'qos': self.update_qos}
++            res = self.new_update_request('wrs-tm/qoses',
++                                          data, qos['qos']['id'])
++            qos_resp = self.deserialize(self.fmt,
++                                        res.get_response(self.ext_api))
++            self.assertNotEqual(qos_resp['qos']['policies'],
++                                self.default_qos['policies'])
++            self.assertEqual(qos_resp['qos']['policies'],
++                             self.update_qos['policies'])
+diff --git a/neutron/tests/unit/plugins/wrs/test_qos_rpc.py b/neutron/tests/unit/plugins/wrs/test_qos_rpc.py
+new file mode 100644
+index 0000000..17e8da0
+--- /dev/null
++++ b/neutron/tests/unit/plugins/wrs/test_qos_rpc.py
+@@ -0,0 +1,139 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++import mock
++
++from oslo_context import context as oslo_context
++
++from neutron.api.rpc.agentnotifiers import qos_rpc_agent_api
++from neutron.api.rpc.handlers import qos_rpc
++from neutron.db import qos_db
++from neutron.tests import base
++from neutron.tests.unit.plugins.wrs import test_extension_qos as test_qos
++
++
++QOS_BASE_PACKAGE = 'neutron.services.qos.drivers'
++OPENFLOW_DRIVER = QOS_BASE_PACKAGE + '.openflow.OpenflowQoSVlanDriver'
++
++
++class FakeQoSCallback(qos_db.QoSDbMixin):
++    pass
++
++
++class QoSServerRpcCallbackMixinTestCase(test_qos.QoSDBTestCase):
++    def setUp(self):
++        super(QoSServerRpcCallbackMixinTestCase, self).setUp()
++        self.rpc = FakeQoSCallback()
++
++
++class QoSServerRpcApiTestCase(base.BaseTestCase):
++    def setUp(self):
++        self.client_p = mock.patch.object(qos_rpc.n_rpc, "get_client")
++        self.client = self.client_p.start()
++        self.rpc = qos_rpc.QoSServerRpcApi('fake_topic')
++        self.mock_cctxt = self.rpc.client.prepare.return_value
++        self.ctxt = mock.ANY
++        super(QoSServerRpcApiTestCase, self).setUp()
++
++    def test_get_policy_for_qos(self):
++        self.rpc.get_policy_for_qos(self.ctxt, 'fake-qos')
++        self.mock_cctxt.call.assert_called_with(
++            self.ctxt, 'get_policy_for_qos', qos_id='fake-qos')
++
++    def test_get_qos_by_network(self):
++        self.rpc.get_qos_by_network(self.ctxt, 'fake-network')
++        self.mock_cctxt.call.assert_called_with(
++            self.ctxt, 'get_qos_by_network', network_id='fake-network')
++
++
++class QoSAgentRpcTestCase(base.BaseTestCase):
++    def setUp(self):
++        super(QoSAgentRpcTestCase, self).setUp()
++        self.ctxt = oslo_context.get_admin_context()
++        self.fake_policy = {"fake": "qos"}
++        rpc = mock.Mock()
++        rpc.get_policy_for_qos.return_value = self.fake_policy
++        self.agent = qos_rpc.QoSAgentRpc(self.ctxt, rpc)
++        self.agent.qos = mock.Mock()
++
++    def test_network_qos_deleted(self):
++        self.agent.network_qos_deleted(self.ctxt, 'fake-qos', 'fake-network')
++        self.agent.qos.delete_qos_for_network.assert_has_calls(
++            [mock.call('fake-network')])
++
++    def test_network_qos_updated(self):
++        self.agent.network_qos_updated(self.ctxt, 'fake-qos', 'fake-network')
++        self.agent.plugin_rpc.get_policy_for_qos.assert_has_calls(
++            [mock.call(self.ctxt, 'fake-qos')])
++        self.agent.qos.network_qos_updated.assert_has_calls(
++            [mock.call(self.fake_policy, 'fake-network')])
++
++    def test_port_qos_updated(self):
++        self.agent.port_qos_updated(self.ctxt, 'fake-qos', 'fake-port')
++        self.agent.qos.port_qos_updated.assert_has_calls(
++            [mock.call(self.fake_policy, 'fake-port')])
++
++    def test_port_qos_deleted(self):
++        self.agent.port_qos_deleted(self.ctxt, 'fake-qos', 'fake-port')
++        self.agent.qos.delete_qos_for_port.assert_has_calls(
++            [mock.call('fake-port')])
++
++
++class QoSAgentRpcApiMixinTestCase(base.BaseTestCase):
++    def setUp(self):
++        super(QoSAgentRpcApiMixinTestCase, self).setUp()
++        self.ctxt = oslo_context.get_admin_context()
++        self.notifier = qos_rpc_agent_api.QoSAgentNotifyAPI(topic='fake-topic')
++        self.cctxt = mock.Mock().start()
++        self.cctxt.cast.return_value = None
++
++    def test_network_qos_updated(self):
++        with mock.patch.object(self.notifier.client,
++                               'prepare', return_value=self.cctxt):
++            self.notifier.network_qos_updated(self.ctxt,
++                                              network_id='fake-network',
++                                              qos_id='fake-qos')
++            self.cctxt.cast.assert_has_calls(
++                [mock.call(self.ctxt, 'network_qos_updated',
++                           qos_id='fake-qos', network_id='fake-network')])
++
++    def test_network_qos_deleted(self):
++        with mock.patch.object(self.notifier.client,
++                               'prepare', return_value=self.cctxt):
++            self.notifier.network_qos_deleted(self.ctxt,
++                                              network_id='fake-network',
++                                              qos_id='fake-qos')
++            self.cctxt.cast.assert_has_calls(
++                [mock.call(self.ctxt, 'network_qos_deleted',
++                           qos_id='fake-qos', network_id='fake-network')])
++
++    def test_port_qos_deleted(self):
++        with mock.patch.object(self.notifier.client,
++                               'prepare', return_value=self.cctxt):
++            self.notifier.port_qos_deleted(self.ctxt,
++                                           port_id='fake-port',
++                                           qos_id='fake-qos')
++            self.cctxt.cast.assert_has_calls(
++                [mock.call(self.ctxt, 'port_qos_deleted',
++                           qos_id='fake-qos', port_id='fake-port')])
++
++    def test_port_qos_updated(self):
++        with mock.patch.object(self.notifier.client,
++                               'prepare', return_value=self.cctxt):
++            self.notifier.port_qos_updated(self.ctxt,
++                                           port_id='fake-port',
++                                           qos_id='fake-qos')
++            self.cctxt.cast.assert_has_calls(
++                [mock.call(self.ctxt, 'port_qos_updated',
++                           qos_id='fake-qos', port_id='fake-port')])
+-- 
+2.7.4
+

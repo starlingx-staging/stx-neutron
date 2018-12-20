@@ -1,0 +1,24 @@
+From 4052d9d62aad97696da35af12083b8affe343e90 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 9 Feb 2018 07:33:17 -0600
+Subject: [PATCH 130/155] fixup! avs: remove support for external bridges
+
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 4b29b5a..c82d5d2 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -2438,7 +2438,6 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         which tenant network the device was attached to.  For SDN all ports are
+         attached to the integration bridge (br-int).
+         """
+-        device_owner = port_details['device_owner']
+         network_name = cfg.CONF.SDN.integration_bridge_name
+         network_uuid = self.vswitch_mgr.get_openflow_bridge_uuid(
+             network_name)
+-- 
+2.7.4
+

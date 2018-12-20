@@ -1,0 +1,44 @@
+From 1e9a0898a79dd5855ad374f69aff31fa71c67bd3 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 27 Aug 2015 16:28:25 -0400
+Subject: [PATCH 035/155] CGTS-2408: bypass policy check when setting attribute
+ to None
+
+There are policy checks that enforce that an attribute can only be set to a
+particular value if the user has permission to access the object referenced by
+the new value.  For example, if network['wrs-tm:qos'] = abc then this is only
+allowed if the user has permission to query the object referenced by 'abc'.
+When a user wants to clear an attribute, network['wrs-tm:qos'] = None, the
+policy check still runs but since a resource of 'None' cannot be retrieved it
+is not possible to check whether the user has access to it.  Instead an
+exception is thrown as no resource is found for None.
+
+This commit changes the policy check such that the check is bypassed if the new
+attribute value is None.
+
+Conflicts:
+	neutron/policy.py
+---
+ neutron/policy.py | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/neutron/policy.py b/neutron/policy.py
+index 29effa6..f46922e 100644
+--- a/neutron/policy.py
++++ b/neutron/policy.py
+@@ -275,6 +275,12 @@ class OwnerCheck(policy.Check):
+                     policy="%s:%s" % (self.kind, self.match),
+                     reason=err_reason)
+ 
++            if target[parent_foreign_key] is None:
++                # The API user is trying to clear an attribute back to None
++                # therefore there is no point in doing a policy check on "None"
++                # as no resource will be found and an exception will be thrown.
++                return True
++
+             target[self.target_field] = self._extract(
+                 parent_res, target[parent_foreign_key], parent_field)
+ 
+-- 
+2.7.4
+

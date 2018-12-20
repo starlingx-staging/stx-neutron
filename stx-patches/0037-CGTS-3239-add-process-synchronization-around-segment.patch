@@ -1,0 +1,57 @@
+From e490b5a85513798e830057f3cff74ede3b342013 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 11 Dec 2015 08:43:25 -0500
+Subject: [PATCH 037/155] CGTS-3239: add process synchronization around segment
+ allocation
+
+When running rally testcases in parallel against the network creation API it is
+possible to encounter errors while attempting to update a segmentation
+allocation record in the DB.  This results from querying the database to find a
+free entry and then updating the tuple in independent operations without any
+sort of mutual exclusion over multiple users.  Since the neutron API is
+implemented with multiple child processes it is possible that a collision will
+occur when two processes attempt to access the same DB tuple.
+
+In upstream they attempted to address this by changing the segmentation
+allocation to be random so that the probability of 2 processes accessing the
+same record is lessened but it does not completely eliminate the possibility.
+In our environment we allocate sequentially so the likelyhood of this occurring
+is even greater.  We allocate sequentially to facilitate predictable network
+setup order.
+
+This change will effectively serialize all child processes that are attempting
+to allocate a new segmentation id from the database.
+
+The first attempt at fixing this put the @synchronized() decorator on the
+function that does the actual DB operation, but since the DB transaction
+originates from several procedure calls up the stack it did not completely
+solve the problem.  The reason being that even though the function was
+serialized subsequent callers still had a stale view of the DB because their
+transaction started before the first process released the lock.  This means
+that the second process still attempts to take a record that has already been
+taken but is not yet visible in its' transaction.  We had to resort to making
+create_network() and subnet_network() both completely serialized from start to
+finish in order to cover the entire transaction and ensure that all
+segmentation id table operations were serialized.
+
+Conflicts:
+	neutron/plugins/ml2/plugin.py
+---
+ neutron/plugins/ml2/plugin.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 0d71df4..fdc9719 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -1060,6 +1060,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+ 
+     @utils.transaction_guard
+     @db_api.retry_if_session_inactive()
++    @utils.synchronized('segment-allocation', external=True)
+     def create_network(self, context, network):
+         self._before_create_network(context, network)
+         result, mech_context = self._create_network_db(context, network)
+-- 
+2.7.4
+

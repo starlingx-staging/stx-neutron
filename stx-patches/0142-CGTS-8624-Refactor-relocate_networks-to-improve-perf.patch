@@ -1,0 +1,108 @@
+From 1693dc324c18f7d866c820c8e347d03f2a498633 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 23 Feb 2018 15:05:01 -0500
+Subject: [PATCH 142/155] CGTS-8624: Refactor relocate_networks to improve
+ performance
+
+Previously, relocate_networks would iterate through each network, and
+relocate them in sequence.  This would result in many duplicated calls,
+and unneccesary work being done.  On AIO systems with few platform cores
+configured, this could result in multiple seconds per network being relocated.
+In the case of systems with large numbers of networks, this sequential
+relocation could exceed 40 seconds, resulting in VIM timing out in disabling
+neutron services, which causes the lock to fail.
+
+This commit refactors relocate_networks to bulk operation where possible,
+and moves away from unnecessary operations when updating the port.  These
+changes siginifcantly reduce the time spent relocating the networks from
+an agent, which cuts the time to disable neutron services, so VIM is no
+longer timing out in the lock.
+---
+ neutron/db/agentschedulers_db.py | 40 ++++++++++++++++++++++++++++++++++++++--
+ neutron/db/hosts_db.py           |  2 +-
+ 2 files changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/db/agentschedulers_db.py b/neutron/db/agentschedulers_db.py
+index 63af445..64ac2e8 100644
+--- a/neutron/db/agentschedulers_db.py
++++ b/neutron/db/agentschedulers_db.py
+@@ -42,6 +42,7 @@ from neutron.common import utils
+ from neutron.db import agents_db
+ from neutron.db.availability_zone import network as network_az
+ from neutron.db.models import agent as agent_model
++from neutron.db import models_v2
+ from neutron.db.network_dhcp_agent_binding import models as ndab_model
+ from neutron.extensions import agent as ext_agent
+ from neutron.extensions import dhcpagentscheduler
+@@ -564,7 +565,7 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+                     context, network['id'], agent['host'])
+         return agents
+ 
+-    def relocate_networks(self, context, agent_id):
++    def relocate_networks(self, context, agent):
+         """Remove networks from given agent and attempt to reschedule to a
+         different agent.  This function assumes that it whatever condition led
+         to needing to relocate the networks away from the agent will also
+@@ -572,10 +573,45 @@ class DhcpAgentSchedulerDbMixin(dhcpagentscheduler
+         agent/host state changes must be persisted to the database before
+         invoking this function.
+         """
++        agent_id = agent['id']
+         result = self.list_networks_on_dhcp_agent(context, agent_id)
+         networks = result.get('networks')
++
++        device_id = utils.get_dhcp_agent_device_id("%", agent['host'])
++        with context.session.begin():
++            # Reserve all the DHCP ports for networks on this agent,
++            # so that the ips are reused on subsequent adds.
++            query = context.session.query(models_v2.Port)
++            query = query.filter(
++                models_v2.Port.device_id.like(device_id)
++            )
++            query.update({'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT},
++                         synchronize_session=False)
++
++            # Delete all the dhcp network bindings for this agent.
++            query = context.session.query(ndab_model.NetworkDhcpAgentBinding)
++            query = query.filter(
++                ndab_model.NetworkDhcpAgentBinding.dhcp_agent_id == agent_id
++            )
++            query.delete(synchronize_session=False)
++
++        # Iterate through networks on the agent, notifying the guest that each
++        # network is removed, and then reschedule the network to a new agent.
++        dhcp_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_DHCP)
+         for network in networks:
+-            self._relocate_network(context, agent_id, network)
++            network_id = network['id']
++            if dhcp_notifier:
++                dhcp_notifier.network_removed_from_agent(
++                    context, network_id, agent['host'])
++            new_agents = self.schedule_network(context, network)
++            if not new_agents:
++                LOG.warning(("Relocation of network {} has failed").format(
++                    network_id))
++                continue
++            elif dhcp_notifier:
++                for new_agent in new_agents:
++                    dhcp_notifier.network_added_to_agent(
++                        context, network_id, new_agent['host'])
+ 
+     def _can_dhcp_agent_host_network(self, context, agent, network_id):
+         """Return true if the agent specified can host the network.
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 53014c7..41ad445 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -654,7 +654,7 @@ class HostSchedulerDbMixin(HostDbMixin):
+     def _relocate_agent(self, context, agent):
+         if agent['topic'] == topics.DHCP_AGENT:
+             plugin = directory.get_plugin()
+-            plugin.relocate_networks(context, agent['id'])
++            plugin.relocate_networks(context, agent)
+         elif agent['topic'] == topics.L3_AGENT:
+             plugin = directory.get_plugin(plugin_constants.L3)
+             if utils.is_extension_supported(
+-- 
+2.7.4
+

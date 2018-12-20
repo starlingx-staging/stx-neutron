@@ -1,0 +1,163 @@
+From b0c6a9eaa94705b9b25dea80b41c7073ccd6fcb2 Mon Sep 17 00:00:00 2001
+From: venkata anil <anilvenkata@redhat.com>
+Date: Tue, 19 Sep 2017 07:41:19 +0000
+Subject: [PATCH 110/155] tempest: check router interface exists before ssh
+
+As explained in the bug, tempest DVR and HA migration scenario
+tests are failing intermittently, as we are not checking if the
+new router interfaces are ready after migration and might try
+to use the old dataplane if the pre-migration router resources
+(like interfaces, namespaces, etc) still exist and are not yet
+destroyed.
+
+We need to check that the pre-migration router interfaces are
+deleted and the new interfaces are created and active (as we
+can't check namespace existence on other nodes, we rely on port
+status set by L2 agent after wiring the port) before
+attempting ssh connectivity.
+
+Conflicts:
+	neutron/tests/tempest/api/base.py
+
+Closes-Bug: 1714802
+Change-Id: I2a933d4cdd6de4e5ff31c8e3f97477819ba27afa
+(cherry picked from commit f5718972257cf229c8a9db0a5fc4349acbaade12)
+---
+ neutron/tests/tempest/api/base.py                |  4 +-
+ neutron/tests/tempest/scenario/test_migration.py | 73 ++++++++++++++++++++++++
+ 2 files changed, 76 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/tests/tempest/api/base.py b/neutron/tests/tempest/api/base.py
+index 6eb2986..883ffef 100644
+--- a/neutron/tests/tempest/api/base.py
++++ b/neutron/tests/tempest/api/base.py
+@@ -17,6 +17,7 @@ import functools
+ import math
+ 
+ import netaddr
++from neutron_lib import constants as const
+ from tempest.lib.common.utils import data_utils
+ from tempest.lib import exceptions as lib_exc
+ from tempest import test
+@@ -406,7 +407,8 @@ class BaseNetworkTest(test.BaseTestCase):
+     @classmethod
+     def delete_router(cls, router):
+         body = cls.client.list_router_interfaces(router['id'])
+-        interfaces = body['ports']
++        interfaces = [port for port in body['ports']
++                      if port['device_owner'] in const.ROUTER_INTERFACE_OWNERS]
+         for i in interfaces:
+             try:
+                 cls.client.remove_router_interface_with_subnet_id(
+diff --git a/neutron/tests/tempest/scenario/test_migration.py b/neutron/tests/tempest/scenario/test_migration.py
+index a78cc4a..08d3d19 100644
+--- a/neutron/tests/tempest/scenario/test_migration.py
++++ b/neutron/tests/tempest/scenario/test_migration.py
+@@ -13,11 +13,16 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ 
++import functools
++
+ from tempest.common import utils
+ from tempest.lib import decorators
+ 
++from neutron.common import utils as common_utils
+ from neutron.tests.tempest.scenario import base
+ from neutron.tests.tempest.scenario import test_dvr
++from neutron_lib.api.definitions import portbindings as pb
++from neutron_lib import constants as const
+ 
+ 
+ class NetworkMigrationTestBase(base.BaseTempestTestCase,
+@@ -36,12 +41,77 @@ class NetworkMigrationTestBase(base.BaseTempestTestCase,
+         self.assertEqual(is_dvr, router['router']['distributed'])
+         self.assertEqual(is_ha, router['router']['ha'])
+ 
++    def _wait_until_port_deleted(self, router_id, device_owner):
++        common_utils.wait_until_true(
++            functools.partial(
++                self._is_port_deleted,
++                router_id,
++                device_owner),
++            timeout=300, sleep=5)
++
++    def _is_port_deleted(self, router_id, device_owner):
++        ports = self.os_admin.network_client.list_ports(
++            device_id=router_id,
++            device_owner=device_owner)
++        return not ports.get('ports')
++
++    def _wait_until_port_ready(self, router_id, device_owner):
++        common_utils.wait_until_true(
++            functools.partial(
++                self._is_port_active,
++                router_id,
++                device_owner),
++            timeout=300, sleep=5)
++
++    def _is_port_active(self, router_id, device_owner):
++        ports = self.os_admin.network_client.list_ports(
++            device_id=router_id,
++            device_owner=device_owner,
++            status=const.ACTIVE).get('ports')
++        if ports:
++            if ports[0][pb.VIF_TYPE] not in [pb.VIF_TYPE_UNBOUND,
++                                             pb.VIF_TYPE_BINDING_FAILED]:
++                return True
++        return False
++
++    def _wait_until_router_ports_ready(self, router_id, dvr, ha):
++        if dvr:
++            self._wait_until_port_ready(
++                router_id, const.DEVICE_OWNER_DVR_INTERFACE)
++        if ha:
++            self._wait_until_port_ready(
++                router_id, const.DEVICE_OWNER_ROUTER_HA_INTF)
++            if dvr:
++                self._wait_until_port_ready(
++                    router_id, const.DEVICE_OWNER_ROUTER_SNAT)
++            else:
++                self._wait_until_port_ready(
++                    router_id, const.DEVICE_OWNER_HA_REPLICATED_INT)
++        self._wait_until_port_ready(
++            router_id, const.DEVICE_OWNER_ROUTER_GW)
++
++    def _wait_until_router_ports_migrated(
++            self, router_id, before_dvr, before_ha, after_dvr, after_ha):
++        if before_ha and not after_ha:
++            self._wait_until_port_deleted(
++                router_id, const.DEVICE_OWNER_ROUTER_HA_INTF)
++            self._wait_until_port_deleted(
++                    router_id, const.DEVICE_OWNER_HA_REPLICATED_INT)
++        if before_dvr and not after_dvr:
++            self._wait_until_port_deleted(
++                router_id, const.DEVICE_OWNER_DVR_INTERFACE)
++            self._wait_until_port_deleted(
++                router_id, const.DEVICE_OWNER_ROUTER_SNAT)
++        self._wait_until_router_ports_ready(router_id, after_dvr, after_ha)
++
+     def _test_migration(self, before_dvr, before_ha, after_dvr, after_ha):
+         router = self.create_router_by_client(
+             distributed=before_dvr, ha=before_ha,
+             tenant_id=self.client.tenant_id, is_admin=True)
+ 
+         self.setup_network_and_server(router=router)
++        self._wait_until_router_ports_ready(
++            router['id'], before_dvr, before_ha)
+         self._check_connectivity()
+ 
+         self.os_admin.network_client.update_router(
+@@ -52,6 +122,9 @@ class NetworkMigrationTestBase(base.BaseTempestTestCase,
+ 
+         self.os_admin.network_client.update_router(
+             router_id=router['id'], admin_state_up=True)
++
++        self._wait_until_router_ports_migrated(
++            router['id'], before_dvr, before_ha, after_dvr, after_ha)
+         self._check_connectivity()
+ 
+ 
+-- 
+2.7.4
+

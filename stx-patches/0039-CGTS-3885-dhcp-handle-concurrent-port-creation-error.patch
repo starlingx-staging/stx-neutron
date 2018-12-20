@@ -1,0 +1,192 @@
+From a38f899b87e5c2a04097bc397c1726bd2ae69f73 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 19 Feb 2016 12:41:54 -0500
+Subject: [PATCH 039/155] CGTS-3885: dhcp: handle concurrent port creation
+ errors
+
+Running tempest nose tests exposes a race condition between the server
+deleting a subnet and an agent creating a DHCP port.  This problem manifests
+itself in different ways depending on the whether the error is returned to the
+subnet delete operation or the DHCP port creation.
+
+This Jira (3885) addresses how the error is handled by the agent when the
+subnet is concurrently deleted at the server.  The changes to address the error
+that is returned to the API client are in CGTS-3432.
+
+Because of how the server and agents are designed there is a lack of
+determinism in how this particular issue manifests itself.  The variants
+manifest themselves based on when the subnet is deleted in relation to when the
+port is created.
+
+  1) if the port is returned with no fixed IP address then this results in the
+  agent failing to setup the default route in the namespace because there is no
+  local IP address to use to contact the gateway IP address.
+
+  2) if the port is updated after creation to no longer have an IP address then
+  'reload_allocations' action is invoked instead of the 'disabled' action.
+  This leads to a failure to reenable because the subnet no longer exits.
+
+  3) if doing a 'disable' action it is possible that previous 'restart',
+  'enable', or 'reload' actions did not get far enough to create the
+  namespace.  For this reason we should not throw an error if the namespace
+  does not exist.
+
+  4) if attempting a 'reload_allocations' we should fail the request if the
+  namespace does not exist.
+
+  5) if attempting a 'reload_allocations' with retain_port=True we should not
+  delete the configuration files because the vswitch port name is stored in the
+  'interface' file.  If an error occurs during the enable action we will not be
+  able to 'unplug' the port from the vswitch because we will not know which
+  name to use during the 'unplug'.  This will leak ports in the vswitch.
+
+Conflicts:
+	neutron/agent/linux/dhcp.py
+	neutron/tests/unit/agent/linux/test_dhcp.py
+
+Conflicts:
+	neutron/agent/linux/dhcp.py
+---
+ neutron/agent/dhcp/agent.py                 |  2 ++
+ neutron/agent/linux/dhcp.py                 | 22 ++++++++++------
+ neutron/tests/unit/agent/linux/test_dhcp.py | 39 +++++++++++++++--------------
+ 3 files changed, 37 insertions(+), 26 deletions(-)
+
+diff --git a/neutron/agent/dhcp/agent.py b/neutron/agent/dhcp/agent.py
+index d3a0ac3..be471c1 100644
+--- a/neutron/agent/dhcp/agent.py
++++ b/neutron/agent/dhcp/agent.py
+@@ -535,6 +535,8 @@ class DhcpAgent(manager.Manager):
+                     LOG.debug("Agent IPs on network %s changed from %s to %s",
+                               network.id, old_ips, new_ips)
+                     driver_action = 'restart'
++                elif not old_ips and not new_ips:
++                    driver_action = 'disable'
+             self.cache.put_port(updated_port)
+             # NOTE(alegacy): the port may no longer have any IP addresses so if
+             # that's the case we need to use the old ones in order to determine
+diff --git a/neutron/agent/linux/dhcp.py b/neutron/agent/linux/dhcp.py
+index e4d7b12..95c6469 100644
+--- a/neutron/agent/linux/dhcp.py
++++ b/neutron/agent/linux/dhcp.py
+@@ -274,7 +274,7 @@ class DhcpLocalProcess(DhcpBase):
+         self._get_process_manager().disable()
+         if not retain_port:
+             self._destroy_namespace_and_port()
+-        self._remove_config_files()
++            self._remove_config_files()
+ 
+     def _destroy_namespace_and_port(self):
+         try:
+@@ -287,13 +287,11 @@ class DhcpLocalProcess(DhcpBase):
+         if not ns_ip.netns.exists(self.network.namespace):
+             LOG.debug("Namespace already deleted: %s", self.network.namespace)
+             return
+-        if not ns_ip.namespace_is_empty():
+-            # Since the namespace is shared amongst all of the VLAN
+-            # tagged subnets on the network do not delete it unless no
+-            # other subnets are using it
+-            return
+         try:
+-            ns_ip.netns.delete(self.network.namespace)
++            # Since the namespace is shared amongst all of the VLAN tagged
++            # subnets on the network do not delete it unless no other subnets
++            # are using it
++            ns_ip.garbage_collect_namespace()
+         except RuntimeError:
+             LOG.warning('Failed trying to delete namespace: %s',
+                         self.network.namespace)
+@@ -550,6 +548,10 @@ class Dnsmasq(DhcpLocalProcess):
+         self._output_addn_hosts_file()
+         self._output_opts_file()
+ 
++    def _namespace_created(self):
++        ip_wrapper = ip_lib.IPWrapper()
++        return ip_wrapper.netns.exists(self.network.namespace)
++
+     def reload_allocations(self):
+         """Rebuild the dnsmasq config and signal the dnsmasq to reload."""
+ 
+@@ -565,6 +567,10 @@ class Dnsmasq(DhcpLocalProcess):
+             LOG.debug('Agent does not have an interface on this network '
+                       'anymore, skipping reload: %s', self.network.id)
+             return
++        elif not self._namespace_created():
++            LOG.debug('Cannot reload allocations prior to namespace '
++                      'creation for network %s', self.network.id)
++            raise exceptions.Conflict()
+ 
+         self._release_unused_leases()
+         self._spawn_or_reload_process(reload_with_HUP=True)
+@@ -1480,6 +1486,8 @@ class DeviceManager(object):
+                      # we don't care about any ips on subnets irrelevant
+                      # to us (e.g. auto ipv6 addresses)
+                      if fixed_ip.subnet_id in dhcp_subnets]
++        if not fixed_ips and not self.driver.use_gateway_ips:
++            raise exceptions.Conflict()
+ 
+         ips = [DictModel(item) if isinstance(item, dict) else item
+                for item in fixed_ips]
+diff --git a/neutron/tests/unit/agent/linux/test_dhcp.py b/neutron/tests/unit/agent/linux/test_dhcp.py
+index 442312b..de65760 100644
+--- a/neutron/tests/unit/agent/linux/test_dhcp.py
++++ b/neutron/tests/unit/agent/linux/test_dhcp.py
+@@ -1093,11 +1093,10 @@ class TestDhcpLocalProcess(TestBase):
+             lp = LocalChild(self.conf, FakeDualNetwork())
+             with mock.patch('neutron.agent.linux.ip_lib.IPWrapper') as ip:
+                 lp.disable()
++                ip.assert_has_calls([mock.call().garbage_collect_namespace()])
+ 
+             self._assert_disabled(lp)
+ 
+-        ip.return_value.netns.delete.assert_called_with('qdhcp-ns')
+-
+     def test_disable_config_dir_removed_after_destroy(self):
+         parent = mock.MagicMock()
+         parent.attach_mock(self.rmtree, 'rmtree')
+@@ -1824,23 +1823,25 @@ class TestDnsmasq(TestBase):
+          exp_addn_name, exp_addn_data,
+          exp_opt_name, exp_opt_data,) = self._test_reload_allocation_data
+ 
+-        net = FakeDualNetwork()
+-        hpath = '/dhcp/%s/host' % net.id
+-        ipath = '/dhcp/%s/interface' % net.id
+-        self.useFixture(tools.OpenFixture(hpath))
+-        self.useFixture(tools.OpenFixture(ipath, 'tapdancingmice'))
+-        test_pm = mock.Mock()
+-        dm = self._get_dnsmasq(net, test_pm)
+-        dm.reload_allocations()
+-        self.assertTrue(test_pm.register.called)
+-        self.external_process().enable.assert_called_once_with(
+-            reload_cfg=True)
+-
+-        self.safe.assert_has_calls([
+-            mock.call(exp_host_name, exp_host_data),
+-            mock.call(exp_addn_name, exp_addn_data),
+-            mock.call(exp_opt_name, exp_opt_data),
+-        ])
++        with mock.patch.object(dhcp.Dnsmasq, '_namespace_created') as created:
++            created.return_value = True
++            net = FakeDualNetwork()
++            hpath = '/dhcp/%s/host' % net.id
++            ipath = '/dhcp/%s/interface' % net.id
++            self.useFixture(tools.OpenFixture(hpath))
++            self.useFixture(tools.OpenFixture(ipath, 'tapdancingmice'))
++            test_pm = mock.Mock()
++            dm = self._get_dnsmasq(net, test_pm)
++            dm.reload_allocations()
++            self.assertTrue(test_pm.register.called)
++            self.external_process().enable.assert_called_once_with(
++                reload_cfg=True)
++
++            self.safe.assert_has_calls([
++                mock.call(exp_host_name, exp_host_data),
++                mock.call(exp_addn_name, exp_addn_data),
++                mock.call(exp_opt_name, exp_opt_data),
++            ])
+ 
+     def test_release_unused_leases(self):
+         dnsmasq = self._get_dnsmasq(FakeDualNetwork())
+-- 
+2.7.4
+

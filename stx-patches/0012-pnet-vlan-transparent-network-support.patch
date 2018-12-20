@@ -1,0 +1,545 @@
+From 9b22f6715c1b7e97b549aefca13c3986cecdf29d Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 8 Jul 2015 14:18:41 -0400
+Subject: [PATCH 012/155] pnet: vlan transparent network support
+
+The Kilo release of Neutron has introduced the concept of vlan transparent
+networks.  A vlan transparent network is a network that is capable of carrying
+VLAN tagged packets from a VM instance.  Normally these packets are discarded
+in normal openstack installations.  In our previous implementation we allowed a
+customer to define a Neutron subnet with a VLAN tag.  This allowed a VM to
+send/receive traffic on predefined VLAN instances.
+
+For each such subnet we allocate a new provider network segment to isolate that
+VLAN traffic from other layer2 network traffic.  In the previous implemenation
+AVS stripped the guest VLAN tag and re-tagged the packet with the allocated
+provider network segment VLAN or VXLAN instance.  This re-tagging is
+transparent to the guest and is implemented similar to how physical switches
+implement customer-mapped VLANs.
+
+To align with the new vlan transparent network feature we have added support in
+AVS to allow arbitrary VLAN tagged packets from the VM to be encapsulated on
+the provider network.  That is, if the provider network is VLAN based the final
+egress packet will be double VLAN tagged.  If the provider network is VXLAN
+based the final egress packet will have an inner VLAN tag and an outer VXLAN
+header.   This solution allows a VM to send/receive arbitrary VLAN tagged
+packets without first predefining a neutron subnet.  However, there is no
+support for openstack virtual routers, meta data servers, or DHCP servers on
+these arbitrary VLAN segments.  If routers, meta data servers, or DHCP servers
+are required it is recommended to use the previously VLAN tagged subnet
+implementation.
+
+In our version of the ML2 plugin we have extended our providernet
+implementation to have an attribute to register whether it supports passing
+guest VLAN tagged packets as-is over the network.  This allows the operator the
+control of allowing VLAN transparent networks on some, all, or none of its
+provider networks.  We then changed the type drivers to allocate an appropriate
+provider segment based on a tenant's request to create a vlan transparent
+network.  If a network with the vlan transparent flag is created it will only
+be allowed if there is an available providernet that allows vlan transparency.
+
+A network can be requested to allow VLAN tagged packets like this:
+
+   neutron net-create my-network --vlan-transparent=True
+
+But first at least one provider network must be created with permissions to
+allow vlan transparent networks like this:
+
+   neutron providernet-create my-providernet --type vlan --vlan-transparent=True
+
+Conflicts:
+	neutron/db/migration/alembic_migrations/versions/HEAD
+	neutron/plugins/ml2/drivers/mech_sriov/mech_driver/mech_driver.py
+	neutron/tests/unit/extensions/test_vlantransparent.py
+
+Conflicts:
+	neutron/plugins/ml2/managers.py
+	neutron/plugins/ml2/rpc.py
+---
+ .../433d66aa0f74_vlan_transparent_providernet.py   | 40 +++++++++++++++
+ .../wrs_kilo_shipped/expand/wrs_kilo_shipped.py    |  4 +-
+ .../ca1fb1471d20_provider_network_table_updates.py | 48 ++++++++++++++++++
+ .../wrs_mitaka/expand/wrs_mitaka_release.py        |  4 +-
+ neutron/db/providernet_db.py                       | 24 ++++++---
+ neutron/extensions/vlantransparent.py              |  1 +
+ neutron/extensions/wrs_provider.py                 |  4 ++
+ neutron/plugins/ml2/managers.py                    | 10 +++-
+ neutron/plugins/ml2/rpc.py                         |  1 +
+ neutron/plugins/wrs/drivers/type_generic.py        | 10 ++--
+ neutron/tests/unit/plugins/ml2/test_plugin.py      |  6 ++-
+ .../tests/unit/plugins/wrs/test_extension_pnet.py  | 58 ++++++++++++++++++----
+ 12 files changed, 183 insertions(+), 27 deletions(-)
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/433d66aa0f74_vlan_transparent_providernet.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py
+
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/433d66aa0f74_vlan_transparent_providernet.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/433d66aa0f74_vlan_transparent_providernet.py
+new file mode 100644
+index 0000000..709efbc
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/433d66aa0f74_vlan_transparent_providernet.py
+@@ -0,0 +1,40 @@
++# Copyright 2015 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++
++"""vlan_transparent_providernet
++
++Revision ID: 433d66aa0f74
++Revises: 5018b7ad4223
++Create Date: 2015-07-15 20:31:21.124839
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = '433d66aa0f74'
++down_revision = '5018b7ad4223'
++
++
++from alembic import op
++import sqlalchemy as sa
++
++
++def upgrade():
++    op.add_column('providernets',
++                  sa.Column('vlan_transparent', sa.Boolean(), nullable=True,
++                            default=False, server_default=sa.sql.false()))
++
++
++def downgrade():
++    op.drop_column('providernets', 'vlan_transparent')
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+index b6bb8e1..35d9322 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_kilo_shipped/expand/wrs_kilo_shipped.py
+@@ -22,14 +22,14 @@
+ """WRS Kilo Revision placeholder
+ 
+ Revision ID: wrs_kilo_shipped
+-Revises: 5018b7ad4223
++Revises: 433d66aa0f74
+ Create Date: 2016-05-25 00:00:01.000000
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_kilo_shipped'
+-down_revision = '5018b7ad4223'
++down_revision = '433d66aa0f74'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py
+new file mode 100644
+index 0000000..7cb6b8c
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/ca1fb1471d20_provider_network_table_updates.py
+@@ -0,0 +1,48 @@
++# Copyright 2016 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""Provider network table updates
++
++Revision ID: ca1fb1471d20
++Revises: f3ead3dada66
++Create Date: 2016-05-30 00:00:01.000000
++
++"""
++
++from alembic import op
++
++
++# revision identifiers, used by Alembic.
++revision = 'ca1fb1471d20'
++down_revision = 'f3ead3dada66'
++
++
++def upgrade():
++    # The original feature code specified the NULL constraint differently on
++    # the DB migration and DB model definitions.
++    op.alter_column('providernets', 'vlan_transparent', nullable=False)
++
++    # The original feature code had a descrepancy between the DB model (which
++    # has an index on tenant-id), and the DB migration code which did not have
++    # an index defined.  Defining one now after the fact to avoid migration
++    # warnings.
++    op.create_index('ix_providernet_ranges_tenant_id',
++                    'providernet_ranges', ['tenant_id'], unique=False)
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+index 572ce4c..116697b 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+@@ -22,14 +22,14 @@
+ """WRS Mitaka Revision placeholder
+ 
+ Revision ID: wrs_mitaka
+-Revises:f3ead3dada66
++Revises:ca1fb1471d20
+ Create Date: 2016-05-27 00:00:01.000000
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_mitaka'
+-down_revision = 'f3ead3dada66'
++down_revision = 'ca1fb1471d20'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 72b5375..5bb7874 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -142,6 +142,12 @@ class ProviderNet(model_base.BASEV2, model_base.HasId):
+     # any nodes)
+     status = sa.Column(sa.String(16))
+ 
++    # defines whether the provider network is capable of accepting vlan tagged
++    # packets from the tenant.
++    vlan_transparent = sa.Column(sa.Boolean, default=False,
++                                 server_default=sa.sql.false(),
++                                 nullable=False)
++
+     # provider network type
+     type = sa.Column(sa.Enum(constants.PROVIDERNET_FLAT,
+                              constants.PROVIDERNET_VLAN,
+@@ -157,18 +163,19 @@ class ProviderNet(model_base.BASEV2, model_base.HasId):
+         cascade="all, delete-orphan")
+ 
+     def __init__(self, id, name, description, status, type,
+-                 mtu=constants.DEFAULT_MTU):
++                 mtu=constants.DEFAULT_MTU, vlan_transparent=False):
+         self.id = id
+         self.name = name
+         self.description = description
+         self.status = status
+         self.type = type
+         self.mtu = mtu
++        self.vlan_transparent = vlan_transparent
+ 
+     def __repr__(self):
+-        return "<ProviderNet(%s,%s,%s,%s,%s,%s)>" % (
++        return "<ProviderNet(%s,%s,%s,%s,%s,%s,%s)>" % (
+             self.id, self.name, self.description,
+-            str(self.status), self.type, self.mtu)
++            str(self.status), self.type, self.mtu, self.vlan_transparent)
+ 
+ 
+ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+@@ -219,7 +226,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                'description': providernet['description'],
+                'type': providernet['type'],
+                'status': providernet['status'],
+-               'mtu': providernet['mtu']}
++               'mtu': providernet['mtu'],
++               'vlan_transparent': providernet['vlan_transparent']}
+         if providernet['type'] == constants.PROVIDERNET_VXLAN:
+             vxlan = providernet['ranges'][0]['vxlan']
+             res.update({'vxlan': {'group': vxlan['group'],
+@@ -264,7 +272,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         Find a combination of provider+[range+[vxlan]] based on the
+         segmentation id provided.  This will remove all unrelated ranges.
+         """
+-        if not id:
++        if type in [constants.PROVIDERNET_FLAT]:
+             return self._get_flat_providernet_segment_details(
+                 context, type, name)
+         else:
+@@ -296,7 +304,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                'description': providernet['description'],
+                'type': providernet['type'],
+                'status': providernet['status'],
+-               'mtu': providernet['mtu']}
++               'mtu': providernet['mtu'],
++               'vlan_transparent': providernet['vlan_transparent']}
+         res['ranges'] = [self._make_providernet_range_dict(r)
+                          for r in providernet['ranges']]
+         # filter out redundant fields
+@@ -326,7 +335,8 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             'name': providernet_data['name'],
+             'description': providernet_data['description'],
+             'mtu': providernet_data['mtu'],
+-            'status': constants.PROVIDERNET_DOWN}
++            'status': constants.PROVIDERNET_DOWN,
++            'vlan_transparent': providernet_data['vlan_transparent']}
+         self._validate_providernet(context, providernet)
+         with context.session.begin(subtransactions=True):
+             providernet = ProviderNet(**res)
+diff --git a/neutron/extensions/vlantransparent.py b/neutron/extensions/vlantransparent.py
+index 5613606..33c9cf5 100644
+--- a/neutron/extensions/vlantransparent.py
++++ b/neutron/extensions/vlantransparent.py
+@@ -36,6 +36,7 @@ EXTENDED_ATTRIBUTES_2_0 = {
+         VLANTRANSPARENT: {'allow_post': True, 'allow_put': False,
+                           'convert_to': converters.convert_to_boolean,
+                           'default': constants.ATTR_NOT_SPECIFIED,
++                          # TODO(alegacy): set to false?
+                           'is_visible': True},
+     },
+ }
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index abd5d20..c89359c 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -117,6 +117,10 @@ PROVIDERNET_ATTRIBUTES = {
+                 'validate': {'type:range': n_const.VALID_MTU_RANGE},
+                 'default': n_const.DEFAULT_MTU,
+                 'is_visible': True},
++        'vlan_transparent': {'allow_post': True, 'allow_put': True,
++                'convert_to': converters.convert_to_boolean,
++                'default': False,
++                'is_visible': True},
+         'tenant_id': {'allow_post': True, 'allow_put': False,
+                       'is_visible': False,
+                       'default': None},
+diff --git a/neutron/plugins/ml2/managers.py b/neutron/plugins/ml2/managers.py
+index 61b2970..5dcfe6e 100644
+--- a/neutron/plugins/ml2/managers.py
++++ b/neutron/plugins/ml2/managers.py
+@@ -231,6 +231,9 @@ class TypeManager(stevedore.named.NamedExtensionManager):
+         """Call type drivers to create network segments."""
+         segments = self._process_provider_create(context, network)
+         filters = {'tenant_id': tenant_id}
++
++        if self._get_attribute(network, 'vlan_transparent'):
++            filters['vlan_transparent'] = True
+         with db_api.context_manager.writer.using(context):
+             network_id = network['id']
+             if segments:
+@@ -594,7 +597,12 @@ class MechanismManager(stevedore.named.NamedExtensionManager):
+         to the caller, triggering a rollback. There is no guarantee
+         that all mechanism drivers are called in this case.
+         """
+-        self._check_vlan_transparency(context)
++        # FIXME(alegacy) this does not work when unit tests add dummy mech
++        # drivers for logging or tests and they have not properly overridden
++        # their check_vlan_transparency() method.  It also doesn't make sense
++        # that all mech drivers have to support vlan transparency for it to be
++        # allowed.
++        # self._check_vlan_transparency(context)
+         self._call_on_drivers("create_network_precommit", context,
+                               raise_db_retriable=True)
+ 
+diff --git a/neutron/plugins/ml2/rpc.py b/neutron/plugins/ml2/rpc.py
+index 7344c7d..2ebb3c4 100644
+--- a/neutron/plugins/ml2/rpc.py
++++ b/neutron/plugins/ml2/rpc.py
+@@ -204,6 +204,7 @@ class RpcCallbacks(type_tunnel.TunnelRpcCallbackMixin):
+                  'segmentation_id': segment[api.SEGMENTATION_ID],
+                  'physical_network': segment[api.PHYSICAL_NETWORK],
+                  'mtu': port_context.network._network.get('mtu'),
++                 'network': port_context.network.current,
+                  'subnets': subnets,
+                  'port_qos_policy': port_qos_policy,
+                  'network_qos_policy': network_qos_policy,
+diff --git a/neutron/plugins/wrs/drivers/type_generic.py b/neutron/plugins/wrs/drivers/type_generic.py
+index 727d132..f660822 100644
+--- a/neutron/plugins/wrs/drivers/type_generic.py
++++ b/neutron/plugins/wrs/drivers/type_generic.py
+@@ -229,6 +229,7 @@ class GenericRangeTypeDriver(helpers.SegmentTypeDriver,
+         set of possible segments to be used.
+         """
+         tenant_id = filters.pop('tenant_id', None)
++        vlan_transparent = filters.pop('vlan_transparent', None)
+         columns = set(dict(self.model.__table__.columns))
+         model_filters = dict((k, filters[k])
+                              for k in columns & set(filters.keys()))
+@@ -247,9 +248,12 @@ class GenericRangeTypeDriver(helpers.SegmentTypeDriver,
+                             pnet_db.ProviderNetRange.maximum))
+                  .filter(or_(pnet_db.ProviderNetRange.tenant_id == tenant_id,
+                              (pnet_db.ProviderNetRange.shared ==
+-                              sql.expression.true())))
+-                 .order_by(asc(pnet_db.ProviderNetRange.shared),
+-                           asc(self.model_key)))
++                              sql.expression.true()))))
++        if vlan_transparent:
++            query = (query.filter(pnet_db.ProviderNet.vlan_transparent ==
++                                  sql.expression.true()))
++        query = (query.order_by(asc(pnet_db.ProviderNetRange.shared),
++                                asc(self.model_key)))
+         return query
+ 
+     def validate_provider_segment(self, segment, context=None):
+diff --git a/neutron/tests/unit/plugins/ml2/test_plugin.py b/neutron/tests/unit/plugins/ml2/test_plugin.py
+index 096d1f8..1521798 100644
+--- a/neutron/tests/unit/plugins/ml2/test_plugin.py
++++ b/neutron/tests/unit/plugins/ml2/test_plugin.py
+@@ -439,7 +439,11 @@ class TestMl2NetworksWithVlanTransparency(
+     TestMl2NetworksWithVlanTransparencyBase):
+     _mechanism_drivers = ['test']
+ 
+-    def test_create_network_vlan_transparent_fail(self):
++    # FIXME(alegacy): disabling this test because it does not make sense that
++    # all mech drivers have to agree on whether vlan transparency is supported
++    # or not.  In our system that is managed on a per-provider network basis;
++    # not system wide.
++    def notest_create_network_vlan_transparent_fail(self):
+         with mock.patch.object(mech_test.TestMechanismDriver,
+                                'check_vlan_transparency',
+                                return_value=False):
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_pnet.py b/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+index 844795a..9d48a6f 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+@@ -92,7 +92,8 @@ VXLAN_PNET1_RANGE2 = {'name': 'vxlan-pnet0-1',
+ VXLAN_PNET2 = {'name': 'vxlan-pnet1',
+                'type': n_const.PROVIDERNET_VXLAN,
+                'mtu': n_const.DEFAULT_MTU - n_const.VXLAN_MTU_OVERHEAD,
+-               'description': 'vxlan test provider network'}
++               'description': 'vxlan test provider network',
++               'vlan_transparent': True}
+ 
+ VXLAN_PNET2_RANGE1 = {'name': 'vxlan-pnet1-0',
+                       'description': 'vxlan range1',
+@@ -134,7 +135,7 @@ class ProvidernetTestCaseMixin(object):
+     def _create_pnet(self, pnet):
+         data = {'providernet': {'name': pnet['name'],
+                                 'tenant_id': self._tenant_id}}
+-        for arg in ('name', 'type', 'mtu', 'description'):
++        for arg in ('name', 'type', 'mtu', 'description', 'vlan_transparent'):
+             if arg in pnet:
+                 data['providernet'][arg] = pnet[arg]
+         request = self.new_create_request('wrs-provider/providernets', data)
+@@ -209,6 +210,7 @@ class ProvidernetTestCase(ProvidernetTestCaseMixin,
+         config.cfg.CONF.set_override('host_driver',
+                                      'neutron.tests.unit.plugins.wrs.'
+                                      'test_host_driver.TestHostDriver')
++        config.cfg.CONF.set_override('vlan_transparent', True)
+ 
+     def setUp(self):
+         super(ProvidernetTestCase, self).setUp()
+@@ -389,6 +391,35 @@ class ProvidernetTestCase(ProvidernetTestCaseMixin,
+                         self.assertEqual(sdata[ext_pnet.SEGMENTATION_ID],
+                                          data['provider:segmentation_id'])
+ 
++    def test_create_vxlan_tenant_vlan_transparent_network(self):
++        with self.pnet(VXLAN_PNET1) as pnet1, \
++                self.pnet(VXLAN_PNET2) as pnet2:
++            pnet1_data = pnet1['providernet']
++            pnet2_data = pnet2['providernet']
++            with self.pnet_range(pnet1_data, VXLAN_PNET1_RANGE1), \
++                    self.pnet_range(pnet2_data, VXLAN_PNET2_RANGE1):
++                with self.network(
++                        arg_list=('vlan_transparent', ),
++                        vlan_transparent=True) as net:
++                    data = net['network']
++                    self.assertTrue(data['vlan_transparent'])
++                    self.assertEqual(data['provider:physical_network'],
++                                     VXLAN_PNET2['name'])
++                    self.assertEqual(data['provider:network_type'],
++                                     VXLAN_PNET2['type'])
++                    self.assertIsNotNone(data['provider:segmentation_id'])
++                    self.assertEqual(data['mtu'], pnet2_data['mtu'])
++
++    def test_create_vxlan_tenant_vlan_network_no_transparent_pnet(self):
++        with self.pnet(VXLAN_PNET1) as pnet:
++            pnet_data = pnet['providernet']
++            with self.pnet_range(pnet_data, VXLAN_PNET1_RANGE1):
++                self.assertReturnsApiError("NoNetworkAvailable",
++                                           self._create_network,
++                                           self.fmt, 'net1', True,
++                                           arg_list=('vlan_transparent',),
++                                           vlan_transparent=True)
++
+     def test_create_flat_tenant_net(self):
+         with self.pnet(FLAT_PNET1) as pnet:
+             pnet_data = pnet['providernet']
+@@ -506,6 +537,7 @@ class ProvidernetTestCase(ProvidernetTestCaseMixin,
+                 data['name'], None)
+             self.assertEqual(data['name'], result['name'])
+             self.assertEqual(n_const.PROVIDERNET_FLAT, result['type'])
++            self.assertFalse(result['vlan_transparent'])
+ 
+ 
+ class ProvidernetRangeTestCase(ProvidernetTestCaseMixin,
+@@ -544,6 +576,7 @@ class ProvidernetRangeTestCase(ProvidernetTestCaseMixin,
+                     VLAN_PNET1['name'], VLAN_PNET1_RANGE1['minimum'])
+                 self.assertEqual(VLAN_PNET1['name'], result['name'])
+                 self.assertEqual(n_const.PROVIDERNET_VLAN, result['type'])
++                self.assertFalse(result['vlan_transparent'])
+ 
+     def test_create_vlan_providernet_range_overlap_all(self):
+         with self.pnet(VLAN_PNET1) as pnet:
+@@ -661,25 +694,26 @@ class ProvidernetRangeTestCase(ProvidernetTestCaseMixin,
+                           pnet, VLAN_PNET1_RANGE1)
+ 
+     def test_create_vxlan_providernet_range(self):
+-        with self.pnet(VXLAN_PNET1) as pnet:
++        with self.pnet(VXLAN_PNET2) as pnet:
+             pnet_data = pnet['providernet']
+-            with self.pnet_range(pnet_data, VXLAN_PNET1_RANGE1) as pnet_range:
++            with self.pnet_range(pnet_data, VXLAN_PNET2_RANGE1) as pnet_range:
+                 data = pnet_range['providernet_range']
+-                self.assertEqual(data['name'], VXLAN_PNET1_RANGE1['name'])
++                self.assertEqual(data['name'], VXLAN_PNET2_RANGE1['name'])
+                 self.assertEqual(data['providernet_id'], pnet_data['id'])
+                 self.assertIsNotNone(data['id'])
+                 vxlan = data['vxlan']
+-                self.assertEqual(vxlan['group'], VXLAN_PNET1_RANGE1['group'])
+-                self.assertEqual(vxlan['port'], VXLAN_PNET1_RANGE1['port'])
+-                self.assertEqual(vxlan['ttl'], VXLAN_PNET1_RANGE1['ttl'])
++                self.assertEqual(vxlan['group'], VXLAN_PNET2_RANGE1['group'])
++                self.assertEqual(vxlan['port'], VXLAN_PNET2_RANGE1['port'])
++                self.assertEqual(vxlan['ttl'], VXLAN_PNET2_RANGE1['ttl'])
+                 ctxt = context.get_admin_context()
+                 result = self._plugin.get_providernet_segment_details(
+                     ctxt, n_const.PROVIDERNET_VXLAN,
+-                    VXLAN_PNET1['name'], VXLAN_PNET1_RANGE1['minimum'])
+-                self.assertEqual(VXLAN_PNET1['name'], result['name'])
++                    VXLAN_PNET2['name'], VXLAN_PNET2_RANGE1['minimum'])
++                self.assertEqual(VXLAN_PNET2['name'], result['name'])
+                 self.assertEqual(n_const.PROVIDERNET_VXLAN, result['type'])
+-                self.assertEqual(VXLAN_PNET1_RANGE1['group'],
++                self.assertEqual(VXLAN_PNET2_RANGE1['group'],
+                                  result['vxlan']['group'])
++                self.assertTrue(result['vlan_transparent'])
+ 
+     def test_create_vxlan_multiple_providernet_range(self):
+         with self.pnet(VXLAN_PNET1) as pnet:
+@@ -697,6 +731,7 @@ class ProvidernetRangeTestCase(ProvidernetTestCaseMixin,
+                                      result1['type'])
+                     self.assertEqual(VXLAN_PNET1_RANGE1['group'],
+                                      result1['vxlan']['group'])
++                    self.assertFalse(result1['vlan_transparent'])
+                     # Check that get_providernet_segment_details returns the
+                     # range data for the second range.
+                     result2 = self._plugin.get_providernet_segment_details(
+@@ -707,6 +742,7 @@ class ProvidernetRangeTestCase(ProvidernetTestCaseMixin,
+                                      result2['type'])
+                     self.assertEqual(VXLAN_PNET1_RANGE2['group'],
+                                      result2['vxlan']['group'])
++                    self.assertFalse(result2['vlan_transparent'])
+ 
+     def test_create_vxlan_providernet_range_minimum_ttl(self):
+         with self.pnet(VXLAN_PNET1) as pnet:
+-- 
+2.7.4
+

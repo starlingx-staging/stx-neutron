@@ -1,0 +1,180 @@
+From 2f6e201cf4872f35f79da095ef494eab13e152f7 Mon Sep 17 00:00:00 2001
+From: Brian Haley <bhaley@redhat.com>
+Date: Thu, 12 Oct 2017 15:25:26 -0400
+Subject: [PATCH 116/155] Support protocol numbers in security group API
+
+Somewhere along the way we broke supporting numbers in
+the security group API that were not in our known list
+of protocols.  In order to fix this properly we must
+use the correct arguments when using iptables-save, as
+it could use a name instead of a number, or vice-versa.
+Determined the list of mappings by doing:
+
+ for num in {0..255}; do iptables -A INPUT -p $num; done
+ # iptables-save
+
+Change-Id: I5895250b47ddf664d214cf085be693c3897e0c87
+Closes-bug: #1716045
+Closes-bug: #1716790
+(cherry picked from commit 7ff492c5bb9ce9f24f12db40c8e3a33beb47f87b)
+---
+ neutron/agent/linux/iptables_firewall.py           |  9 ++--
+ neutron/common/constants.py                        | 50 ++++++++++++++++++++++
+ neutron/objects/common_types.py                    |  2 +-
+ neutron/tests/unit/objects/test_common_types.py    | 20 +--------
+ ...group-protocol-by-numbers-48afb97ede961716.yaml |  8 ++++
+ 5 files changed, 66 insertions(+), 23 deletions(-)
+ create mode 100644 releasenotes/notes/fix-security-group-protocol-by-numbers-48afb97ede961716.yaml
+
+diff --git a/neutron/agent/linux/iptables_firewall.py b/neutron/agent/linux/iptables_firewall.py
+index bf2a8b8..7ac97b3 100644
+--- a/neutron/agent/linux/iptables_firewall.py
++++ b/neutron/agent/linux/iptables_firewall.py
+@@ -636,9 +636,12 @@ class IptablesFirewallDriver(firewall.FirewallDriver):
+     def _protocol_arg(self, protocol, is_port):
+         if not protocol:
+             return []
+-        if protocol == 'icmpv6':
+-            protocol = 'ipv6-icmp'
+-        iptables_rule = ['-p', protocol]
++        rule_protocol = protocol
++        if (protocol in n_const.IPTABLES_PROTOCOL_NAME_MAP):
++            rule_protocol = n_const.IPTABLES_PROTOCOL_NAME_MAP[protocol]
++        # protocol zero is a special case and requires no '-p'
++        if rule_protocol:
++            iptables_rule = ['-p', rule_protocol]
+ 
+         if (is_port and protocol in n_const.IPTABLES_PROTOCOL_MAP):
+             # iptables adds '-m protocol' when the port number is specified
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index 4fc17dd..62c0dcd 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -68,6 +68,56 @@ VALID_DSCP_MARKS = [0, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34,
+ IP_PROTOCOL_NUM_TO_NAME_MAP = {
+     str(v): k for k, v in lib_constants.IP_PROTOCOL_MAP.items()}
+ 
++# When using iptables-save we specify '-p {proto}',
++# but sometimes those values are not identical.  This is a map
++# of known protocol names or numbers that require a name change.
++# This legacy mapping can go away once neutron-lib is updated.
++IPTABLES_PROTOCOL_LEGACY_NUM_MAP = {3: 'ggp',
++                                    4: 'ipencap',
++                                    5: 'st',
++                                    9: 'igp',
++                                    12: 'pup',
++                                    20: 'hmp',
++                                    22: 'xns-idp',
++                                    27: 'rdp',
++                                    29: 'iso-tp4',
++                                    36: 'xtp',
++                                    37: 'ddp',
++                                    38: 'idpr-cmtp',
++                                    45: 'idrp',
++                                    57: 'skip',
++                                    73: 'rspf',
++                                    81: 'vmtp',
++                                    88: 'eigrp',
++                                    93: 'ax.25',
++                                    94: 'ipip',
++                                    97: 'etherip',
++                                    98: 'encap',
++                                    103: 'pim',
++                                    108: 'ipcomp',
++                                    115: 'lt2p',
++                                    124: 'isis',
++                                    133: 'fc',
++                                    135: 'mobility-header',
++                                    137: 'mpls-in-ip',
++                                    138: 'manet',
++                                    139: 'hip',
++                                    140: 'shim6',
++                                    141: 'wesp',
++                                    142: 'rohc'}
++
++# - protocol 0 uses no -p argument
++# - 'ipv6-encap' uses 'ipv6'
++# - 'icmpv6' uses 'ipv6-icmp'
++# - 'pgm' uses number 113 instead of its name
++IPTABLES_PROTOCOL_NAME_MAP = {0: None,
++                              lib_constants.PROTO_NAME_IPV6_ENCAP:
++                                  'ipv6',
++                              lib_constants.PROTO_NAME_IPV6_ICMP_LEGACY:
++                                  'ipv6-icmp',
++                              lib_constants.PROTO_NAME_PGM: '113'}
++IPTABLES_PROTOCOL_NAME_MAP.update(IPTABLES_PROTOCOL_LEGACY_NUM_MAP)
++
+ # When using iptables-save we specify '-p {proto} -m {module}',
+ # but sometimes those values are not identical.  This is a map
+ # of known protocols that require a '-m {module}', along with
+diff --git a/neutron/objects/common_types.py b/neutron/objects/common_types.py
+index dd4f8cc..d9f1e58 100644
+--- a/neutron/objects/common_types.py
++++ b/neutron/objects/common_types.py
+@@ -180,7 +180,7 @@ class IpProtocolEnum(obj_fields.Enum):
+             valid_values=list(
+                 itertools.chain(
+                     lib_constants.IP_PROTOCOL_MAP.keys(),
+-                    [str(v) for v in lib_constants.IP_PROTOCOL_MAP.values()]
++                    [str(v) for v in range(256)]
+                 )
+             ),
+             **kwargs)
+diff --git a/neutron/tests/unit/objects/test_common_types.py b/neutron/tests/unit/objects/test_common_types.py
+index 7463d8a..05fbdc7 100644
+--- a/neutron/tests/unit/objects/test_common_types.py
++++ b/neutron/tests/unit/objects/test_common_types.py
+@@ -13,7 +13,6 @@
+ 
+ import abc
+ import itertools
+-import random
+ 
+ from neutron_lib import constants as const
+ from neutron_lib.utils import net
+@@ -226,27 +225,10 @@ class IpProtocolEnumFieldTest(test_base.BaseTestCase, TestField):
+             (val, val)
+             for val in itertools.chain(
+                 const.IP_PROTOCOL_MAP.keys(),
+-                [str(v) for v in const.IP_PROTOCOL_MAP.values()]
++                [str(v) for v in range(256)]
+             )
+         ]
+         self.coerce_bad_values = ['test', 'Udp', 256]
+-        try:
+-            # pick a random protocol number that is not in the map of supported
+-            # protocols
+-            self.coerce_bad_values.append(
+-                str(
+-                    random.choice(
+-                        list(
+-                            set(range(256)) -
+-                            set(const.IP_PROTOCOL_MAP.values())
+-                        )
+-                    )
+-                )
+-            )
+-        except IndexError:
+-            # stay paranoid and guard against the impossible future when all
+-            # protocols are in the map
+-            pass
+         self.to_primitive_values = self.coerce_good_values
+         self.from_primitive_values = self.coerce_good_values
+ 
+diff --git a/releasenotes/notes/fix-security-group-protocol-by-numbers-48afb97ede961716.yaml b/releasenotes/notes/fix-security-group-protocol-by-numbers-48afb97ede961716.yaml
+new file mode 100644
+index 0000000..f4b65be
+--- /dev/null
++++ b/releasenotes/notes/fix-security-group-protocol-by-numbers-48afb97ede961716.yaml
+@@ -0,0 +1,8 @@
++---
++fixes:
++  - |
++    Adding security group rules by protocol number is documented,
++    but somehow was broken without being noticed in one of the
++    last couple of releases.  This is now fixed.  For more
++    information see bug
++    `1716045 <https://bugs.launchpad.net/neutron/+bug/1716045>`_.
+-- 
+2.7.4
+

@@ -1,0 +1,67 @@
+From 47ec1c3f7664d0730b895c5a388835a1263dc927 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Mon, 6 Nov 2017 15:31:29 -0600
+Subject: [PATCH 067/155] CGTS-7771: l3_agentschedulers: send update instead of
+ remove for dvr
+
+When a router is rescheduled the normal method is to send a 'removed'
+notification to the old agent and then an 'added' notification to the new
+agent.  For DVR that is too harsh as the old agent may still need to keep the
+router in a non-master role to service any VM ports that exist on that host
+while the new agent handles the maste role of the router (i.e., the centralized
+components of the router).
+---
+ neutron/db/l3_agentschedulers_db.py | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/db/l3_agentschedulers_db.py b/neutron/db/l3_agentschedulers_db.py
+index ca1542d..8e51115 100644
+--- a/neutron/db/l3_agentschedulers_db.py
++++ b/neutron/db/l3_agentschedulers_db.py
+@@ -292,6 +292,27 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+                                                cur_agents, new_agents)
+         return new_agents
+ 
++    def _retain_router_when_rescheduling(self, context, router_id, host):
++        """Determine whether a router needs to be retained on a host.
++
++        When a router is rescheduled the normal method is to send a
++        'removed' notification to the old agent and then an 'added'
++        notification to the new agent.  For DVR that is too harsh as the
++        old agent may still need to keep the router in a non-master role to
++        service any VM ports that exist on that host while the new agent
++        handles the maste role of the router (i.e., the centralized
++        components of the router).
++        """
++        plugin = directory.get_plugin(plugin_constants.L3)
++        retain_router = False
++        router = self.get_router(context, router_id)
++        if router.get('distributed'):
++            subnet_ids = plugin.get_subnet_ids_on_router(context, router_id)
++            if subnet_ids and host:
++                retain_router = plugin._check_dvr_serviceable_ports_on_host(
++                    context, host, subnet_ids)
++        return retain_router
++
+     def _notify_agents_router_rescheduled(self, context, router_id,
+                                           old_agents, new_agents):
+         l3_notifier = self.agent_notifiers.get(constants.AGENT_TYPE_L3)
+@@ -301,8 +322,14 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+         old_hosts = [agent['host'] for agent in old_agents]
+         new_hosts = [agent['host'] for agent in new_agents]
+         for host in set(old_hosts) - set(new_hosts):
+-            l3_notifier.router_removed_from_agent(
++            retain = self._retain_router_when_rescheduling(
+                 context, router_id, host)
++            if not retain:
++                l3_notifier.router_removed_from_agent(
++                    context, router_id, host)
++            else:
++                l3_notifier.routers_updated_on_host(
++                    context, [router_id], host)
+ 
+         for agent in new_agents:
+             try:
+-- 
+2.7.4
+

@@ -1,0 +1,192 @@
+From 9c27ed28350b2c7a9adf3f977f8721ad7e9dabf5 Mon Sep 17 00:00:00 2001
+From: Angie Wang <angie.wang@windriver.com>
+Date: Thu, 1 Dec 2016 10:18:43 -0500
+Subject: [PATCH 042/155] CGCS-5840: Validate IPv6 subnet prefixlen is 64 bits.
+
+The IPv6 subnet prefix is required to be /64 when dhcp is enabled and
+any address mode in [SLAAC, DHCPv6-stateless, DHCPv6-stateful] is used.
+But dhcp enabled is the pre-condition to use SLAAC, DHCPv6-stateless, or
+DHCPv6-stateful.
+
+CGTS-7081: fixup! CGCS-5840: Validate IPv6 subnet prefixlen is 64 bits.
+
+The previous commit for CGTS-5840 included the DHCPV6_STATEFUL mode in the
+auto-address list.  The side-effect is that the DHCP agent does not configure
+any IPv6 on the local interface for that subnet.  That causes it to reject any
+incoming IPv6 DHCP requests with the following error:
+
+    warning no address range available for DHCPv6 request via avp2d68c9b1-ab
+
+The DHCPV6_STATEFUL mode is not an auto-address type.  The server must allocate
+an IP address for each port in that subnet rather than rely on the EIU64 auto
+address mechanism.
+---
+ neutron/db/db_base_plugin_v2.py                 |  6 ++++++
+ neutron/tests/unit/agent/linux/test_dhcp.py     |  4 ++--
+ neutron/tests/unit/db/test_db_base_plugin_v2.py | 14 +++++++-------
+ neutron/tests/unit/extensions/test_l3.py        | 12 ++++++------
+ 4 files changed, 21 insertions(+), 15 deletions(-)
+
+diff --git a/neutron/db/db_base_plugin_v2.py b/neutron/db/db_base_plugin_v2.py
+index a4e8ca4..bdb7e60 100644
+--- a/neutron/db/db_base_plugin_v2.py
++++ b/neutron/db/db_base_plugin_v2.py
+@@ -552,6 +552,12 @@ class NeutronDbPluginV2(db_base_plugin_common.DbBasePluginCommon,
+                 (ip_ver == 6 and subnet_prefixlen > 126)):
+                 raise exc.InvalidInput(error_message=error_message)
+ 
++            if (ip_ver == 6 and subnet_prefixlen != 64):
++                error_message = _("The prefix length of IPv6 subnet address "
++                                  "is required to be /64 "
++                                  "when DHCP service is enabled.")
++                raise exc.InvalidInput(error_message=error_message)
++
+             net = netaddr.IPNetwork(s['cidr'])
+             if net.is_multicast():
+                 error_message = _("Multicast IP subnet is not supported "
+diff --git a/neutron/tests/unit/agent/linux/test_dhcp.py b/neutron/tests/unit/agent/linux/test_dhcp.py
+index de65760..26d2f52 100644
+--- a/neutron/tests/unit/agent/linux/test_dhcp.py
++++ b/neutron/tests/unit/agent/linux/test_dhcp.py
+@@ -484,7 +484,7 @@ class FakeV4MultipleAgentsWithDnsProvided(object):
+         self.namespace = 'qdhcp-ns'
+ 
+ 
+-class FakeV6Subnet(object):
++class FakeV6Subnet(Dictable):
+     def __init__(self):
+         self.id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+         self.ip_version = 6
+@@ -617,7 +617,7 @@ class FakeDualNetwork(object):
+ class FakeDeviceManagerNetwork(object):
+     def __init__(self):
+         self.id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+-        self.subnets = [FakeV4Subnet(), FakeV6SubnetDHCPStateful()]
++        self.subnets = [FakeV4Subnet(), FakeV6Subnet()]
+         self.ports = [FakePort1(),
+                       FakeV6Port(),
+                       FakeDualPort(),
+diff --git a/neutron/tests/unit/db/test_db_base_plugin_v2.py b/neutron/tests/unit/db/test_db_base_plugin_v2.py
+index 7e3bdc8..732f69c 100644
+--- a/neutron/tests/unit/db/test_db_base_plugin_v2.py
++++ b/neutron/tests/unit/db/test_db_base_plugin_v2.py
+@@ -1880,7 +1880,7 @@ fixed_ips=ip_address%%3D%s&fixed_ips=ip_address%%3D%s&fixed_ips=subnet_id%%3D%s
+                     self.fmt,
+                     tenant_id=tenant_id,
+                     net_id=net_id,
+-                    cidr='2607:f0d0:1002:51::/124',
++                    cidr='2607:f0d0:1002:51::/64',
+                     ip_version=6,
+                     gateway_ip=constants.ATTR_NOT_SPECIFIED)
+                 subnet2 = self.deserialize(self.fmt, res)
+@@ -3897,7 +3897,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
+ 
+     def test_create_subnet_with_v6_allocation_pool(self):
+         gateway_ip = 'fe80::1'
+-        cidr = 'fe80::/80'
++        cidr = 'fe80::/64'
+         allocation_pools = [{'start': 'fe80::2',
+                              'end': 'fe80::ffff:fffa:ffff'}]
+         self._test_create_subnet(gateway_ip=gateway_ip,
+@@ -4198,7 +4198,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
+ 
+     def test_create_subnet_ipv6_gw_is_nw_end_addr_returns_201(self):
+         gateway_ip = '2001::ffff'
+-        cidr = '2001::/112'
++        cidr = '2001::/64'
+         subnet = self._test_create_subnet(
+             gateway_ip=gateway_ip, cidr=cidr,
+             ip_version=constants.IP_VERSION_6,
+@@ -4582,7 +4582,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
+     def test_update_subnet_inconsistent_ipv6_gatewayv4(self):
+         with self.network() as network:
+             with self.subnet(network=network,
+-                             ip_version=6, cidr='fe80::/48') as subnet:
++                             ip_version=6, cidr='fe80::/64') as subnet:
+                 data = {'subnet': {'gateway_ip': '10.1.1.1'}}
+                 req = self.new_update_request('subnets', data,
+                                               subnet['subnet']['id'])
+@@ -4602,11 +4602,11 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
+                                  res.status_int)
+ 
+     def test_update_subnet_inconsistent_ipv6_hostroute_dst_v4(self):
+-        host_routes = [{'destination': 'fe80::0/48',
++        host_routes = [{'destination': 'fe80::0/64',
+                         'nexthop': '10.0.2.20'}]
+         with self.network() as network:
+             with self.subnet(network=network,
+-                             ip_version=6, cidr='fe80::/48') as subnet:
++                             ip_version=6, cidr='fe80::/64') as subnet:
+                 data = {'subnet': {'host_routes': host_routes}}
+                 req = self.new_update_request('subnets', data,
+                                               subnet['subnet']['id'])
+@@ -4619,7 +4619,7 @@ class TestSubnetsV2(NeutronDbPluginV2TestCase):
+                         'nexthop': 'fe80::1'}]
+         with self.network() as network:
+             with self.subnet(network=network,
+-                             ip_version=6, cidr='fe80::/48') as subnet:
++                             ip_version=6, cidr='fe80::/64') as subnet:
+                 data = {'subnet': {'host_routes': host_routes}}
+                 req = self.new_update_request('subnets', data,
+                                               subnet['subnet']['id'])
+diff --git a/neutron/tests/unit/extensions/test_l3.py b/neutron/tests/unit/extensions/test_l3.py
+index fd29d7f..72bd7f6 100644
+--- a/neutron/tests/unit/extensions/test_l3.py
++++ b/neutron/tests/unit/extensions/test_l3.py
+@@ -868,7 +868,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+     def test_router_update_gateway_add_multiple_prefixes_ipv6(self):
+         with self.network() as n:
+             with self.subnet(network=n) as s1, \
+-                self.subnet(network=n, ip_version=6, cidr='2001:db8::/32') \
++                self.subnet(network=n, ip_version=6, cidr='2001:db8::/64') \
+                 as s2, (self.router()) as r:
+                 self._set_net_external(n['network']['id'])
+                 res1 = self._add_external_gateway_to_router(
+@@ -909,7 +909,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+                 # ensure the router disappearing doesn't interfere with subnet
+                 # creation
+                 self._create_subnet(self.fmt, net_id=n['network']['id'],
+-                                    ip_version=6, cidr='2001:db8::/32',
++                                    ip_version=6, cidr='2001:db8::/64',
+                                     expected_res_status=(exc.HTTPCreated.code))
+ 
+     def test_router_update_gateway_upon_subnet_create_ipv6(self):
+@@ -923,7 +923,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+                 fip1 = (res1['router']['external_gateway_info']
+                         ['external_fixed_ips'][0])
+                 sres = self._create_subnet(self.fmt, net_id=n['network']['id'],
+-                                         ip_version=6, cidr='2001:db8::/32',
++                                         ip_version=6, cidr='2001:db8::/64',
+                                          expected_res_status=(
+                                              exc.HTTPCreated.code))
+                 s2 = self.deserialize(self.fmt, sres)
+@@ -3121,7 +3121,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+         self.assertEqual(router_req['router']['id'], result['id'])
+ 
+     def test_create_floatingip_ipv6_only_network_returns_400(self):
+-        with self.subnet(cidr="2001:db8::/48", ip_version=6) as public_sub:
++        with self.subnet(cidr="2001:db8::/64", ip_version=6) as public_sub:
+             self._set_net_external(public_sub['subnet']['network_id'])
+             res = self._create_floatingip(
+                 self.fmt,
+@@ -3130,7 +3130,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+ 
+     def test_create_floatingip_ipv6_and_ipv4_network_creates_ipv4(self):
+         with self.network() as n,\
+-                self.subnet(cidr="2001:db8::/48", ip_version=6, network=n),\
++                self.subnet(cidr="2001:db8::/64", ip_version=6, network=n),\
+                 self.subnet(cidr="192.168.1.0/24", ip_version=4, network=n):
+             self._set_net_external(n['network']['id'])
+             fip = self._make_floatingip(self.fmt, n['network']['id'])
+@@ -3141,7 +3141,7 @@ class L3NatTestCaseBase(L3NatTestCaseMixin):
+     def test_create_floatingip_with_assoc_to_ipv6_subnet(self):
+         with self.subnet() as public_sub:
+             self._set_net_external(public_sub['subnet']['network_id'])
+-            with self.subnet(cidr="2001:db8::/48",
++            with self.subnet(cidr="2001:db8::/64",
+                              ip_version=6) as private_sub:
+                 with self.port(subnet=private_sub) as private_port:
+                     res = self._create_floatingip(
+-- 
+2.7.4
+

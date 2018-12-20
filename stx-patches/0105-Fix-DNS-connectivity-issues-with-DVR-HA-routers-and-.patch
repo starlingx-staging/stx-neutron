@@ -1,0 +1,148 @@
+From fc66b765020a2c161453563d77666f803758cce9 Mon Sep 17 00:00:00 2001
+From: Armando Migliaccio <armamig@gmail.com>
+Date: Wed, 22 Nov 2017 10:59:27 -0800
+Subject: [PATCH 105/155] Fix DNS connectivity issues with DVR+HA routers and
+ DHCP-HA
+
+Before this change, DVR_SNAT agents would get no routers when
+asking for updates due to provisioning of DHCP ports on the
+node they are running on. This means that there's no connectivity
+between the DHCP port and the network gateway (that may be
+hosted on a different node), and therefore things like DNS may
+break when a VM attempts resolution when talking to the affected
+DHCP port.
+
+This change relaxed a conditional that prevents the right list of
+routers to be compiled and returned from the server to the agent.
+The agent on the other hand needs to make sure to allocate the
+right type of router based on what is being returned from the server.
+
+Closes-bug: #1733987
+
+Change-Id: I6124738c3324e0cc3f7998e3a541ff7547f2a8a7
+(cherry picked from commit b24013f569024f71197370b10dd23a7647d22c73)
+---
+ neutron/agent/l3/agent.py                  |  8 +++++++-
+ neutron/db/l3_hamode_db.py                 | 14 +++++++-------
+ neutron/tests/unit/agent/l3/test_agent.py  | 11 +++++++++++
+ neutron/tests/unit/db/test_l3_hamode_db.py | 16 ++++++++++++++--
+ 4 files changed, 39 insertions(+), 10 deletions(-)
+
+diff --git a/neutron/agent/l3/agent.py b/neutron/agent/l3/agent.py
+index 95f7c9e..f110f8a 100644
+--- a/neutron/agent/l3/agent.py
++++ b/neutron/agent/l3/agent.py
+@@ -338,7 +338,13 @@ class L3NATAgent(ha.AgentMixin,
+             kwargs['host'] = self.host
+ 
+         if router.get('distributed') and router.get('ha'):
+-            if self.conf.agent_mode == lib_const.L3_AGENT_MODE_DVR_SNAT:
++            # if the router does not contain information about the HA interface
++            # this means that this DVR+HA router needs to host only the edge
++            # side of it, typically because it's landing on a node that needs
++            # to provision a router namespace because of a DVR service port
++            # (e.g. DHCP).
++            if (self.conf.agent_mode == lib_const.L3_AGENT_MODE_DVR_SNAT
++                    and router.get(lib_const.HA_INTERFACE_KEY) is not None):
+                 kwargs['state_change_callback'] = self.enqueue_state_change
+                 return dvr_edge_ha_router.DvrEdgeHaRouter(*args, **kwargs)
+ 
+diff --git a/neutron/db/l3_hamode_db.py b/neutron/db/l3_hamode_db.py
+index 102ea9f..6884288 100644
+--- a/neutron/db/l3_hamode_db.py
++++ b/neutron/db/l3_hamode_db.py
+@@ -617,7 +617,7 @@ class L3_HA_NAT_db_mixin(l3_dvr_db.L3_NAT_with_dvr_db_mixin,
+             None)
+ 
+     @log_helpers.log_method_call
+-    def _process_sync_ha_data(self, context, routers, host, agent_mode):
++    def _process_sync_ha_data(self, context, routers, host, is_any_dvr_agent):
+         routers_dict = dict((router['id'], router) for router in routers)
+ 
+         bindings = self.get_ha_router_port_bindings(context,
+@@ -646,12 +646,11 @@ class L3_HA_NAT_db_mixin(l3_dvr_db.L3_NAT_with_dvr_db_mixin,
+ 
+         self._populate_mtu_and_subnets_for_ports(context, interfaces)
+ 
+-        # If this is a DVR+HA router, but the agent in question is in 'dvr'
+-        # or 'dvr_no_external' mode (as opposed to 'dvr_snat'), then we want to
+-        # always return it even though it's missing the '_ha_interface' key.
++        # If this is a DVR+HA router, then we want to always return it even
++        # though it's missing the '_ha_interface' key. The agent will have
++        # to figure out what kind of router setup is needed.
+         return [r for r in list(routers_dict.values())
+-                if (agent_mode == constants.L3_AGENT_MODE_DVR or
+-                    agent_mode == n_const.L3_AGENT_MODE_DVR_NO_EXTERNAL or
++                if (is_any_dvr_agent or
+                     not r.get('ha') or r.get(constants.HA_INTERFACE_KEY))]
+ 
+     @log_helpers.log_method_call
+@@ -670,7 +669,8 @@ class L3_HA_NAT_db_mixin(l3_dvr_db.L3_NAT_with_dvr_db_mixin,
+         else:
+             sync_data = super(L3_HA_NAT_db_mixin, self).get_sync_data(context,
+                                                             router_ids, active)
+-        return self._process_sync_ha_data(context, sync_data, host, agent_mode)
++        return self._process_sync_ha_data(
++            context, sync_data, host, dvr_agent_mode)
+ 
+     @classmethod
+     def _set_router_states(cls, context, bindings, states):
+diff --git a/neutron/tests/unit/agent/l3/test_agent.py b/neutron/tests/unit/agent/l3/test_agent.py
+index 357e7ca..e2b6632 100644
+--- a/neutron/tests/unit/agent/l3/test_agent.py
++++ b/neutron/tests/unit/agent/l3/test_agent.py
+@@ -2493,6 +2493,17 @@ class TestBasicRouterOperations(BasicRouterOperationsFramework):
+     def test_process_routers_update_router_deleted_error(self):
+         self._test_process_routers_update_router_deleted(True)
+ 
++    def test_process_ha_dvr_router_if_compatible_no_ha_interface(self):
++        agent = l3_agent.L3NATAgent(HOSTNAME, self.conf)
++        agent.conf.agent_mode = 'dvr_snat'
++        router = {'id': _uuid(),
++                  'distributed': True, 'ha': True,
++                  'external_gateway_info': {}, 'routes': [],
++                  'admin_state_up': True}
++
++        agent._process_router_if_compatible(router)
++        self.assertIn(router['id'], agent.router_info)
++
+     def test_process_router_if_compatible_with_no_ext_net_in_conf(self):
+         self.conf.set_override('external_network_bridge', 'br-ex')
+         agent = l3_agent.L3NATAgent(HOSTNAME, self.conf)
+diff --git a/neutron/tests/unit/db/test_l3_hamode_db.py b/neutron/tests/unit/db/test_l3_hamode_db.py
+index 69eb2b1..1cf34f9 100644
+--- a/neutron/tests/unit/db/test_l3_hamode_db.py
++++ b/neutron/tests/unit/db/test_l3_hamode_db.py
+@@ -419,6 +419,19 @@ class L3HATestCase(L3HATestFramework):
+         self.assertEqual(1, len(subnets))
+         self.assertEqual(cfg.CONF.l3_ha_net_cidr, subnets[0]['cidr'])
+ 
++    def test_l3_agent_routers_query_interface_includes_dvrsnat(self):
++        router = self._create_router(distributed=True)
++        routers = self.plugin.get_ha_sync_data_for_host(self.admin_ctx,
++                                                        'a-dvr_snat-host',
++                                                        self.agent2)
++        self.assertEqual(1, len(routers))
++        router = routers[0]
++
++        self.assertTrue(router.get('ha'))
++
++        interface = router.get(constants.HA_INTERFACE_KEY)
++        self.assertIsNone(interface)
++
+     def test_unique_ha_network_per_tenant(self):
+         tenant1 = _uuid()
+         tenant2 = _uuid()
+@@ -777,8 +790,7 @@ class L3HATestCase(L3HATestFramework):
+         orig_func = self.plugin._process_sync_ha_data
+ 
+         def process_sync_ha_data(context, routers, host, agent_mode):
+-            return orig_func(context, routers, host,
+-                             agent_mode=constants.L3_AGENT_MODE_DVR)
++            return orig_func(context, routers, host, is_any_dvr_agent=True)
+ 
+         with mock.patch.object(self.plugin, '_process_sync_ha_data',
+                                side_effect=process_sync_ha_data):
+-- 
+2.7.4
+

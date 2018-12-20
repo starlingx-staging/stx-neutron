@@ -1,0 +1,50 @@
+From 89bbb894356694556cd79b0d5d6e782141da8ba4 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Wed, 22 Nov 2017 13:20:41 -0500
+Subject: [PATCH 076/155] Handle case where _sync_routers is called before
+ _report_state
+
+If neutron-avr-agent calls _sync_routers before _report_state, then
+the get_router_ids RPC to neutron-server  will throw an exception
+because there is no L3 agent registeted for that compute host.  This
+commit catches that exception in neutron-server and returns an empty
+list if get_router_ids is called before an agent reports in.
+---
+ neutron/db/l3_agentschedulers_db.py | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/neutron/db/l3_agentschedulers_db.py b/neutron/db/l3_agentschedulers_db.py
+index 8e51115..bf8aadc 100644
+--- a/neutron/db/l3_agentschedulers_db.py
++++ b/neutron/db/l3_agentschedulers_db.py
+@@ -39,6 +39,7 @@ from neutron.common import utils as n_utils
+ from neutron.db import agentschedulers_db
+ from neutron.db.models import agent as agent_model
+ from neutron.db.models import l3agent as rb_model
++from neutron.extensions import agent as ext_agent
+ from neutron.extensions import l3agentscheduler
+ from neutron.extensions import router_availability_zone as router_az
+ from neutron.objects import agent as ag_obj
+@@ -364,11 +365,15 @@ class L3AgentSchedulerDbMixin(l3agentscheduler.L3AgentSchedulerPluginBase,
+         return self.get_sync_data(context, router_ids=router_ids, active=True)
+ 
+     def list_router_ids_on_host(self, context, host, router_ids=None):
+-        agent = self._get_agent_by_type_and_host(
+-            context, constants.AGENT_TYPE_L3, host)
+-        if not agentschedulers_db.services_available(agent.admin_state_up):
++        try:
++            agent = self._get_agent_by_type_and_host(
++                context, constants.AGENT_TYPE_L3, host)
++            if not agentschedulers_db.services_available(agent.admin_state_up):
++                return []
++            return self._get_router_ids_for_agent(context, agent, router_ids)
++        except ext_agent.AgentNotFoundByTypeHost:
++            LOG.warning("No L3 agent on host %s.", host)
+             return []
+-        return self._get_router_ids_for_agent(context, agent, router_ids)
+ 
+     def _get_router_ids_for_agent(self, context, agent, router_ids):
+         """Get IDs of routers that the agent should host
+-- 
+2.7.4
+

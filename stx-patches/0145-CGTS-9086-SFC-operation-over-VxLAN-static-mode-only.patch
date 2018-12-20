@@ -1,0 +1,104 @@
+From 206035daab4b12c6251e176f4e550f0679d1a080 Mon Sep 17 00:00:00 2001
+From: Matt Peters <matt.peters@windriver.com>
+Date: Fri, 9 Mar 2018 17:23:00 -0500
+Subject: [PATCH 145/155] CGTS-9086: SFC operation over VxLAN static mode only
+
+Remove SFC managed static FDB entries and rely on VxLAN static mode only.
+---
+ neutron/plugins/wrs/agent/avs/agent.py |  6 +++---
+ neutron/plugins/wrs/agent/avs/sfc.py   | 31 +------------------------------
+ 2 files changed, 4 insertions(+), 33 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 333993f..e31cad8 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1504,9 +1504,6 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         devices = [self._get_device_name(uuid) for uuid in updated_ports]
+         self.prepare_sg_device_filters(devices)
+ 
+-        # Trigger an SFC update
+-        self.get_sfc_details(updated_ports, ports)
+-
+         for uuid in updated_ports:
+             try:
+                 port_details = self.get_port_details(uuid)
+@@ -1519,6 +1516,9 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             except manager.VSwitchManagerError as e:
+                 LOG.exception(repr(e))
+ 
++        # Trigger an SFC update
++        self.get_sfc_details(updated_ports, ports)
++
+     def check_orphaned_networks(self, port_uuid, network_ids):
+         """
+         Given a list of network_ids check to ensure that none of them are
+diff --git a/neutron/plugins/wrs/agent/avs/sfc.py b/neutron/plugins/wrs/agent/avs/sfc.py
+index 3665caa..7fe1a8d 100644
+--- a/neutron/plugins/wrs/agent/avs/sfc.py
++++ b/neutron/plugins/wrs/agent/avs/sfc.py
+@@ -32,8 +32,6 @@ from neutron.agent import rpc as agent_rpc
+ from neutron.common import rpc as n_rpc
+ from neutron.common import topics
+ 
+-from neutron.plugins.ml2.drivers.l2pop.rpc_manager import l2population_rpc
+-
+ LOG = logging.getLogger(__name__)
+ 
+ 
+@@ -50,21 +48,6 @@ class SfcPluginApi(object):
+             port_ids=port_ids)
+ 
+ 
+-class SfcL2PopHandler(l2population_rpc.L2populationRpcCallBackMixin):
+-
+-    def __init__(self, manager):
+-        self.manager = manager
+-
+-    def fdb_add(self, context, fdb_entries):
+-        self.manager.fdb_add(context, fdb_entries)
+-
+-    def fdb_remove(self, context, fdb_entries):
+-        self.manager.fdb_remove(context, fdb_entries)
+-
+-    def fdb_update(self, context, fdb_entries):
+-        self.manager.fdb_update(context, fdb_entries)
+-
+-
+ class VswitchSFCNeutronAgent(object):
+     """
+     Implements Vswitch-based SFC(Service Function Chaining).
+@@ -81,11 +64,6 @@ class VswitchSFCNeutronAgent(object):
+         self.vswitch_mgr = None
+         self.sfc_driver = sfc_driver.SfcAVSAgentDriver()
+         self._sfc_setup_rpc()
+-
+-        self.l2pop_handler = None
+-        self.l2pop_rpc = l2population_rpc.L2populationRpcQueryMixin()
+-        self.l2pop_connection = None
+-        self.setup_l2pop_rpc_handler()
+         self.paths = []
+         self.init = True
+ 
+@@ -94,17 +72,10 @@ class VswitchSFCNeutronAgent(object):
+         self.sfc_driver.consume_api(self.vswitch_mgr)
+ 
+     def get_sfc_details(self, port_ids):
+-        if (self.init or len(self.paths) > 0):
++        if self.init or len(self.paths) > 0:
+             self.sfc_plugin_rpc.get_sfc_details(self.context, port_ids)
+             self.init = False
+ 
+-    def setup_l2pop_rpc_handler(self):
+-        self.l2pop_handler = SfcL2PopHandler(self.sfc_driver)
+-        consumers = [[topics.L2POPULATION, topics.UPDATE]]
+-        self.l2pop_connection = agent_rpc.create_consumers(
+-            [self.l2pop_handler], topics.AGENT, consumers)
+-        self.l2pop_connection.consume_in_threads()
+-
+     def _sfc_setup_rpc(self):
+         self.sfc_plugin_rpc = SfcPluginApi(
+             sfc_topics.SFC_PLUGIN, cfg.CONF.host)
+-- 
+2.7.4
+

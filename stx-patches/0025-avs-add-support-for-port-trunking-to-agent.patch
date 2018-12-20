@@ -1,0 +1,356 @@
+From 5157cf1f2917b2e884440088fc02be9c3da72868 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Sun, 5 Mar 2017 19:27:57 -0500
+Subject: [PATCH 025/155] avs: add support for port trunking to agent
+
+This enables the port trunking service to operate in our vswitch
+configuration.  This commit adds a port trunking driver to the vswitch
+mechanism driver and adds support in the agent to configure subports
+when necessary.
+
+Conflicts:
+	neutron/plugins/wrs/agent/avs/agent.py
+---
+ neutron/plugins/wrs/agent/avs/agent.py       | 126 +++++++++++++++++++++++++++
+ neutron/plugins/wrs/drivers/mech_vswitch.py  |  11 +++
+ neutron/plugins/wrs/drivers/trunk_vswitch.py |  52 +++++++++++
+ 3 files changed, 189 insertions(+)
+ create mode 100644 neutron/plugins/wrs/drivers/trunk_vswitch.py
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 896aff5..dd7839b 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -52,6 +52,7 @@ from neutron.agent.vswitch import vif_api
+ from neutron.api.rpc.handlers import dvr_rpc
+ from neutron.api.rpc.handlers import pnet_connectivity_rpc
+ from neutron.api.rpc.handlers import qos_rpc
++from neutron.api.rpc.handlers import resources_rpc
+ from neutron.common import config as common_config
+ from neutron.common import constants as n_const
+ from neutron.common import ipv6_utils
+@@ -62,6 +63,8 @@ from neutron.drivers import fm
+ from neutron.extensions import securitygroup as ext_sg
+ from neutron.extensions import wrs_provider
+ from neutron.plugins.wrs.agent.avs import dvr
++from neutron.services.trunk import constants as trunk_constants
++from neutron.services.trunk.rpc import agent as trunk_rpc
+ 
+ 
+ avs_opts = [
+@@ -170,6 +173,8 @@ def is_avs_port(device_owner):
+         return True
+     elif device_owner.startswith('compute:'):
+         return True
++    elif device_owner.startswith('trunk:'):
++        return True
+     return False
+ 
+ 
+@@ -193,6 +198,8 @@ def is_vlan_capable_port(device_owner):
+     """
+     if device_owner.startswith('compute:'):
+         return True
++    elif device_owner.startswith('trunk:'):
++        return True
+     return False
+ 
+ 
+@@ -247,7 +254,46 @@ class VSwitchBaseRpcCallbacksMixin(object):
+         self.host_state_up = payload['host_state_up']
+ 
+ 
++class VSwitchTrunkStub(trunk_rpc.TrunkStub):
++    """
++    API for all agent to server RPC communications.
++    """
++    def get_trunk_details(self, context, parent_port_id):
++        try:
++            return super(VSwitchTrunkStub, self).get_trunk_details(
++                context, parent_port_id)
++        except resources_rpc.ResourceNotFound:
++            LOG.debug("Port %s has no associated trunk.", parent_port_id)
++            return
++
++
++class VSwitchTrunkSkeletonMixin(trunk_rpc.TrunkSkeleton):
++    """
++    API for all server to agent RPC communications.
++    """
++    def __init__(self, **kwargs):
++        super(VSwitchTrunkSkeletonMixin, self).__init__()
++
++    def handle_trunks(self, context, resource_type, trunks, event_type):
++        """Handle trunk events."""
++        LOG.debug("handle_trunks event_type={} trunks={}".format(
++            event_type, trunks))
++        for trunk in trunks:
++            if self.is_port_present(trunk['port_id']):
++                self.mark_port_for_refresh(trunk['port_id'])
++
++    def handle_subports(self, context, resource_type, subports, event_type):
++        """Handle subports event."""
++        LOG.debug("handle_subports event_type={} trunks={} ".format(
++            event_type, subports))
++        for subport in subports:
++            trunk_details = self.trunk_details.get(subport['trunk_id'])
++            if trunk_details:
++                self.mark_port_for_refresh(trunk_details['port_id'])
++
++
+ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
++                               VSwitchTrunkSkeletonMixin,
+                                sg_rpc.SecurityGroupAgentRpcCallbackMixin,
+                                qos_rpc.QoSAgentRpcCallbackMixin,
+                                dvr_rpc.DVRAgentRpcCallbackMixin,
+@@ -399,6 +445,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         self.setup_rpc()
+         self.init_fm()
+         self.port_details = {}
++        self.trunk_details = {}
+         self.interface_details = {}
+         self.port_stats = {}
+         self.virtual_ports = {}
+@@ -577,6 +624,25 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             self.plugin_rpc.update_device_down(
+                 self.context, device_name, self.agent_id, cfg.CONF.host)
+ 
++    def _report_trunk_state(self, port):
++        """
++        Report current port state to the plugin
++        """
++        port_uuid = port['uuid']
++        trunk_details = self.get_trunk_details(port_uuid)
++        if not trunk_details:
++            return  # nothing to do for regular ports
++        if 'local-state' not in port:
++            port['local-state'] = self._is_port_up(port)
++        LOG.debug("Reporting trunk state {} for port {}".format(
++                port['local-state'], port_uuid))
++        if port['local-state']:
++            status = trunk_constants.ACTIVE_STATUS
++        else:
++            status = trunk_constants.DOWN_STATUS
++        self.trunk_plugin_rpc.update_trunk_status(
++            self.context, trunk_details['id'], status)
++
+     def _port_should_be_deleted(self, count):
+         """
+         Determine if the 'stale' count exceeds the allowed threshold
+@@ -683,6 +749,9 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         which tenant network the device was attached to.
+         """
+         network = port_details.get('network')
++        device_owner = port_details.get('device_owner')
++        if device_owner.startswith('trunk:'):
++            vlan_id = 0
+         network_name = self.vswitch_mgr.get_network_name(
+             network['id'], vlan_id=vlan_id)
+         network_uuid = self.vswitch_mgr.get_network_uuid(
+@@ -794,6 +863,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         """
+         port_details = self.port_details.get(port_uuid)
+         if not port_details or port_details.get('_updated', False):
++            trunk_id = port_details.get('_trunk_id') if port_details else 0
++            self.trunk_details.pop(trunk_id, None)
+             port_details = self.plugin_rpc.get_device_details(
+                 self.context, port_uuid, self.agent_id, self.host)
+             if not port_details or len(port_details) == 1:
+@@ -804,6 +875,26 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             self.port_details[port_uuid] = port_details
+         return port_details
+ 
++    def get_trunk_details(self, port_uuid):
++        """
++        Retrieve the trunk detail info.  This references cached data if it
++        exists rather than accessing the DB unnecessary.  If the port is marked
++        as updated by an RPC call from the server then the data is refreshed
++        because the '_trunk_id' attribute will be removed.
++        """
++        port_details = self.port_details[port_uuid]
++        if '_trunk_id' not in port_details:
++            trunk_details = self.trunk_plugin_rpc.get_trunk_details(
++                    self.context, port_uuid)
++            trunk_id = trunk_details['id'] if trunk_details else 0
++            if trunk_id:
++                LOG.debug("get_trunk_details for {} details {}".format(
++                    port_uuid, trunk_details))
++                self.trunk_details[trunk_id] = trunk_details
++            port_details['_trunk_id'] = trunk_id
++        trunk_id = port_details['_trunk_id']
++        return self.trunk_details.get(trunk_id)
++
+     def get_ports_on_dvr_subnet(self, subnet_uuid, vlan_id=None):
+         """This is a replacement for get_ports_on_host_by_subnet() that looks
+         at local data instead of needing to invoke a server RPC. Since the
+@@ -860,6 +951,22 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             details['subnets'] = subnets
+             vlans.add(self.setup_interface(port, details, vlan_id=vlan_id))
+ 
++        # Setup the port for any trunk that may be overlaid.
++        trunk_details = self.get_trunk_details(port_uuid)
++        if trunk_details and trunk_details['admin_state_up']:
++            self.trunk_plugin_rpc.update_subport_bindings(
++                self.context, trunk_details.sub_ports)
++            for subport in trunk_details.sub_ports if trunk_details else []:
++                details = self.get_port_details(subport.port_id)
++                vlan_id = subport.segmentation_id
++                vlans.add(self.setup_interface(port, details, vlan_id=vlan_id))
++                # Report that the subport is UP.  This is not currently done in
++                # OVS or Linuxbridge, but our customers will definitely
++                # complain that the subport devices are in BUILD status.
++                self.plugin_rpc.update_device_up(
++                    self.context, self._get_device_name(subport.port_id),
++                    self.agent_id, cfg.CONF.host)
++
+         if port_uuid in self.interfaces:
+             # Remove any stale VLANs from pre-existing interfaces
+             existing = set(getattr(self.interfaces[port_uuid], 'vlans', []))
+@@ -950,6 +1057,9 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             LOG.warning("Previously unknown port {} removed".format(
+                 port_uuid))
+             return
++        trunk_id = port_details.get('_trunk_id')
++        trunk_details = self.trunk_details.pop(trunk_id, None)
++
+         if not self.manage_network_for_device(port_details):
+             # Leave the network(s) as-is if we are not managing them.
+             return
+@@ -963,6 +1073,14 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             network_uuid, _ = self._get_network_info(port_details, vlan_id)
+             network_ids.add(network_uuid)
+ 
++        # Handle trunk subports.
++        for subport in trunk_details.sub_ports if trunk_details else []:
++            self.interface_details.pop(subport.port_id, None)
++            details = self.port_details.pop(subport.port_id, None)
++            if details:
++                network_uuid, _ = self._get_network_info(details, None)
++                network_ids.add(network_uuid)
++
+         # Prune the list of networks down to those that still exist
+         current_networks = self.virtual_networks
+         network_ids &= set(current_networks)
+@@ -1014,6 +1132,7 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+                     # The server state has changed so report our current local
+                     # port status back up to it.
+                     self._report_port_state(new)
++                    self._report_trunk_state(new)
+                 self.updated_ports.discard(uuid)
+             except manager.VSwitchManagerError as e:
+                 LOG.exception(repr(e))
+@@ -1500,6 +1619,9 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+         self.sg_plugin_rpc = sg_rpc.SecurityGroupServerRpcApi(topics.PLUGIN)
+         self.dvr_plugin_rpc = dvr_rpc.DVRServerRpcApi(topics.PLUGIN)
+         self.qos_plugin_rpc = qos_rpc.QoSServerRpcApi(topics.PLUGIN)
++        self.pnet_connectivity_api = \
++            pnet_connectivity_rpc.PnetConnectivityRpcApi(topics.PLUGIN)
++        self.trunk_plugin_rpc = VSwitchTrunkStub()
+         return super(VSwitchNeutronAgent, self).setup_rpc()
+ 
+     def prepare_sg_device_filters(self, devices):
+@@ -1788,6 +1910,10 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         # Feature not supported in SDN mode so always return an empty list
+         return []
+ 
++    def get_trunk_details(self, port_uuid):
++        # Feature not supported in SDN mode so always return no data
++        return None
++
+     def _get_network_info(self, port_details, vlan_id=None):
+         """
+         Determine which network this port should be attached to.  The normal
+diff --git a/neutron/plugins/wrs/drivers/mech_vswitch.py b/neutron/plugins/wrs/drivers/mech_vswitch.py
+index 5e8eb17..29f68fa 100644
+--- a/neutron/plugins/wrs/drivers/mech_vswitch.py
++++ b/neutron/plugins/wrs/drivers/mech_vswitch.py
+@@ -26,10 +26,14 @@ from neutron_lib.api.definitions import portbindings
+ 
+ from neutron._i18n import _
+ from neutron.agent import securitygroups_rpc
++from neutron.callbacks import events
++from neutron.callbacks import registry
+ from neutron.common import constants
+ from neutron.extensions import wrs_binding
+ from neutron.plugins.ml2 import driver_api as api
+ from neutron.plugins.ml2.drivers import mech_agent
++from neutron.plugins.wrs.drivers import trunk_vswitch
++from neutron.services.trunk import constants as trunk_constants
+ from oslo_config import cfg
+ 
+ LOG = logging.getLogger(__name__)
+@@ -71,6 +75,13 @@ class VSwitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
+             constants.AGENT_TYPE_WRS_VSWITCH,
+             wrs_binding.VIF_TYPE_AVS,
+             vif_details)
++        self.trunk_driver = None
++        registry.subscribe(self.register_trunk_driver,
++                           trunk_constants.TRUNK_PLUGIN, events.AFTER_INIT)
++
++    def register_trunk_driver(self, resource, event, trigger, **kwargs):
++        self.trunk_driver = trunk_vswitch.VSwitchTrunkDriver.create()
++        self.trunk_driver.register(resource, event, trigger, **kwargs)
+ 
+     def try_to_bind_segment_for_agent(self, context, segment, agent):
+         if self.check_segment_for_agent(segment, agent):
+diff --git a/neutron/plugins/wrs/drivers/trunk_vswitch.py b/neutron/plugins/wrs/drivers/trunk_vswitch.py
+new file mode 100644
+index 0000000..96032b9
+--- /dev/null
++++ b/neutron/plugins/wrs/drivers/trunk_vswitch.py
+@@ -0,0 +1,52 @@
++# Copyright 2016 Hewlett Packard Enterprise Development LP
++#
++# Licensed under the Apache License, Version 2.0 (the "License"); you may
++# not use this file except in compliance with the License. You may obtain
++# a copy of the License at
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++# License for the specific language governing permissions and limitations
++# under the License.
++
++from neutron_lib.api.definitions import portbindings
++from oslo_config import cfg
++from oslo_log import log as logging
++
++from neutron.common import constants as n_const
++from neutron.extensions import wrs_binding
++from neutron.services.trunk import constants as trunk_consts
++from neutron.services.trunk.drivers import base
++
++LOG = logging.getLogger(__name__)
++
++NAME = 'vswitch'
++
++SUPPORTED_INTERFACES = (
++    wrs_binding.VIF_TYPE_AVS,
++    portbindings.VIF_TYPE_VHOST_USER,
++)
++
++SUPPORTED_SEGMENTATION_TYPES = (
++    trunk_consts.VLAN,
++)
++
++
++class VSwitchTrunkDriver(base.DriverBase):
++
++    @property
++    def is_loaded(self):
++        try:
++            return NAME in cfg.CONF.ml2.mechanism_drivers
++        except cfg.NoSuchOptError:
++            return False
++
++    @classmethod
++    def create(cls):
++        return VSwitchTrunkDriver(NAME,
++                                  SUPPORTED_INTERFACES,
++                                  SUPPORTED_SEGMENTATION_TYPES,
++                                  agent_type=n_const.AGENT_TYPE_WRS_VSWITCH,
++                                  can_trunk_bound_port=True)
+-- 
+2.7.4
+

@@ -1,0 +1,2162 @@
+From f28da5fd384e59f82973e473cc0a6c7962a1a45f Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Mon, 22 Feb 2016 17:29:48 -0500
+Subject: [PATCH 016/155] US75531: Implement providernet connectivity testing
+
+This commit makes the required modifications in neutron for the providernet
+connectivity testing.  It implements the logic on the server, makes the DB
+changes, and implements the RPCs for providernet connectivity testing.
+
+This commit also introduces code to allow usage of the vswitch ping API
+from within neutron, and uses this functionality onthe agent to test
+connectivity.
+
+CGTS-7687: Improves analysis of providernet-connectivity data
+
+This commmit improves analysis of providernet-connectivity data.
+Firstly, it moves the scheduling of the analysis to a separate function, which
+can be called where needed.
+Secondly, it schedules an analysis whenever a providernet is deleted.
+Thirdly, when an analysis is scheduled, it is now schedules both at the start
+and the end of the queue.  This has the benefit of quicker removal of alarms
+for deleted ranges.
+
+Conflicts:
+	etc/oslo-config-generator/neutron.conf
+	neutron/plugins/ml2/plugin.py
+	neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+---
+ etc/oslo-config-generator/neutron.conf             |    2 +
+ .../pnet_connectivity_rpc_agent_api.py             |   94 ++
+ neutron/api/rpc/handlers/pnet_connectivity_rpc.py  |   94 ++
+ neutron/common/constants.py                        |    6 +
+ neutron/common/ipv6_utils.py                       |   12 +
+ neutron/common/topics.py                           |    3 +-
+ neutron/db/hosts_db.py                             |   59 +-
+ .../b6e92fad5a1_providernet_connectivity_table.py  |   71 ++
+ .../wrs_mitaka/expand/wrs_mitaka_release.py        |    4 +-
+ neutron/db/providernet_db.py                       | 1048 +++++++++++++++++++-
+ neutron/drivers/fm.py                              |   14 +
+ neutron/extensions/wrs_provider.py                 |   53 +-
+ neutron/opts.py                                    |    1 +
+ neutron/plugins/ml2/plugin.py                      |   47 +-
+ neutron/plugins/wrs/agent/avs/agent.py             |   10 +-
+ neutron/plugins/wrs/drivers/fm.py                  |   61 +-
+ .../tests/unit/plugins/wrs/test_extension_pnet.py  |  109 ++
+ setup.cfg                                          |    1 +
+ 18 files changed, 1671 insertions(+), 18 deletions(-)
+ create mode 100644 neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py
+ create mode 100644 neutron/api/rpc/handlers/pnet_connectivity_rpc.py
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py
+
+diff --git a/etc/oslo-config-generator/neutron.conf b/etc/oslo-config-generator/neutron.conf
+index 58e1722..b4bd0fc 100644
+--- a/etc/oslo-config-generator/neutron.conf
++++ b/etc/oslo-config-generator/neutron.conf
+@@ -6,6 +6,8 @@ namespace = neutron
+ namespace = neutron.agent
+ namespace = neutron.db
+ namespace = neutron.extensions
++namespace = neutron.pnet_connectivity
++namespace = neutron.qos
+ namespace = neutron.settings
+ namespace = nova.auth
+ namespace = oslo.log
+diff --git a/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py b/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py
+new file mode 100644
+index 0000000..7040eca
+--- /dev/null
++++ b/neutron/api/rpc/agentnotifiers/pnet_connectivity_rpc_agent_api.py
+@@ -0,0 +1,94 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import oslo_messaging
++
++from oslo_log import log as logging
++
++from neutron.common import rpc as n_rpc
++from neutron.common import topics
++
++
++LOG = logging.getLogger(__name__)
++
++
++class PnetConnectivityAgentNotifyAPI(object):
++    """Plugin-side RPC (stub) for plugin-to-agent interaction."""
++
++    def __init__(self, topic=topics.AGENT):
++        target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.topic = topic
++        self.client = n_rpc.get_client(target)
++        self.topic_pnet_connectivity_cast = topics.get_topic_name(
++            topic,
++            topics.PNET_CONNECTIVITY,
++            topics.UPDATE
++        )
++
++    def setup_connectivity_audit(self, context, audit_uuid, hostname,
++                                 providernet, segments, extra_data):
++        topic_pnet_connectivity_call = topics.get_topic_name(
++            self.topic,
++            topics.PNET_CONNECTIVITY,
++            topics.UPDATE,
++            hostname
++        )
++        cctxt = self.client.prepare(topic=topic_pnet_connectivity_call,
++                                    fanout=False)
++        return cctxt.call(context, 'setup_connectivity_audit',
++                          audit_uuid=audit_uuid,
++                          providernet=providernet,
++                          segments=segments,
++                          extra_data=extra_data)
++
++    def start_connectivity_audit(self, context, audit_uuid, masters, hosts,
++                                 providernet, segments, extra_data):
++        """Sets up on non masters, runs on all, and then tears down"""
++        cctxt = self.client.prepare(topic=self.topic_pnet_connectivity_cast,
++                                    fanout=True)
++        cctxt.cast(context, 'start_connectivity_audit', audit_uuid=audit_uuid,
++                   masters=masters, hosts=hosts, providernet=providernet,
++                   segments=segments, extra_data=extra_data)
++
++    def teardown_connectivity_audit(self, context, audit_uuid, hostname):
++        """
++        Call teardown_connectivity_audit for given host,
++        or cast for all if none is specified.
++        """
++        if hostname:
++            topic_pnet_connectivity_call = topics.get_topic_name(
++                self.topic,
++                topics.PNET_CONNECTIVITY,
++                topics.UPDATE,
++                hostname
++            )
++            cctxt = self.client.prepare(topic=topic_pnet_connectivity_call,
++                                        fanout=False)
++            return cctxt.call(context, 'teardown_connectivity_audit',
++                              audit_uuid=audit_uuid)
++        else:
++            cctxt = self.client.prepare(
++                topic=self.topic_pnet_connectivity_cast,
++                fanout=True
++            )
++            cctxt.cast(context, 'teardown_connectivity_audit',
++                       audit_uuid=audit_uuid)
++            return True
+diff --git a/neutron/api/rpc/handlers/pnet_connectivity_rpc.py b/neutron/api/rpc/handlers/pnet_connectivity_rpc.py
+new file mode 100644
+index 0000000..4ecfea7
+--- /dev/null
++++ b/neutron/api/rpc/handlers/pnet_connectivity_rpc.py
+@@ -0,0 +1,94 @@
++# Copyright 2013 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++import oslo_messaging
++
++from oslo_log import log as logging
++
++from neutron.common import rpc as n_rpc
++
++LOG = logging.getLogger(__name__)
++
++
++class PnetConnectivityCallback(object):
++    """Plugin-side RPC (callback) for agent-to-plugin interaction."""
++
++    def __init__(self, pnet_connectivity_manager):
++        self.pnet_connectivity_manager = pnet_connectivity_manager
++
++    def report_connectivity_results(self, context, **kwargs):
++        audit_results = kwargs['audit_results']
++        audit_uuid = kwargs['audit_uuid']
++        self.pnet_connectivity_manager.record_audit_results(context,
++                                                            audit_results,
++                                                            audit_uuid)
++
++
++class PnetConnectivityRpcApi(object):
++    """Agent-side RPC (callback) for agent-to-plugin interaction."""
++
++    def __init__(self, topic):
++        target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.client = n_rpc.get_client(target)
++
++    def report_connectivity_results(self, context, audit_results, audit_uuid):
++        cctxt = self.client.prepare()
++        cctxt.cast(context, 'report_connectivity_results',
++                   audit_results=audit_results, audit_uuid=audit_uuid)
++
++
++class PnetConnectivityRpc(object):
++    """Agent-side RPC (callback) for plugin-to-agent interaction."""
++
++    pnet_connectivity_manager = None
++
++    def setup_connectivity_audit(self, context, **kwargs):
++        self.pnet_connectivity_manager.pnet_connectivity_audit_uuid = \
++            kwargs['audit_uuid']
++        return self.pnet_connectivity_manager._setup_connectivity_audit(
++            kwargs['providernet'],
++            kwargs['segments'],
++            kwargs['extra_data']
++        )
++
++    def start_connectivity_audit(self, context, **kwargs):
++        self.pnet_connectivity_manager._start_connectivity_audit(
++            kwargs['audit_uuid'],
++            kwargs['masters'],
++            kwargs['hosts'],
++            kwargs['providernet'],
++            kwargs['segments'],
++            kwargs['extra_data']
++        )
++
++    def teardown_connectivity_audit(self, context, **kwargs):
++        """
++        If the audit IDs mismatch, such as when the agent is relaunched,
++         then teardown all non-attached interfaces vlan provider
++        """
++        if (self.pnet_connectivity_manager.pnet_connectivity_audit_uuid !=
++                kwargs['audit_uuid']):
++            clearall = True
++        else:
++            clearall = False
++        return self.pnet_connectivity_manager._teardown_connectivity_audit(
++            clearall
++        )
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index b9d9703..142a3c9 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -216,6 +216,12 @@ PROVIDERNET_ACTIVE = 'ACTIVE'
+ PROVIDERNET_DOWN = 'DOWN'
+ PROVIDERNET_ERROR = 'ERROR'
+ 
++PROVIDERNET_CONNECTIVITY_UNKNOWN = 'UNKNOWN'
++PROVIDERNET_CONNECTIVITY_PASS = 'PASS'
++PROVIDERNET_CONNECTIVITY_FAIL = 'FAIL'
++
++PROVIDERNET_CONNECTIVITY_TEST_ATTEMPTS = 2
++
+ DEFAULT_MTU = 1500
+ MINIMUM_MTU = 576
+ MAXIMUM_MTU = 9216
+diff --git a/neutron/common/ipv6_utils.py b/neutron/common/ipv6_utils.py
+index d0fc0fa..bf1b70e 100644
+--- a/neutron/common/ipv6_utils.py
++++ b/neutron/common/ipv6_utils.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ """
+ IPv6-related utilities and helper functions.
+@@ -75,3 +82,8 @@ def is_ipv6_pd_enabled(subnet):
+        constants.IPV6_PD_POOL_ID
+     """
+     return subnet.get('subnetpool_id') == const.IPV6_PD_POOL_ID
++
++
++def get_link_local_address_by_mac(mac_address):
++    eui = netaddr.EUI(mac_address)
++    return str(eui.ipv6_link_local())
+diff --git a/neutron/common/topics.py b/neutron/common/topics.py
+index 36a8ff2..d271c5b 100644
+--- a/neutron/common/topics.py
++++ b/neutron/common/topics.py
+@@ -13,7 +13,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ #
+-# Copyright (c) 2013-2014 Wind River Systems, Inc.
++# Copyright (c) 2013-2014,2016 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -29,6 +29,7 @@ DVR = 'dvr'
+ RESOURCES = 'resources'
+ HOST = 'host'
+ QOS = 'qos'
++PNET_CONNECTIVITY = 'pnet_connectivity'
+ 
+ CREATE = 'create'
+ DELETE = 'delete'
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 533a2ff..20f1c2a 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -31,7 +31,7 @@ from oslo_log import log as logging
+ from oslo_utils import timeutils
+ from oslo_utils import uuidutils
+ import sqlalchemy as sa
+-from sqlalchemy.orm import exc
++from sqlalchemy.orm import aliased, exc
+ from sqlalchemy import and_, or_, func
+ 
+ from neutron.common import constants
+@@ -177,6 +177,18 @@ class HostDbMixin(ext_host.HostPluginBase):
+             try:
+                 host_db = self._get_host_by_id(context, id)
+                 if 'availability' in host_data:
++                    # If availability changes, run pnet connectivity tests
++                    if host_db.availability != host_data['availability']:
++                        if host_data['availability'] == constants.HOST_DOWN:
++                            self._set_connectivity_data_to_unknown_by_host(
++                                context, host_db.id
++                            )
++                        else:
++                            host_providernets = self.get_providernets_on_host(
++                                context, host_db.id)
++                            self.notify_schedule_audit_providernets(
++                                context, list(set(host_providernets)),
++                                by_event=True)
+                     res['availability'] = host_data['availability']
+                     res['updated_at'] = current_time
+                     host_db.update(res)
+@@ -350,6 +362,7 @@ class HostDbMixin(ext_host.HostPluginBase):
+         provider network.
+         """
+         bindings = (context.session.query(Host)
++                    .order_by(Host.updated_at)
+                     .join(HostInterface,
+                           HostInterface.host_id == Host.id)
+                     .join(HostInterfaceProviderNetBinding,
+@@ -360,6 +373,50 @@ class HostDbMixin(ext_host.HostPluginBase):
+                     .all())
+         return [binding.id for binding in bindings]
+ 
++    def get_providernet_host_objects(self, context, providernet_id):
++        """
++        Returns the list of hosts with interfaces attached to the specified
++        provider network.
++        """
++        bindings = (context.session.query(Host)
++                    .order_by(Host.updated_at)
++                    .join(HostInterface,
++                          HostInterface.host_id == Host.id)
++                    .join(HostInterfaceProviderNetBinding,
++                          (HostInterfaceProviderNetBinding.interface_id ==
++                           HostInterface.id))
++                    .filter(HostInterfaceProviderNetBinding.providernet_id ==
++                            providernet_id)
++                    .all())
++        return bindings
++
++    def get_providernets_on_host(self, context, host_id):
++        """
++        Returns the list of provider networks that interfaces on this the
++        specified host are attached to.
++        """
++        bindings = (context.session.query(HostInterfaceProviderNetBinding)
++                    .join(HostInterface,
++                          (HostInterfaceProviderNetBinding.interface_id ==
++                           HostInterface.id))
++                    .filter(HostInterface.host_id == host_id)
++                    .all())
++        return [binding.providernet_id for binding in bindings]
++
++    def get_providernet_connectivity_query(self, context):
++        with context.session.begin(subtransactions=True):
++            master = aliased(Host, name="Master")
++            pnet_state_class = providernet_db.ProviderNetConnectivityState
++            query = context.session.query(pnet_state_class, Host, master,
++                                          providernet_db.ProviderNet)
++            query = query.join(Host, Host.id == pnet_state_class.host_id)
++            query = query.join(master,
++                               master.id == pnet_state_class.master_host_id)
++            query = query.join(providernet_db.ProviderNet,
++                               providernet_db.ProviderNet.id ==
++                               pnet_state_class.providernet_id)
++            return query
++
+     def create_or_update_host(self, context, hostname):
+         host_uuid = self.get_host_uuid(context, hostname)
+         if not host_uuid:
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py
+new file mode 100644
+index 0000000..c884e2b
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/b6e92fad5a1_providernet_connectivity_table.py
+@@ -0,0 +1,71 @@
++# Copyright 2016 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2016 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""Providernet connectivity table
++
++Revision ID: b6e92fad5a1
++Revises: 777864baa973
++Create Date: 2016-02-23 17:26:15.718638
++
++"""
++
++# revision identifiers, used by Alembic.
++revision = 'b6e92fad5a1'
++down_revision = '777864baa973'
++
++from alembic import op
++from neutron.common import constants
++import sqlalchemy as sa
++
++
++providernet_connectivity_state = sa.Enum(
++    constants.PROVIDERNET_CONNECTIVITY_UNKNOWN,
++    constants.PROVIDERNET_CONNECTIVITY_PASS,
++    constants.PROVIDERNET_CONNECTIVITY_FAIL,
++    name='providernet_connectivity_state_enum'
++)
++
++
++def upgrade():
++    op.create_table(
++        'providernet_connectivity_states',
++        sa.Column('host_id', sa.String(36), nullable=False),
++        sa.Column('providernet_id', sa.String(36), nullable=False),
++        sa.Column('segmentation_id', sa.String(36),
++                  autoincrement=False, nullable=False),
++        sa.Column('master_host_id', sa.String(36), nullable=False),
++        sa.Column('test_details', sa.String(255), nullable=True),
++        sa.Column('master_connectivity_state', providernet_connectivity_state,
++                  nullable=False),
++        sa.Column('updated_at', sa.DateTime, nullable=False),
++        sa.Column('audit_uuid', sa.String(36), nullable=False),
++        sa.ForeignKeyConstraint(['host_id'], ['hosts.id'],
++                                ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['providernet_id'], ['providernets.id'],
++                                ondelete='CASCADE'),
++        sa.ForeignKeyConstraint(['master_host_id'], ['hosts.id'],
++                                ondelete='CASCADE'),
++        sa.PrimaryKeyConstraint('host_id', 'providernet_id',
++                                'segmentation_id', 'master_host_id'))
++
++
++def downgrade():
++    op.drop_table('providernet_connectivity_states')
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+index 16ddafe..b1a569e 100644
+--- a/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_mitaka/expand/wrs_mitaka_release.py
+@@ -22,14 +22,14 @@
+ """WRS Mitaka Revision placeholder
+ 
+ Revision ID: wrs_mitaka
+-Revises:777864baa973
++Revises:b6e92fad5a1
+ Create Date: 2016-05-27 00:00:01.000000
+ 
+ """
+ 
+ # revision identifiers, used by Alembic.
+ revision = 'wrs_mitaka'
+-down_revision = '777864baa973'
++down_revision = 'b6e92fad5a1'
+ 
+ 
+ def upgrade():
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 5bb7874..53a7115 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -13,19 +13,26 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2013-2014 Wind River Systems, Inc.
++# Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+ # of an applicable Wind River license agreement.
+ #
+ 
+-import six
++from datetime import datetime
++from datetime import timedelta
++import itertools
++import time
+ 
+ from neutron_lib.api import validators
+ from neutron_lib.db import model_base
++from oslo_config import cfg
+ from oslo_log import log as logging
++import oslo_messaging
+ from oslo_utils import uuidutils
++import six
++
+ import sqlalchemy as sa
+ from sqlalchemy import and_
+ from sqlalchemy import orm
+@@ -35,6 +42,8 @@ from sqlalchemy.sql.expression import literal_column
+ 
+ from neutron._i18n import _
+ from neutron.common import constants
++from neutron.common import rpc as n_rpc
++from neutron.common import topics
+ from neutron.db import api as db_api
+ from neutron.db.models import segment as segments_model
+ from neutron.db import models_v2
+@@ -45,6 +54,97 @@ from neutron.extensions import wrs_provider as ext_providernet
+ 
+ LOG = logging.getLogger(__name__)
+ 
++PNET_CONNECTIVITY_OPTS = [
++    cfg.BoolOpt('pnet_audit_enabled', default=True,
++               help=_('Whether to enable the provider network audit.')),
++    cfg.IntOpt('pnet_audit_interval', default=1800,
++               help=_('How frequently to run connectivity audits.')),
++    cfg.BoolOpt('pnet_audit_schedule_by_event', default=True,
++               help=_('Whether to schedule based on neutron events.')),
++    cfg.IntOpt('pnet_audit_startup_delay', default=300,
++               help=_('Delay before first audit.')),
++    cfg.IntOpt('pnet_audit_timeout', default=120,
++               help=_('Timeout if no results are received from compute.')),
++    cfg.IntOpt('pnet_audit_batch_size', default=10,
++               help=_('Number of segments to test in individual audit.')),
++    cfg.IntOpt('pnet_audit_number_of_masters', default=2,
++               help=_('Number of compute nodes to serve as masters.')),
++]
++
++cfg.CONF.register_opts(PNET_CONNECTIVITY_OPTS, "pnet_connectivity")
++
++
++class ProviderNetConnectivityState(model_base.BASEV2):
++    """Represents VXLAN specific data for a provider network."""
++    __tablename__ = 'providernet_connectivity_states'
++
++    providernet_connectivity_state = sa.Enum(
++        constants.PROVIDERNET_CONNECTIVITY_UNKNOWN,
++        constants.PROVIDERNET_CONNECTIVITY_PASS,
++        constants.PROVIDERNET_CONNECTIVITY_FAIL,
++        name='pnet_connectivity_state_enum'
++    )
++
++    # hostname of compute node this state data is for
++    host_id = sa.Column(
++        sa.String(36),
++        sa.ForeignKey('hosts.id', ondelete='CASCADE'),
++        primary_key=True, nullable=False)
++
++    # n-to-1 relationship back to provider network table
++    providernet_id = sa.Column(
++        sa.String(36),
++        sa.ForeignKey('providernets.id', ondelete='CASCADE'),
++        primary_key=True, nullable=False)
++
++    # Starting segmentation ID of this batch of network segments
++    segmentation_id = sa.Column(
++        sa.String(36), primary_key=True,
++        nullable=False)
++
++    # hostname of compute-master node
++    master_host_id = sa.Column(
++        sa.String(36),
++        sa.ForeignKey('hosts.id', ondelete='CASCADE'),
++        primary_key=True, nullable=False)
++
++    # Details of test being run
++    test_details = sa.Column(sa.String(255), nullable=True)
++
++    # connectivity state from compute to this master node for this range
++    master_connectivity_state = sa.Column(providernet_connectivity_state,
++                                          nullable=False)
++
++    # UUID assigned to this audit
++    audit_uuid = sa.Column(sa.String(36), nullable=False)
++
++    # the time when last updated
++    updated_at = sa.Column(sa.DateTime, nullable=False)
++
++    def __init__(self, host_id, providernet_id, segmentation_id,
++                 master_host_id, test_details, master_connectivity_state,
++                 audit_uuid, updated_at):
++        self.host_id = host_id
++        self.providernet_id = providernet_id
++        self.segmentation_id = segmentation_id
++        self.master_host_id = master_host_id
++        self.test_details = test_details
++        self.master_connectivity_state = master_connectivity_state
++        self.audit_uuid = audit_uuid
++        self.updated_at = updated_at
++
++    def __repr__(self):
++        return "<ProviderNetConnectivityState(%s,%s,%s,%s,%s,,%s,%s,%s)>" % (
++            self.host_id,
++            self.providernet_id,
++            self.segmentation_id,
++            self.master_host_id,
++            self.test_details,
++            str(self.master_connectivity_state),
++            self.audit_uuid,
++            self.updated_at
++        )
++
+ 
+ class ProviderNetRangeVxLan(model_base.BASEV2, model_base.HasId):
+     """Represents VXLAN specific data for a provider network."""
+@@ -178,11 +278,31 @@ class ProviderNet(model_base.BASEV2, model_base.HasId):
+             str(self.status), self.type, self.mtu, self.vlan_transparent)
+ 
+ 
++class ProvidernetIndividualConnectivityTest(object):
++
++    def __init__(self, audit_uuid, providernet_id, providernet_type,
++                 segments, extra_data):
++        self.audit_uuid = audit_uuid
++        self.providernet_id = providernet_id
++        self.providernet_type = providernet_type
++        self.segments = segments
++        self.extra_data = extra_data
++
++
+ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+     """
+     Mixin class to add the provider network extension to the db_plugin_base_v2.
+     """
+     fm_driver = fm.NoopFmDriver()
++    pnet_connectivity_notifier = None
++    audit_results = []
++    scheduled_audits = []
++    raised_alarms = {}
++    topic_pnet_connectivity_test_create = topics.get_topic_name(
++            topics.PLUGIN,
++            topics.PNET_CONNECTIVITY,
++            topics.CREATE
++    )
+ 
+     def _get_providernet_by_id(self, context, id):
+         try:
+@@ -350,6 +470,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         with context.session.begin(subtransactions=True):
+             providernet = self._get_providernet_by_id(context, id)
+             providernet.update(providernet_data)
++        self.notify_schedule_audit_providernets(context, [id], by_event=True)
+         return self._make_providernet_dict(providernet)
+ 
+     @db_api.retry_if_session_inactive()
+@@ -358,6 +479,7 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+             providernet = self._get_providernet_by_id(context, id)
+             context.session.delete(providernet)
+             self._clear_providernet_fault(providernet)
++            self.schedule_analyse_providernet_connectivity(context, id)
+ 
+     @db_api.retry_if_session_inactive()
+     def get_providernet(self, context, id, fields=None):
+@@ -542,6 +664,9 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                        'providernet_range_id': providernet_range.id}
+                 vxlan = ProviderNetRangeVxLan(**res)
+                 context.session.add(vxlan)
++        self.notify_schedule_audit_providernets(
++            context, [providernet_range['providernet_id']], by_event=True
++        )
+         return self._make_providernet_range_dict(providernet_range)
+ 
+     def _add_unchanged_range_attributes(self, updates, existing):
+@@ -563,6 +688,9 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         updated_data = providernet_range['providernet_range']
+         with context.session.begin(subtransactions=True):
+             providernet_range = self._get_providernet_range_by_id(context, id)
++            self._set_connectivity_data_to_unknown_by_pnet_range(
++                context, providernet_range
++            )
+             providernet = self._get_providernet_by_id(
+                 context, providernet_range['providernet_id'])
+             old_data = self._make_providernet_range_dict(providernet_range)
+@@ -575,13 +703,22 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+                          'port': new_data['port'],
+                          'ttl': new_data['ttl']}
+                 providernet_range.vxlan.update(vxlan)
++        self.notify_schedule_audit_providernets(
++            context, [providernet_range['providernet_id']], by_event=True
++        )
+         return self._make_providernet_range_dict(providernet_range)
+ 
+     @db_api.retry_if_session_inactive()
+     def delete_providernet_range(self, context, id):
+         with context.session.begin(subtransactions=True):
+             providernet_range = self._get_providernet_range_by_id(context, id)
++            self._set_connectivity_data_to_unknown_by_pnet_range(
++                context, providernet_range
++            )
+             context.session.delete(providernet_range)
++        self.notify_schedule_audit_providernets(
++            context, [providernet_range['providernet_id']], by_event=True
++        )
+ 
+     @db_api.retry_if_session_inactive()
+     def get_providernet_range(self, context, id, fields=None):
+@@ -706,3 +843,910 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+         """
+         LOG.debug("Clear provider network fault: {}".format(providernet['id']))
+         self.fm_driver.clear_providernet_fault(providernet['id'])
++
++    def _report_clear_providernet_connectivity_fault(self, providernet_id,
++                                                     hostname, segments):
++        """
++        Generate or clar a fault management alarm condition for
++        provider network connectivity status.
++        """
++        # cache alarms to reduce calls to fm_api
++        if self.raised_alarms.get((providernet_id, hostname)) == segments:
++            return
++        self.raised_alarms[(providernet_id, hostname)] = segments
++        if segments:
++            LOG.debug("Report provider network connectivity fault: "
++                      "{}".format(providernet_id))
++            self.fm_driver.report_providernet_connectivity_fault(
++                providernet_id, hostname, segments
++            )
++        else:
++            LOG.debug("Clear provider network connectivity fault: "
++                      "{}".format(providernet_id))
++            self.fm_driver.clear_providernet_connectivity_fault(
++                providernet_id, hostname
++            )
++
++    def _providernet_vxlan_segment_exists(self, context,
++                                          providernet_id, range_id):
++        query = context.session.query(ProviderNetRange)
++        query = query.filter(
++            ProviderNetRange.providernet_id == providernet_id,
++            ProviderNetRange.id == range_id,
++        )
++        return bool(query.count())
++
++    def _providernet_vlan_segment_exists(self, context,
++                                         providernet_id, segmentation_id):
++        query = context.session.query(ProviderNetRange)
++        query = query.filter(
++            ProviderNetRange.providernet_id == providernet_id,
++            ProviderNetRange.minimum <= segmentation_id,
++            ProviderNetRange.maximum >= segmentation_id,
++        )
++        return bool(query.count())
++
++    def _providernet_segment_exists(self, context,
++                                    providernet_id, segmentation_id):
++        """
++        Return true if providernet has range covering specified segment
++        """
++        providernet = self.get_providernet_by_id(context, providernet_id)
++        if not providernet:
++            return False
++        elif providernet['type'] == constants.PROVIDERNET_FLAT:
++            return True
++        elif providernet['type'] == constants.PROVIDERNET_VXLAN:
++            return self._providernet_vxlan_segment_exists(context,
++                                                          providernet_id,
++                                                          segmentation_id)
++        elif providernet['type'] == constants.PROVIDERNET_VLAN:
++            return self._providernet_vlan_segment_exists(context,
++                                                         providernet_id,
++                                                         int(segmentation_id))
++
++        # Should never get here, so fail if it does.
++        assert False
++
++    def update_connectivity_state_entry(self, context, host_id,
++                                        providernet_id, segmentation_id,
++                                        master_host_id, test_details,
++                                        master_connectivity_state,
++                                        audit_uuid):
++        """
++        Replaces given entry in pnet connectivity table
++        """
++        res = {
++            'host_id': str(host_id),
++            'providernet_id': str(providernet_id),
++            'segmentation_id': str(segmentation_id),
++            'master_host_id': str(master_host_id),
++            'test_details': str(test_details),
++            'master_connectivity_state': master_connectivity_state,
++            'audit_uuid': str(audit_uuid),
++            'updated_at': datetime.now()}
++        with context.session.begin(subtransactions=True):
++            providernet_state = ProviderNetConnectivityState(**res)
++            query = context.session.query(ProviderNetConnectivityState)
++            query = query.filter(
++                ProviderNetConnectivityState.host_id == host_id,
++                ProviderNetConnectivityState.providernet_id == providernet_id,
++                ProviderNetConnectivityState.segmentation_id ==
++                str(segmentation_id),
++                ProviderNetConnectivityState.master_host_id == master_host_id,
++            )
++            # Verify that providernet still has range for segment
++            if self._providernet_segment_exists(context, providernet_id,
++                                                segmentation_id):
++                # only delete if entry already exists
++                if query.count():
++                    context.session.delete(query.first())
++                context.session.add(providernet_state)
++
++    def _find_primary_master(self, context, providernet_id):
++        """Returns the id of the master with most connected slaves"""
++        with context.session.begin(subtransactions=True):
++            query = context.session.query(ProviderNetConnectivityState)
++            query = query.filter(
++                ProviderNetConnectivityState.providernet_id == providernet_id,
++            )
++            masters = query.distinct(
++                ProviderNetConnectivityState.master_host_id
++            ).all()
++
++            # find the master with the highest level of connectivity
++            highest_pass_count = -1
++            highest_pass_master = None
++            for master in masters:
++                master_dict = self.get_host(context, master.master_host_id)
++                if (master_dict['availability'] != constants.HOST_UP):
++                    continue
++                count = query.filter(
++                    ProviderNetConnectivityState.master_host_id ==
++                    master.master_host_id,
++                    (ProviderNetConnectivityState.master_connectivity_state ==
++                     constants.PROVIDERNET_CONNECTIVITY_PASS),
++                ).count()
++                if count > highest_pass_count:
++                    highest_pass_count = count
++                    highest_pass_master = master.master_host_id
++        return highest_pass_master
++
++    def _pnet_id_to_master(self, context, pnet_id):
++        """Cache pnet IDs to avoid lookups for providernet types"""
++        if pnet_id in self._pnet_id_master_mapping:
++            return self._pnet_id_master_mapping[pnet_id]
++        pnet_master = self._find_primary_master(context, pnet_id)
++        self._pnet_id_master_mapping[pnet_id] = pnet_master
++        return pnet_master
++
++    def _make_providernet_connectivity_state_dict(
++        self, context, providernet_connectivity_state, fields=None
++    ):
++        state = providernet_connectivity_state.ProviderNetConnectivityState
++        host_id = state.host_id
++        host_name = providernet_connectivity_state.Host.name
++        master_host_id = state.master_host_id
++        master_host_name = providernet_connectivity_state.Master.name
++        providernet_id = state.providernet_id
++        providernet_name = providernet_connectivity_state.ProviderNet.name
++        providernet_type = str(providernet_connectivity_state.ProviderNet.type)
++        segmentation_id = state.segmentation_id
++        status = str(state.master_connectivity_state)
++        message = state.test_details
++        audit_uuid = state.audit_uuid
++        updated_at = str(state.updated_at)
++        res = {'host_id': host_id,
++               'host_name': host_name,
++               'master_host_id': master_host_id,
++               'master_host_name': master_host_name,
++               'providernet_id': providernet_id,
++               'providernet_name': providernet_name,
++               'type': providernet_type,
++               'segmentation_id': segmentation_id,
++               'status': status,
++               'message': message,
++               'audit_uuid': audit_uuid,
++               'updated_at': updated_at}
++        if res['type'] == constants.PROVIDERNET_FLAT:
++            res.pop('segmentation_id')
++        if res['type'] == constants.PROVIDERNET_VXLAN:
++            segment_min_max = self._list_segments(
++                [self.get_providernet_range_by_id(context,
++                                                  res.pop('segmentation_id'))]
++            )
++            res['segmentation_id'] = segment_min_max
++        return self._fields(res, fields)
++
++    def get_providernet_connectivity_tests(self, context,
++                                           filters=None, fields=None):
++        if not cfg.CONF.pnet_connectivity.pnet_audit_enabled:
++            raise ext_providernet.ProviderNetTestingDisabled()
++        modified_filters = {}
++        if not filters:
++            filters = []
++        if 'providernet_name' in filters and filters['providernet_name']:
++            modified_filters['providernet_id'] = []
++            for providernet_name in filters['providernet_name']:
++                modified_filters['providernet_id'].append(
++                    self.get_providernet_by_name(context,
++                                                 providernet_name)['id']
++                )
++        elif 'providernet_id' in filters and filters['providernet_id']:
++            modified_filters['providernet_id'] = filters['providernet_id']
++        if 'host_name' in filters and filters['host_name']:
++            modified_filters['host_id'] = []
++            for host_name in filters['host_name']:
++                modified_filters['host_id'].append(
++                    self.get_host_uuid(context, host_name)
++                )
++        elif 'host_id' in filters and filters['host_id']:
++            modified_filters['host_id'] = filters['host_id']
++        if 'audit_uuid' in filters and filters['audit_uuid']:
++            modified_filters['audit_uuid'] = filters['audit_uuid']
++        if 'segmentation_id' in filters and filters['segmentation_id']:
++            modified_filters['segmentation_id'] = []
++            for segmentation_id in filters['segmentation_id']:
++                try:
++                    modified_filters['segmentation_id'].append(
++                        str(int(segmentation_id))
++                    )
++                except Exception:
++                    LOG.exception("segmentation_id {} is not an int".format(
++                                  segmentation_id))
++                    continue
++
++        self._pnet_id_master_mapping = {}
++        query = self.get_providernet_connectivity_query(context)
++
++        if 'providernet_id' in modified_filters:
++            query = query.filter(
++                ProviderNetConnectivityState.providernet_id.in_(
++                    modified_filters['providernet_id']
++                )
++            )
++        if 'host_id' in modified_filters:
++            query = query.filter(
++                ProviderNetConnectivityState.host_id.in_(
++                    modified_filters['host_id']
++                )
++            )
++        if 'audit_uuid' in modified_filters:
++            query = query.filter(
++                ProviderNetConnectivityState.audit_uuid.in_(
++                    modified_filters['audit_uuid']
++                )
++            )
++
++        if 'segmentation_id' in modified_filters:
++            query = query.filter(
++                ProviderNetConnectivityState.segmentation_id.in_(
++                    modified_filters['segmentation_id']
++                )
++            )
++
++        results = []
++        for result in query:
++            master_host_id = result.ProviderNetConnectivityState.master_host_id
++            providernet_id = result.ProviderNetConnectivityState.providernet_id
++            if (master_host_id == self._pnet_id_to_master(context,
++                                                          providernet_id)):
++                results.append(
++                    self._make_providernet_connectivity_state_dict(context,
++                                                                   result,
++                                                                   fields)
++                )
++        return results
++
++    def create_providernet_connectivity_test(self, context,
++                                             providernet_connectivity_test):
++        if not cfg.CONF.pnet_connectivity.pnet_audit_enabled:
++            raise ext_providernet.ProviderNetTestingDisabled()
++        # Schedule audits for this providernet
++        test = providernet_connectivity_test["providernet_connectivity_test"]
++        providernet_id = None
++        if 'providernet_name' in test and test['providernet_name']:
++            providernet_name = test['providernet_name']
++            providernet = self.get_providernet_by_name(context,
++                                                       providernet_name)
++            providernet_id = providernet['id']
++        elif 'providernet_id' in test and test['providernet_id']:
++            providernet_id = test['providernet_id']
++        if providernet_id:
++            if 'segmentation_id' in test and test['segmentation_id']:
++                segmentation_ids = [int(test['segmentation_id'])]
++            else:
++                segmentation_ids = []
++
++            audit_uuid = self.notify_schedule_audit_providernets(
++                context, [providernet_id], segmentation_ids
++            )
++        # Schedule audits for all providernets on this host
++        elif 'host_name' in test and test['host_name']:
++            host_name = test['host_name']
++            host_uuid = self.get_host_uuid(context, host_name)
++            providernet_ids = self.get_providernets_on_host(context, host_uuid)
++            audit_uuid = self.notify_schedule_audit_providernets(
++                context, providernet_ids
++            )
++        elif 'host_id' in test and test['host_id']:
++            host_uuid = test['host_id']
++            providernet_ids = self.get_providernets_on_host(context, host_uuid)
++            audit_uuid = self.notify_schedule_audit_providernets(
++                context, providernet_ids
++            )
++        else:
++            providernets = self.get_providernets(context, fields=["id"])
++            providernet_ids = [providernet_details['id'] for
++                               providernet_details in providernets]
++            audit_uuid = self.notify_schedule_audit_providernets(
++                context, providernet_ids
++            )
++        return {"audit_uuid": audit_uuid}
++
++    def _group_segmentation_id_list(self, segmentation_ids):
++        """Takes a list of integers and groups them into ranges"""
++        if len(segmentation_ids) < 1:
++            return ""
++        sorted_segmentation_ids = sorted(
++            [int(segmentation_id) for segmentation_id in segmentation_ids]
++        )
++        grouped_ids = [tuple(g[1]) for g in itertools.groupby(
++            enumerate(sorted_segmentation_ids), lambda (i, n): i - n
++        )]
++        msg = ", ".join(
++            [(("%s-%s" % (g[0][1], g[-1][1])) if g[0][1] != g[-1][1]
++             else ("%s" % g[0][1])) for g in grouped_ids]
++        )
++        return msg
++
++    def _list_segments(self, segments):
++        """Takes a list of segments, and outputs them as a string"""
++        min_max_dict = {}
++        msg = ""
++        for segment in segments:
++            if segment:
++                min_max_dict[segment['minimum']] = segment['maximum']
++        for minimum, maximum in sorted(six.iteritems(min_max_dict)):
++            if minimum == maximum:
++                new_msg = str(minimum)
++            else:
++                new_msg = "%d-%d" % (minimum, maximum)
++            if msg:
++                msg = "%s, %s" % (msg, new_msg)
++            else:
++                msg = new_msg
++        return msg
++
++    def _segments_to_report(self, context, providernet_id, segments):
++        """Returns a string representation of the list of segments"""
++        providernet_type = self.get_providernet_by_id(context,
++                                                      providernet_id)['type']
++        if segments:
++            msg = " segmentation ranges "
++        else:
++            return ""
++        if providernet_type == constants.PROVIDERNET_VLAN:
++            msg = self._group_segmentation_id_list(segments)
++        elif providernet_type == constants.PROVIDERNET_VXLAN:
++            msg = self._list_segments(
++                [self.get_providernet_range_by_id(context, segment)
++                    for segment in segments]
++            )
++        elif providernet_type == constants.PROVIDERNET_FLAT:
++            return "flat"
++        return msg
++
++    def _analyse_providernet_connectivity_database(self, context,
++                                                   providernet_ids):
++        """
++        Analyses the providernet connectivity database and raises or clears
++         alarms as appropriate based on changes since last analysis.
++        """
++        # Run test by providernet
++        for providernet in providernet_ids:
++            primary_master = self._find_primary_master(context, providernet)
++            with context.session.begin(subtransactions=True):
++                query = context.session.query(ProviderNetConnectivityState)
++                failures = query.filter(
++                    ProviderNetConnectivityState.providernet_id == providernet,
++                    ProviderNetConnectivityState.master_host_id ==
++                    primary_master,
++                    ProviderNetConnectivityState.master_connectivity_state ==
++                    constants.PROVIDERNET_CONNECTIVITY_FAIL,
++                ).all()
++
++                # Construct a dictionary mapping hosts to lists of failures
++                hosts = self.get_providernet_hosts(context, providernet)
++                failures_by_host = {host: [] for host in hosts}
++                for failure in failures:
++                    host = failure.host_id
++                    segment = failure.segmentation_id
++                    failures_by_host[host].append(segment)
++
++                # Loop through results and raise alarms
++                for host, segments in six.iteritems(failures_by_host):
++                    hostname = self.get_hostname(context, host)
++                    segments_string = self._segments_to_report(context,
++                                                               providernet,
++                                                               segments)
++                    self._report_clear_providernet_connectivity_fault(
++                        providernet, hostname, segments_string
++                    )
++        # After analysis, remove outdated entries
++        self._remove_deprecated_connectivity_state_entries(context)
++
++    def _count_hosts_reporting_entry(self, context, providernet_id,
++                                     segmentation_id, audit_uuid):
++        """
++        Counts the number of compute nodes reporting back for this audit
++        """
++        with context.session.begin(subtransactions=True):
++            query = context.session.query(ProviderNetConnectivityState)
++            query = query.filter(
++                ProviderNetConnectivityState.providernet_id == providernet_id,
++                ProviderNetConnectivityState.segmentation_id ==
++                segmentation_id,
++                ProviderNetConnectivityState.audit_uuid == audit_uuid,
++            ).distinct(ProviderNetConnectivityState.host_id)
++            # only delete if exists
++            host_count = query.count()
++        return host_count
++
++    def schedule_audit_flat_providernet(self, context, audit_uuid,
++                                        providernet_id):
++        """
++        Runs audit for given flat providernet with segmentation ID set to 0
++        """
++        # list of audits to give to scheduler
++        pending_audits = []
++        providernet = self.get_providernet_by_id(context, providernet_id)
++        if not providernet:
++            return pending_audits
++        mtu = providernet['mtu']
++
++        audit = ProvidernetIndividualConnectivityTest(
++            audit_uuid, providernet_id, constants.PROVIDERNET_FLAT,
++            [constants.PROVIDERNET_FLAT], {ext_providernet.MTU: mtu}
++        )
++        pending_audits.append(audit)
++        return pending_audits
++
++    def schedule_audit_vxlan_providernet(self, context, audit_uuid,
++                                         providernet_id, batch_size):
++        """
++        Runs audits for each segmentation ID in given vxlan providernet
++        """
++        # list of audits to give to scheduler
++        pending_audits = []
++        # list of tests in audit; when it fills, move to pending audits
++        audit_queue = []
++        segmentation_ranges = self.get_providernet_ranges(
++            context,
++            filters={"providernet_id": [providernet_id]},
++        )
++        providernet = self.get_providernet_by_id(context, providernet_id)
++        if not providernet:
++            return pending_audits
++        mtu = providernet['mtu']
++
++        # Run audit for first segmentation ID in each segmentation range
++        for segmentation_range in segmentation_ranges:
++            if len(audit_queue) >= batch_size:
++                audit = ProvidernetIndividualConnectivityTest(
++                    audit_uuid, providernet_id, constants.PROVIDERNET_VXLAN,
++                    audit_queue, {ext_providernet.MTU: mtu}
++                )
++                pending_audits.append(audit)
++                audit_queue = []
++            audit_queue.append(segmentation_range)
++        if audit_queue:
++            audit = ProvidernetIndividualConnectivityTest(
++                audit_uuid, providernet_id, constants.PROVIDERNET_VXLAN,
++                audit_queue, {ext_providernet.MTU: mtu}
++            )
++            pending_audits.append(audit)
++        return pending_audits
++
++    def schedule_audit_vlan_providernet(self, context, audit_uuid,
++                                        providernet_id, batch_size,
++                                        segmentation_ids=None):
++        """
++        Runs audits for batches of segmentation IDs in given vlan providernet
++        """
++        # list of audits to give to scheduler
++        pending_audits = []
++        # list of tests in audit; when it fills, move to pending audits
++        audit_queue = []
++        segmentation_ranges = self.get_providernet_ranges(
++            context,
++            filters={"providernet_id": [providernet_id]},
++            fields=["minimum", "maximum"]
++        )
++        providernet = self.get_providernet_by_id(context, providernet_id)
++        if not providernet:
++            return pending_audits
++        mtu = providernet['mtu']
++
++        for r in segmentation_ranges:
++            for segmentation_id in six.moves.range(r["minimum"],
++                                                   r["maximum"] + 1):
++                if len(audit_queue) >= batch_size:
++                    audit = ProvidernetIndividualConnectivityTest(
++                        audit_uuid, providernet_id,
++                        constants.PROVIDERNET_VLAN,
++                        audit_queue, {ext_providernet.MTU: mtu}
++                    )
++                    pending_audits.append(audit)
++                    audit_queue = []
++                if (not segmentation_ids or
++                        segmentation_id in segmentation_ids):
++                    audit_queue.append(segmentation_id)
++        if audit_queue:
++            audit = ProvidernetIndividualConnectivityTest(
++                audit_uuid, providernet_id,
++                constants.PROVIDERNET_VLAN,
++                audit_queue, {ext_providernet.MTU: mtu}
++            )
++            pending_audits.append(audit)
++        return pending_audits
++
++    def schedule_analyse_providernet_connectivity(self, context,
++                                                  providernet_id):
++        """
++        Schedules analysing the results of connectivity audits for providernet
++        """
++        # Empty audit is added to signal to analyse results for alarms
++        empty_audit = ProvidernetIndividualConnectivityTest(None,
++                                                            providernet_id,
++                                                            None, None,
++                                                            None)
++        self.scheduled_audits.insert(0, empty_audit)
++        self.scheduled_audits.append(empty_audit)
++
++    def schedule_audit_providernets(self, context, providernet_ids,
++                                    segmentation_ids=None, audit_uuid=None):
++        """
++        Calls type-specific providernet-connectivity-audit scheduler
++        """
++        if not cfg.CONF.pnet_connectivity.pnet_audit_enabled:
++            raise ext_providernet.ProviderNetTestingDisabled()
++        context.session.expire_all()
++        time.sleep(0.1)
++        batch_size = cfg.CONF.pnet_connectivity.pnet_audit_batch_size
++        if not audit_uuid:
++            audit_uuid = uuidutils.generate_uuid()
++        for providernet_id in set(providernet_ids):
++            providernet = self.get_providernet_by_id(context, providernet_id)
++            if not providernet:
++                continue
++            providernet_type = providernet['type']
++            if providernet_type == constants.PROVIDERNET_FLAT:
++                self.scheduled_audits.extend(
++                    self.schedule_audit_flat_providernet(context, audit_uuid,
++                                                         providernet_id)
++                )
++            elif providernet_type == constants.PROVIDERNET_VXLAN:
++                self.scheduled_audits.extend(
++                    self.schedule_audit_vxlan_providernet(context, audit_uuid,
++                                                          providernet_id,
++                                                          batch_size)
++                )
++            elif providernet_type == constants.PROVIDERNET_VLAN:
++                self.scheduled_audits.extend(
++                    self.schedule_audit_vlan_providernet(context, audit_uuid,
++                                                         providernet_id,
++                                                         batch_size,
++                                                         segmentation_ids)
++                )
++            self.schedule_analyse_providernet_connectivity(context,
++                                                           providernet_id)
++        return audit_uuid
++
++    def _schedule_sequential_providernet_audits(self, context):
++        """Schedules audits to be run for all pnet ranges"""
++        try:
++            providernet_id_dict = self.get_providernets(
++                context,
++                fields=['id']
++            )
++            providernet_ids = [providernet['id']
++                               for providernet in providernet_id_dict]
++            self.schedule_audit_providernets(context, providernet_ids)
++        except Exception as e:
++            LOG.exception("Unexpected exception in audit, {}".format(e))
++
++    def elect_masters(self, context, providernet_id,
++                      compute_hostnames, num_masters):
++        """Designate a given number of hosts as masters"""
++        masters = compute_hostnames[:num_masters]
++        primary_master = self._find_primary_master(context, providernet_id)
++        if primary_master:
++            primary_master_hostname = self.get_hostname(context,
++                                                        primary_master)
++            if primary_master_hostname not in masters:
++                masters.pop()
++                masters.insert(0, primary_master_hostname)
++        self._set_connectivity_data_to_unknown_by_new_masters(context,
++                                                              providernet_id,
++                                                              masters)
++        return masters
++
++    def _setup_connectivity_audit(self, context, audit_uuid, hostname,
++                                  providernet_id, segmentation_ids,
++                                  extra_data):
++        """Uses RPC API to call setup_connectivity_audit remotely"""
++        providernet = self.get_providernet_by_id(context,
++                                                 providernet_id)
++        return self.pnet_connectivity_notifier.setup_connectivity_audit(
++            context, audit_uuid, hostname,
++            (providernet_id, providernet['name'], providernet['type']),
++            segmentation_ids, extra_data
++        )
++
++    def _start_connectivity_audit(self, context, audit_uuid, masters, hosts,
++                                  providernet_id, segmentation_ids,
++                                  extra_data):
++        """Uses RPC API to call start_connectivity_audit remotely"""
++        providernet = self.get_providernet_by_id(context,
++                                                 providernet_id)
++        self.pnet_connectivity_notifier.start_connectivity_audit(
++            context, audit_uuid, masters, hosts,
++            (providernet_id, providernet['name'], providernet['type']),
++            segmentation_ids, extra_data
++        )
++
++    def _teardown_connectivity_audit(self, context, audit_uuid, hostname):
++        """
++        Uses RPC API to call teardown connectivity_audit remotely,
++         and return whether call succeeds.
++        """
++        try:
++            return self.pnet_connectivity_notifier.teardown_connectivity_audit(
++                context, audit_uuid, hostname
++            )
++        except oslo_messaging.MessagingTimeout:
++            return False
++
++    def record_audit_results(self, context, audit_results, audit_uuid):
++        """Called frpm RPC, write audit results to DB"""
++        for audit_result in audit_results:
++            hostname, master_hostname, providernet_id, \
++                segmentation_id, result, test_details = audit_result
++            host_id = self.get_host_uuid(context, hostname)
++            master_host_id = self.get_host_uuid(context, master_hostname)
++            master_connectivity_state = result
++            self.update_connectivity_state_entry(context, host_id,
++                                                 providernet_id,
++                                                 segmentation_id,
++                                                 master_host_id,
++                                                 test_details,
++                                                 master_connectivity_state,
++                                                 audit_uuid)
++
++    def _record_unknown_for_audit(self, context, audit_uuid, providernet_id,
++                                  providernet_type, segments, hostname):
++        """
++        Record unknown result for segment with only one node
++        """
++        host_id = self.get_host_uuid(context, hostname)
++        for segment in segments:
++            if providernet_type == constants.PROVIDERNET_VXLAN:
++                segmentation_id = str(segment['id'])
++            else:
++                segmentation_id = str(segment)
++            self.update_connectivity_state_entry(
++                context, host_id, providernet_id, segmentation_id, host_id,
++                "Requires at least 2 nodes to run test for network segment",
++                constants.PROVIDERNET_CONNECTIVITY_UNKNOWN, audit_uuid
++            )
++
++    def _run_individual_audit(self, context, audit_uuid, providernet_id,
++                              providernet_type, segments, extra_data):
++        """
++        Runs audits for give segmentation IDs
++        """
++        audit_uuid = audit_uuid
++        setup_passed = True
++        num_masters = cfg.CONF.pnet_connectivity.pnet_audit_number_of_masters
++        timeout = cfg.CONF.pnet_connectivity.pnet_audit_timeout
++        compute_hosts = self.get_providernet_host_objects(context,
++                                                          providernet_id)
++        compute_hostnames = []
++        # tuple containing (hostname, link-local-address) pairs
++        self.compute_masters_addresses = []
++
++        for host in compute_hosts:
++            if host.availability == constants.HOST_UP:
++                compute_hostnames.append(host.name)
++        num_hosts = len(compute_hostnames)
++
++        if num_hosts < 1:
++            return
++        if num_hosts == 1:
++            self._record_unknown_for_audit(context, audit_uuid, providernet_id,
++                                           providernet_type, segments,
++                                           compute_hostnames[0])
++            return
++        if num_hosts < num_masters:
++            num_masters = num_hosts
++
++        compute_masters = self.elect_masters(context, providernet_id,
++                                             compute_hostnames, num_masters)
++
++        try:
++            for compute_master in compute_masters:
++                link_local_address = self._setup_connectivity_audit(
++                    context, audit_uuid, compute_master,
++                    providernet_id, segments, extra_data
++                )
++                self.compute_masters_addresses.append(
++                    (compute_master, link_local_address)
++                )
++        except oslo_messaging.MessagingTimeout:
++            setup_passed = False
++
++        # Only run connectivity tests if all masters were setup correctly
++        if setup_passed:
++            self._start_connectivity_audit(context, audit_uuid,
++                                           self.compute_masters_addresses,
++                                           compute_hostnames, providernet_id,
++                                           segments, extra_data)
++            # Wait for results from all hosts for this audit
++            # Only check first segment because all are reported together
++            start_time = time.time()
++            first_segment = segments[0]
++            # Check if vxlan
++            if providernet_type == constants.PROVIDERNET_VXLAN:
++                segmentation_id = str(first_segment['id'])
++            else:
++                segmentation_id = str(first_segment)
++            while self._count_hosts_reporting_entry(context, providernet_id,
++                                                    segmentation_id,
++                                                    audit_uuid) < num_hosts:
++                current_time = time.time()
++                if (current_time - start_time) > timeout:
++                    LOG.warning("Timed out waiting for results from audit "
++                                "%(audit_uuid)s for providernet "
++                                "%(providernet_id)s segments "
++                                "%(segments)s",
++                                {"audit_uuid": audit_uuid,
++                                 "providernet_id": providernet_id,
++                                 "segments": segments})
++                    break
++                time.sleep(1)
++
++            # Teardown only masters that have been setup
++            teardown_passed = True
++            for compute_master, address in self.compute_masters_addresses:
++                teardown_passed &= self._teardown_connectivity_audit(
++                    context, audit_uuid, compute_master
++                )
++        else:
++            # if setup fails, cast out teardown to all hosts
++            self._teardown_connectivity_audit(context, audit_uuid, None)
++        # If there is a failure, sleep for timeout for individual audit,
++        #  which should give RPC handlers time to finish
++        if not setup_passed or not teardown_passed:
++            time.sleep(timeout)
++
++    def _run_providernet_connectivity_tests(self, context):
++        """Consumes schedules audits and then returns"""
++        try:
++            while len(self.scheduled_audits) > 0:
++                audit = self.scheduled_audits.pop(0)
++                if audit.audit_uuid:
++                    self._run_individual_audit(context,
++                                               audit.audit_uuid,
++                                               audit.providernet_id,
++                                               audit.providernet_type,
++                                               audit.segments,
++                                               audit.extra_data)
++                else:
++                    # If not, then analyse results
++                    self._analyse_providernet_connectivity_database(
++                        context, [audit.providernet_id]
++                    )
++        except Exception as e:
++            LOG.error("Running connectivity test failed, {}".format(e))
++            return
++
++    def _set_connectivity_data_to_unknown_by_pnet_range(self, context,
++                                                        providernet_range):
++        """Deprecate all entries for the providernet this range is in"""
++        with context.session.begin(subtransactions=True):
++            query = context.session.query(ProviderNetConnectivityState)
++
++            # don't update if already outdated
++            query = query.filter(
++                (ProviderNetConnectivityState.master_connectivity_state !=
++                 constants.PROVIDERNET_CONNECTIVITY_UNKNOWN)
++            )
++
++            query = query.filter(
++                (ProviderNetConnectivityState.providernet_id ==
++                 providernet_range.providernet_id)
++            )
++
++            state_unknown = {
++                ProviderNetConnectivityState.master_connectivity_state:
++                    constants.PROVIDERNET_CONNECTIVITY_UNKNOWN,
++                ProviderNetConnectivityState.updated_at: datetime.now(),
++                ProviderNetConnectivityState.test_details:
++                    "Providernet range changes were made for this providernet"
++            }
++            query.update(state_unknown, synchronize_session='fetch')
++
++    def _set_connectivity_data_to_unknown_by_host(self, context, host_id):
++        """Deprecate all entries for host, whether as slave or master"""
++        # Filter by host_id or master_hostid
++        with context.session.begin(subtransactions=True):
++            query = context.session.query(ProviderNetConnectivityState)
++
++            # don't update if already outdated
++            query = query.filter(
++                (ProviderNetConnectivityState.master_connectivity_state !=
++                 constants.PROVIDERNET_CONNECTIVITY_UNKNOWN)
++            )
++
++            query = query.filter(
++                (ProviderNetConnectivityState.host_id == host_id) |
++                (ProviderNetConnectivityState.master_host_id == host_id)
++            )
++
++            state_unknown = {
++                ProviderNetConnectivityState.master_connectivity_state:
++                    constants.PROVIDERNET_CONNECTIVITY_UNKNOWN,
++                ProviderNetConnectivityState.updated_at: datetime.now(),
++                ProviderNetConnectivityState.test_details:
++                    "This host went offline"
++            }
++            query.update(state_unknown, synchronize_session='fetch')
++
++    def _set_connectivity_data_to_unknown_by_new_masters(self, context,
++                                                         providernet_id,
++                                                         masters):
++        """
++        Deprecate all entries for this providernet where the master is not
++        one of the masters passed to this function
++        """
++        # Convert master list from names to IDs
++        master_ids = [str(self.get_host_uuid(context, host))
++                      for host in masters]
++
++        # Filter by providernet ID, and then check not in new_masters
++        with context.session.begin(subtransactions=True):
++            query = context.session.query(ProviderNetConnectivityState)
++
++            # don't update if already outdated
++            query = query.filter(
++                (ProviderNetConnectivityState.master_connectivity_state !=
++                 constants.PROVIDERNET_CONNECTIVITY_UNKNOWN)
++            )
++
++            query = query.filter(
++                (ProviderNetConnectivityState.providernet_id ==
++                 providernet_id)
++            )
++
++            query = query.filter(
++                ProviderNetConnectivityState.master_host_id.notin_(master_ids)
++            )
++
++            state_unknown = {
++                ProviderNetConnectivityState.master_connectivity_state:
++                    constants.PROVIDERNET_CONNECTIVITY_UNKNOWN,
++                ProviderNetConnectivityState.updated_at: datetime.now(),
++                ProviderNetConnectivityState.test_details:
++                    "Master election resulted in this no longer being master"
++            }
++            query.update(state_unknown, synchronize_session='fetch')
++
++    def _remove_deprecated_connectivity_state_entries(self, context):
++        """Remove any entry older than audit interval"""
++        interval = cfg.CONF.pnet_connectivity.pnet_audit_interval
++        delete_older_than_time = datetime.now() - timedelta(seconds=interval)
++        with context.session.begin(subtransactions=True):
++            query = context.session.query(ProviderNetConnectivityState)
++            query = query.filter(
++                (ProviderNetConnectivityState.updated_at <
++                 delete_older_than_time),
++                (ProviderNetConnectivityState.master_connectivity_state ==
++                 constants.PROVIDERNET_CONNECTIVITY_UNKNOWN)
++            )
++            if query.count():
++                query.delete(synchronize_session='fetch')
++
++    def notify_schedule_audit_providernets(self, context, providernet_ids,
++                                           segmentation_ids=None,
++                                           by_event=False):
++        """
++        Calls schedule_audit_providernets in main process
++        """
++        audit_uuid = uuidutils.generate_uuid()
++        if not cfg.CONF.pnet_connectivity.pnet_audit_enabled:
++            return audit_uuid
++        if by_event:
++            if not cfg.CONF.pnet_connectivity.pnet_audit_schedule_by_event:
++                return audit_uuid
++
++        target = oslo_messaging.Target(
++            topic=self.topic_pnet_connectivity_test_create, version='1.0'
++        )
++        self.client = n_rpc.get_client(target)
++        cctxt = self.client.prepare()
++        cctxt.cast(context, 'schedule_audit_providernets',
++                   providernet_ids=providernet_ids,
++                   segmentation_ids=segmentation_ids,
++                   audit_uuid=audit_uuid)
++        return audit_uuid
++
++    def start_pnet_notify_listener(self):
++        """
++        Starts listening for notifications
++        """
++        self.connection = n_rpc.create_connection()
++        self.connection.create_consumer(
++            self.topic_pnet_connectivity_test_create, [self], fanout=False
++        )
++        self.connection.consume_in_threads()
+diff --git a/neutron/drivers/fm.py b/neutron/drivers/fm.py
+index 2680681..9d89a84 100644
+--- a/neutron/drivers/fm.py
++++ b/neutron/drivers/fm.py
+@@ -73,6 +73,14 @@ class FmDriver(object):
+     def clear_providernet_fault(self, providernet_id):
+         pass
+ 
++    @abc.abstractmethod
++    def report_providernet_connectivity_fault(self, providernet_id, hostname):
++        pass
++
++    @abc.abstractmethod
++    def clear_providernet_connectivity_fault(self, providernet_id, hostname):
++        pass
++
+ 
+ class NoopFmDriver(FmDriver):
+ 
+@@ -105,3 +113,9 @@ class NoopFmDriver(FmDriver):
+ 
+     def clear_providernet_fault(self, providernet_id):
+         pass
++
++    def report_providernet_connectivity_fault(self, providernet_id, hostname):
++        pass
++
++    def clear_providernet_connectivity_fault(self, providernet_id, hostname):
++        pass
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index c89359c..610b576 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -179,9 +179,46 @@ PROVIDERNET_RANGE_ATTRIBUTES = {
+     },
+ }
+ 
+-RESOURCE_ATTRIBUTE_MAPS = dict(PROVIDERNET_TYPE_ATTRIBUTES.items() +
+-                               PROVIDERNET_ATTRIBUTES.items() +
+-                               PROVIDERNET_RANGE_ATTRIBUTES.items())
++# Provider Network Connectivity State Attribute Map
++PROVIDERNET_CONNECTIVITY_TEST_NAME = 'providernet_connectivity_test'
++PROVIDERNET_CONNECTIVITY_TEST_ATTRIBUTES = {
++    PROVIDERNET_CONNECTIVITY_TEST_NAME + 's': {
++        'host_id': {'allow_post': True, 'allow_put': False,
++                    'is_visible': True, 'default': None},
++        'host_name': {'allow_post': True, 'allow_put': False,
++                      'is_visible': True, 'default': None},
++        'master_id': {'allow_post': False, 'allow_put': False,
++                      'is_visible': True},
++        'master_name': {'allow_post': False, 'allow_put': False,
++                        'is_visible': True},
++        'providernet_id': {'allow_post': True, 'allow_put': False,
++                           'is_visible': True, 'default': None},
++        'providernet_name': {'allow_post': True, 'allow_put': False,
++                             'is_visible': True, 'default': None},
++        'type': {'allow_post': False, 'allow_put': False,
++                 'is_visible': True},
++        'segmentation_id': {'allow_post': True, 'allow_put': False,
++                            'is_visible': True, 'default': None},
++        'status': {'allow_post': False, 'allow_put': False,
++                   'is_visible': True},
++        'message': {'allow_post': False, 'allow_put': False,
++                    'is_visible': True},
++        'audit_uuid': {'allow_post': False, 'allow_put': False,
++                       'is_visible': True, 'default': None},
++        'updated_at': {'allow_post': False, 'allow_put': False,
++                       'is_visible': True, 'default': None},
++        'tenant_id': {'allow_post': True, 'allow_put': False,
++                      'is_visible': False,
++                      'default': None},
++    },
++}
++
++RESOURCE_ATTRIBUTE_MAPS = dict(
++    PROVIDERNET_TYPE_ATTRIBUTES.items() +
++    PROVIDERNET_ATTRIBUTES.items() +
++    PROVIDERNET_RANGE_ATTRIBUTES.items() +
++    PROVIDERNET_CONNECTIVITY_TEST_ATTRIBUTES.items()
++)
+ 
+ 
+ class ProviderNetTypeNotSupported(exc.NeutronException):
+@@ -321,6 +358,11 @@ class MultiSubnetProviderSegmentsNotSupported(exc.NeutronException):
+     message = _("Multi-segment provider networks for subnets is not supported")
+ 
+ 
++class ProviderNetTestingDisabled(exc.NeutronException):
++    message = _("Provider network testing is not supported in "
++                "this configuration.")
++
++
+ def _raise_if_updates_provider_attributes(attrs):
+     """Raise exception if provider attributes are present.
+ 
+@@ -484,3 +526,8 @@ class ProviderNetPluginBase(object):
+     def list_networks_on_providernet(self, context, id,
+                                      filters=None, fields=None):
+         pass
++
++    @abc.abstractmethod
++    def get_providernet_connectivity_tests(self, context, filters=None,
++                                           fields=None):
++        pass
+diff --git a/neutron/opts.py b/neutron/opts.py
+index 65edc2a..6bdae8b 100644
+--- a/neutron/opts.py
++++ b/neutron/opts.py
+@@ -55,6 +55,7 @@ import neutron.db.l3_dvr_db
+ import neutron.db.l3_gwmode_db
+ import neutron.db.l3_hamode_db
+ import neutron.db.migration.cli
++import neutron.db.providernet_db
+ import neutron.extensions.l3
+ import neutron.extensions.securitygroup
+ import neutron.plugins.ml2.config
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 171fbaa..ca14cbf 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -13,7 +13,7 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2013-2015 Wind River Systems, Inc.
++# Copyright (c) 2013-2016 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -39,6 +39,7 @@ from neutron_lib.callbacks import exceptions
+ from neutron_lib.callbacks import registry
+ from neutron_lib.callbacks import resources
+ from neutron_lib import constants as const
++from neutron_lib import context as n_ctx
+ from neutron_lib import exceptions as exc
+ from neutron_lib.exceptions import port_security as psec_exc
+ from neutron_lib.plugins import constants as plugin_constants
+@@ -49,6 +50,7 @@ from oslo_db import exception as os_db_exception
+ from oslo_log import helpers as log_helpers
+ from oslo_log import log
+ from oslo_serialization import jsonutils
++from oslo_service import loopingcall
+ from oslo_utils import excutils
+ from oslo_utils import importutils
+ from oslo_utils import uuidutils
+@@ -59,9 +61,11 @@ from neutron._i18n import _
+ from neutron.agent import securitygroups_rpc as sg_rpc
+ from neutron.api.rpc.agentnotifiers import dhcp_rpc_agent_api
+ from neutron.api.rpc.agentnotifiers import host_rpc_agent_api
++from neutron.api.rpc.agentnotifiers import pnet_connectivity_rpc_agent_api
+ from neutron.api.rpc.handlers import dhcp_rpc
+ from neutron.api.rpc.handlers import dvr_rpc
+ from neutron.api.rpc.handlers import metadata_rpc
++from neutron.api.rpc.handlers import pnet_connectivity_rpc
+ from neutron.api.rpc.handlers import qos_rpc
+ from neutron.api.rpc.handlers import resources_rpc
+ from neutron.api.rpc.handlers import securitygroups_rpc
+@@ -224,6 +228,9 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         self.add_agent_status_check_worker(self.agent_health_check)
+         self.add_agent_status_check_worker(self.audit_agent_state)
+         self.add_workers(self.mechanism_manager.get_workers())
++        if cfg.CONF.pnet_connectivity.pnet_audit_enabled:
++            self._start_pnet_connectivity_audit()
++            self.start_pnet_notify_listener()
+         self._verify_service_plugins_requirements()
+         LOG.info("Modular L2 Plugin initialization complete")
+ 
+@@ -237,9 +244,33 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             agents_db.AgentExtRpcCallback(),
+             metadata_rpc.MetadataRpcCallback(),
+             resources_rpc.ResourcesPullRpcCallback(),
+-            qos_rpc.QoSServerRpcCallback()
++            qos_rpc.QoSServerRpcCallback(),
++            self.pnet_connectivity_rpc_callback,
+         ]
+ 
++    def _start_pnet_connectivity_audit(self):
++        # Schedule tests to be run ever audit interval
++        audit_interval = \
++            cfg.CONF.pnet_connectivity.pnet_audit_interval
++        # Initial delay to reduce stress during dead-office recovery
++        initial_delay = \
++            cfg.CONF.pnet_connectivity.pnet_audit_startup_delay
++        if audit_interval:
++            self.connectivity_audit_scheduler = \
++                loopingcall.FixedIntervalLoopingCall(
++                    self.schedule_providernet_connectivity_tests)
++            self.connectivity_audit_scheduler.start(
++                interval=audit_interval,
++                initial_delay=initial_delay)
++
++        # Run any test that is currently scheduled, whether by scheduler, or
++        # by other events such as adding a new segmentation range, or when
++        # a node becomes available.
++        self.connectivity_audit = loopingcall.FixedIntervalLoopingCall(
++                self.run_providernet_connectivity_tests
++        )
++        self.connectivity_audit.start(interval=1, initial_delay=initial_delay)
++
+     def _setup_dhcp(self):
+         """Initialize components to support DHCP."""
+         self.network_scheduler = importutils.import_object(
+@@ -301,10 +332,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         """Initialize RPC notifiers for agents."""
+         self.ovo_notifier = ovo_rpc.OVOServerRpcInterface()
+         self.notifier = rpc.AgentNotifierApi(topics.AGENT)
++        self.pnet_connectivity_rpc_callback = \
++            pnet_connectivity_rpc.PnetConnectivityCallback(self)
+         self.agent_notifiers[const.AGENT_TYPE_DHCP] = (
+             dhcp_rpc_agent_api.DhcpAgentNotifyAPI()
+         )
+         self.host_notifier = host_rpc_agent_api.HostAgentNotifyAPI()
++        self.pnet_connectivity_notifier = \
++            pnet_connectivity_rpc_agent_api.PnetConnectivityAgentNotifyAPI()
+ 
+     @log_helpers.log_method_call
+     def start_rpc_listeners(self):
+@@ -336,6 +371,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 if self.type_manager.network_matches_filters(network, filters)
+                 ]
+ 
++    def schedule_providernet_connectivity_tests(self):
++        context = n_ctx.get_admin_context()
++        self._schedule_sequential_providernet_audits(context)
++
++    def run_providernet_connectivity_tests(self):
++        context = n_ctx.get_admin_context()
++        self._run_providernet_connectivity_tests(context)
++
+     def _check_mac_update_allowed(self, orig_port, port, binding):
+         unplugged_types = (portbindings.VIF_TYPE_BINDING_FAILED,
+                            portbindings.VIF_TYPE_UNBOUND)
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index d9824c5..896aff5 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -50,6 +50,7 @@ from neutron.agent.vswitch import constants as avs_constants
+ from neutron.agent.vswitch import manager
+ from neutron.agent.vswitch import vif_api
+ from neutron.api.rpc.handlers import dvr_rpc
++from neutron.api.rpc.handlers import pnet_connectivity_rpc
+ from neutron.api.rpc.handlers import qos_rpc
+ from neutron.common import config as common_config
+ from neutron.common import constants as n_const
+@@ -249,7 +250,8 @@ class VSwitchBaseRpcCallbacksMixin(object):
+ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                                sg_rpc.SecurityGroupAgentRpcCallbackMixin,
+                                qos_rpc.QoSAgentRpcCallbackMixin,
+-                               dvr_rpc.DVRAgentRpcCallbackMixin):
++                               dvr_rpc.DVRAgentRpcCallbackMixin,
++                               pnet_connectivity_rpc.PnetConnectivityRpc):
+ 
+     # Set RPC API version to 1.0 by default.
+     # history
+@@ -1739,7 +1741,11 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+ 
+     def _report_connectivity_results(self, results_list):
+         """Use RPC API to contact controller to write results to database"""
+-        pass
++        audit_uuid = \
++            self.pnet_connectivity_manager.pnet_connectivity_audit_uuid
++        self.pnet_connectivity_api.report_connectivity_results(self.context,
++                                                               results_list,
++                                                               audit_uuid)
+ 
+     def _audit_dvr_mac_addresses(self):
+         """
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index 969db27..c66ac2b 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -61,11 +61,30 @@ class DefaultFmDriver(fm.FmDriver):
+                               fm_constants.FM_ENTITY_TYPE_PROVIDERNET)
+ 
+     @staticmethod
+-    def _get_providernet_entity_instance_id(providernet_id):
+-        return "{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_SERVICE,
+-                                    fm_constants.FM_SERVICE_NETWORKING,
+-                                    fm_constants.FM_ENTITY_TYPE_PROVIDERNET,
+-                                    providernet_id)
++    def _get_providernet_entity_instance_id(providernet_id, hostname=None):
++        ret = ""
++        if hostname:
++            ret = "{}={}.".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                  hostname)
++        ret = "{}{}={}.{}={}".format(ret,
++                                     fm_constants.FM_ENTITY_TYPE_SERVICE,
++                                     fm_constants.FM_SERVICE_NETWORKING,
++                                     fm_constants.FM_ENTITY_TYPE_PROVIDERNET,
++                                     providernet_id)
++        return ret
++
++    @staticmethod
++    def _get_providernet_connectivity_reason(providernet_id, hostname,
++                                             segmentation_ranges):
++        if segmentation_ranges != "flat":
++            msg = _("Communication failure detected over provider network {}"
++                    " for ranges {} on host {}").format(providernet_id,
++                                                        segmentation_ranges,
++                                                        hostname)
++        else:
++            msg = _("Communication failure detected over provider network {}"
++                    " on host {}").format(providernet_id, hostname)
++        return msg
+ 
+     @staticmethod
+     def _get_agent_entity_type_id():
+@@ -189,6 +208,38 @@ class DefaultFmDriver(fm.FmDriver):
+         self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_PROVIDERNET,
+                                 entity_instance_id)
+ 
++    def report_providernet_connectivity_fault(self, providernet_id, hostname,
++                                              segmentation_ranges):
++        entity_type_id = self._get_providernet_entity_type_id()
++        entity_instance_id = \
++            self._get_providernet_entity_instance_id(providernet_id, hostname)
++        reason_text = self._get_providernet_connectivity_reason(
++            providernet_id, hostname, segmentation_ranges)
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_PROVIDERNET_CONNECTIVITY,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_constants.FM_ALARM_SEVERITY_MAJOR,
++            reason_text=reason_text,
++            alarm_type=fm_constants.FM_ALARM_TYPE_7,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
++            proposed_repair_action=_("Check neighbour switch port VLAN"
++                                     " assignments."),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_providernet_connectivity_fault(self, providernet_id, hostname):
++        """
++        Clear a fault management alarm condition for connectivity
++         for a providernet.
++        """
++        entity_instance_id = \
++            self._get_providernet_entity_instance_id(providernet_id, hostname)
++        alarm_id = fm_constants.FM_ALARM_ID_NETWORK_PROVIDERNET_CONNECTIVITY
++        self.fm_api.clear_fault(alarm_id, entity_instance_id)
++
+     def report_agent_fault(self, hostname, agent_id):
+         """
+         Generate a fault management alarm condition for agent alive
+diff --git a/neutron/tests/unit/plugins/wrs/test_extension_pnet.py b/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+index 9d48a6f..c5085ee 100644
+--- a/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
++++ b/neutron/tests/unit/plugins/wrs/test_extension_pnet.py
+@@ -25,9 +25,13 @@ import uuid
+ 
+ import webob.exc
+ 
++import mock
+ from oslo_log import log as logging
+ 
++from neutron.api.rpc.agentnotifiers import pnet_connectivity_rpc_agent_api
++from neutron.api.rpc.handlers import pnet_connectivity_rpc
+ from neutron.common import constants as n_const
++from neutron.common import rpc as n_rpc
+ from neutron.extensions import wrs_provider as ext_pnet
+ from neutron.plugins.ml2 import config
+ from neutron.tests.unit.db import test_db_base_plugin_v2
+@@ -37,6 +41,11 @@ from neutron_lib.plugins import directory
+ 
+ LOG = logging.getLogger(__name__)
+ 
++TENANT_1 = "test-tenant"
++
++HOST_1 = 'test-host'
++
++AUDIT_1 = '43b12c0b-3c17-4661-86d2-52c5a3b83c2f'
+ 
+ FLAT_PNET1 = {'name': 'flat-pnet0',
+               'type': n_const.PROVIDERNET_FLAT,
+@@ -199,6 +208,31 @@ class ProvidernetTestCaseMixin(object):
+         actual_type = body['NeutronError']['type']
+         self.assertEqual(expected_type, actual_type)
+ 
++    def _create_pnet_connectivity_state(self, data):
++        request = self.new_create_request(
++            'wrs-provider/providernet-connectivity-tests', data
++        )
++        return request.get_response(self.ext_api)
++
++    def _make_pnet_connectivity_state(self, data):
++        response = self._create_pnet_connectivity_state(data)
++        if response.status_int >= 400:
++            raise webob.exc.HTTPClientError(code=response.status_int)
++        return self.deserialize(self.fmt, response)
++
++    @contextlib.contextmanager
++    def pnet_connectivity_state(self, providernet_id=None, host_name=None):
++        data = {'providernet_connectivity_test': {
++                    'providernet_id': providernet_id,
++                    'host_name': host_name,
++                    'tenant_id': TENANT_1
++                }}
++        obj = self._make_pnet_connectivity_state(data)
++        try:
++            yield obj
++        finally:
++            pass
++
+ 
+ class ProvidernetTestCase(ProvidernetTestCaseMixin,
+                           test_wrs_plugin.WrsMl2PluginV2TestCase):
+@@ -1225,3 +1259,78 @@ class ProvidernetRangeUpdateTestCase(ProvidernetTestCaseMixin,
+                               data, range_data['id'])
+                 response = request.get_response(self.ext_api)
+                 self.assertEqual(response.status_int, 500)
++
++
++class ProvidernetConnectivityTestCase(ProvidernetTestCaseMixin,
++                                      test_wrs_plugin.WrsMl2PluginV2TestCase):
++
++    def setup_config(self):
++        super(ProvidernetConnectivityTestCase, self).setup_config()
++        # Instantiate a fake host driver to allow us to control the host to
++        # provider network mappings
++        config.cfg.CONF.set_override('host_driver',
++                                     'neutron.tests.unit.plugins.wrs.'
++                                     'test_host_driver.TestHostDriver')
++
++    def setUp(self, plugin=None, ext_mgr=None):
++        super(ProvidernetConnectivityTestCase, self).setUp()
++        self._plugin = directory.get_plugin()
++        self._host_driver = self._plugin.host_driver
++        self.client = mock.patch.object(n_rpc, "get_client").start()
++        self.rpc = pnet_connectivity_rpc.PnetConnectivityRpcApi('fake_topic')
++        self.mock_cctxt = self.rpc.client.prepare.return_value
++        self.ctxt = mock.ANY
++        self.notifier = pnet_connectivity_rpc_agent_api.\
++            PnetConnectivityAgentNotifyAPI(topic='fake-topic')
++
++    def test_notify_schedule_providernet_audit_generic(self):
++        with self.pnet_connectivity_state():
++            pass
++
++    def test_setup_connectivity_audit_rpc(self):
++        self.notifier.setup_connectivity_audit(self.ctxt,
++                                               hostname=HOST_1,
++                                               audit_uuid=AUDIT_1,
++                                               providernet=VLAN_PNET1,
++                                               segments=[],
++                                               extra_data={})
++        self.mock_cctxt.call.assert_called_with(self.ctxt,
++                                                'setup_connectivity_audit',
++                                                audit_uuid=AUDIT_1,
++                                                providernet=VLAN_PNET1,
++                                                segments=[],
++                                                extra_data={})
++
++    def test_start_connectivity_audit_rpc(self):
++        self.notifier.start_connectivity_audit(self.ctxt,
++                                               audit_uuid=AUDIT_1,
++                                               masters=[],
++                                               hosts=[],
++                                               providernet=VLAN_PNET1,
++                                               segments=[],
++                                               extra_data={})
++        self.mock_cctxt.cast.assert_called_with(self.ctxt,
++                                                'start_connectivity_audit',
++                                                audit_uuid=AUDIT_1,
++                                                masters=[],
++                                                hosts=[],
++                                                providernet=VLAN_PNET1,
++                                                segments=[],
++                                                extra_data={})
++
++    def test_report_connectivity_results_rpc(self):
++        self.rpc.report_connectivity_results(self.ctxt,
++                                             audit_results=[],
++                                             audit_uuid=AUDIT_1)
++        self.mock_cctxt.cast.assert_called_with(self.ctxt,
++                                                'report_connectivity_results',
++                                                audit_results=[],
++                                                audit_uuid=AUDIT_1)
++
++    def test_teardown_connectivity_audit_rpc(self):
++        self.notifier.teardown_connectivity_audit(self.ctxt,
++                                                  hostname=HOST_1,
++                                                  audit_uuid=AUDIT_1)
++        self.mock_cctxt.call.assert_called_with(self.ctxt,
++                                                'teardown_connectivity_audit',
++                                                audit_uuid=AUDIT_1)
+diff --git a/setup.cfg b/setup.cfg
+index b438ad7..8df4583 100644
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -139,6 +139,7 @@ oslo.config.opts =
+     neutron.l3.agent = neutron.opts:list_l3_agent_opts
+     neutron.metadata.agent = neutron.opts:list_metadata_agent_opts
+     neutron.metering.agent = neutron.opts:list_metering_agent_opts
++    neutron.pnet_connectivity = neutron.opts:list_pnet_connectivity_opts
+     neutron.ml2 = neutron.opts:list_ml2_conf_opts
+     neutron.ml2.linuxbridge.agent = neutron.opts:list_linux_bridge_opts
+     neutron.ml2.macvtap.agent = neutron.opts:list_macvtap_opts
+-- 
+2.7.4
+

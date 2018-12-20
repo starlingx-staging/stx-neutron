@@ -1,0 +1,252 @@
+From 039705eaa670f9da2e5b8b04fac710720d897236 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 19 May 2016 09:46:39 -0400
+Subject: [PATCH 001/155] wrs: base changes to support new features
+
+This commit contains miscellaneous changes which will support later
+feature development.
+
+Conflicts:
+	neutron/common/config.py
+	tools/check_unit_test_structure.sh
+	tox.ini
+
+US98785: Convert Titanium Server and TiS to Titanium Cloud
+
+CGTS-6599: config: remove pool_timeout override
+
+Our other services are using 30 as a pool_timeout.  We are removing our
+override so that we fallback to the oslo.db default of 30.  This will delay are
+error in the event that there are no DB connections available in the pool.
+
+Conflicts:
+	neutron/common/config.py
+---
+ COPYING                            | 10 ++++++++++
+ LICENSE.wrs                        |  7 +++++++
+ README.wrs                         |  6 ++++++
+ neutron/common/config.py           | 33 +++++++++++++++++++++++++++++++++
+ neutron/conf/common.py             | 28 ++++++++++++++++++++++++++++
+ tools/check_unit_test_structure.sh |  3 +++
+ tools/coding-checks.sh             |  2 +-
+ tox.ini                            | 16 ++++++++++++++++
+ 8 files changed, 104 insertions(+), 1 deletion(-)
+ create mode 100644 COPYING
+ create mode 100644 LICENSE.wrs
+ create mode 100644 README.wrs
+
+diff --git a/COPYING b/COPYING
+new file mode 100644
+index 0000000..a4266d3
+--- /dev/null
++++ b/COPYING
+@@ -0,0 +1,10 @@
++This code is the Intellectual Property of Wind River. The source code in this directory shall be kept confidential
++and all other information related but not limited to the source code is confidential. Out of context partial reuse
++of this code is prohibited. No modifications are to be made to include 3rd party code. You shall not copy, modify,
++reproduce, sublicense, or distribute this source code in any way without obtaining the prior written consent from
++the Carrier Grade Communication Server IP prime.
++
++The holder shall neither during his/her employment nor at any time (without limit) after terminsation, thereof,
++howsoever arising, directly or indirectly:
++(i) use for his/her own purpose or those of any other person, company, business entity or other organisation whatsover; or
++(ii) disclose to any person, company, business entity or other organisation whatsoever;
+diff --git a/LICENSE.wrs b/LICENSE.wrs
+new file mode 100644
+index 0000000..144ecd6
+--- /dev/null
++++ b/LICENSE.wrs
+@@ -0,0 +1,7 @@
++#
++#  Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++#  The right to copy, distribute, modify, or otherwise make use
++#  of this software may be licensed only pursuant to the terms
++#  of an applicable Wind River license agreement.
++#
+diff --git a/README.wrs b/README.wrs
+new file mode 100644
+index 0000000..4b00b84
+--- /dev/null
++++ b/README.wrs
+@@ -0,0 +1,6 @@
++Wind River Titanium Cloud Extensions
++
++This package contains Wind River Titanium Cloud extensions
++that are distributed as source.  The changes are subject
++to the license agreements of Wind River. Refer to LICENSE.wrs
++for further details.
+diff --git a/neutron/common/config.py b/neutron/common/config.py
+index 75eebfc..221afe5 100644
+--- a/neutron/common/config.py
++++ b/neutron/common/config.py
+@@ -22,6 +22,7 @@ import sys
+ from keystoneauth1 import loading as ks_loading
+ from neutron_lib.api import validators
+ from oslo_config import cfg
++from oslo_db import options as db_options
+ from oslo_log import log as logging
+ import oslo_messaging
+ from oslo_middleware import cors
+@@ -45,6 +46,27 @@ EXTRA_LOG_LEVEL_DEFAULTS = [
+     'ovsdbapp.backend.ovs_idl.vlog=INFO'
+ ]
+ 
++keystone_opts = [
++    cfg.StrOpt('auth_host',
++               help=_("Authentication host server")),
++    cfg.IntOpt('auth_port',
++               help=_("Authentication host port number")),
++    cfg.StrOpt('auth_protocol',
++               help=_("Authentication protocol")),
++    cfg.StrOpt('admin_user',
++               help=_("Admin user")),
++    cfg.StrOpt('admin_password',
++               help=_("Admin password"),
++               secret=True),
++    cfg.StrOpt('admin_tenant_name',
++               help=_("Admin tenant name")),
++    cfg.StrOpt('auth_uri',
++               help=_("Authentication URI")),
++    cfg.StrOpt('identity_uri',
++               help=_("Admin Authentication URI"))
++]
++
++
+ # Register the configuration options
+ common_config.register_core_common_config_opts()
+ 
+@@ -52,6 +74,17 @@ common_config.register_core_common_config_opts()
+ oslo_messaging.set_transport_defaults(control_exchange='neutron')
+ 
+ 
++def set_db_defaults():
++    # Update the default QueuePool parameters. These can be tweaked by the
++    # conf variables - max_pool_size, max_overflow and pool_timeout
++    db_options.set_defaults(
++        cfg.CONF,
++        connection='sqlite://',
++        max_pool_size=10,
++        max_overflow=20)
++
++set_db_defaults()
++
+ NOVA_CONF_SECTION = 'nova'
+ 
+ ks_loading.register_auth_conf_options(cfg.CONF, NOVA_CONF_SECTION)
+diff --git a/neutron/conf/common.py b/neutron/conf/common.py
+index d67cea6..afaa2d9 100644
+--- a/neutron/conf/common.py
++++ b/neutron/conf/common.py
+@@ -12,6 +12,13 @@
+ #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
++#
++# Copyright (c) 2013-2014 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
+ 
+ from neutron_lib.utils import net
+ from oslo_config import cfg
+@@ -141,10 +148,31 @@ core_cli_opts = [
+                       "This directory must be writable by the agent.")),
+ ]
+ 
++keystone_opts = [
++    cfg.StrOpt('auth_host',
++               help=_("Authentication host server")),
++    cfg.IntOpt('auth_port',
++               help=_("Authentication host port number")),
++    cfg.StrOpt('auth_protocol',
++               help=_("Authentication protocol")),
++    cfg.StrOpt('admin_user',
++               help=_("Admin user")),
++    cfg.StrOpt('admin_password',
++               help=_("Admin password"),
++               secret=True),
++    cfg.StrOpt('admin_tenant_name',
++               help=_("Admin tenant name")),
++    cfg.StrOpt('auth_uri',
++               help=_("Authentication URI")),
++    cfg.StrOpt('identity_uri',
++               help=_("Admin Authentication URI"))
++]
++
+ 
+ def register_core_common_config_opts(cfg=cfg.CONF):
+     cfg.register_opts(core_opts)
+     cfg.register_cli_opts(core_cli_opts)
++    cfg.register_opts(keystone_opts, "KEYSTONE_AUTHTOKEN")
+     wsgi.register_opts(cfg)
+ 
+ 
+diff --git a/tools/check_unit_test_structure.sh b/tools/check_unit_test_structure.sh
+index 5b0eed3..588e4bf 100755
+--- a/tools/check_unit_test_structure.sh
++++ b/tools/check_unit_test_structure.sh
+@@ -13,6 +13,9 @@ test_files=$(find ${test_path} -iname 'test_*.py')
+ ignore_regexes=(
+     # The following test is required for oslo.versionedobjects
+     "^objects/test_objects.py$"
++    # The following vendor plugins are not required to confrm to the
++    # structural requirements.
++    "^plugins/wrs.*$"
+     # The following open source plugin tests are not actually unit
+     # tests and are ignored pending their relocation to the functional
+     # test tree.
+diff --git a/tools/coding-checks.sh b/tools/coding-checks.sh
+index d852f98..0a17e9d 100755
+--- a/tools/coding-checks.sh
++++ b/tools/coding-checks.sh
+@@ -40,7 +40,7 @@ run_pylint () {
+     echo "Running pylint..."
+     echo "You can speed this up by running it on 'HEAD~[0-9]' (e.g. HEAD~1, this change only)..."
+     if [ -n "${files}" ]; then
+-        pylint --rcfile=.pylintrc --output-format=colorized ${files}
++        pylint --rcfile=.pylintrc --output-format=parseable ${files}
+     else
+         echo "No python changes in this commit, pylint check not required."
+         exit 0
+diff --git a/tox.ini b/tox.ini
+index 547ba06..43e77a1 100644
+--- a/tox.ini
++++ b/tox.ini
+@@ -3,15 +3,31 @@ envlist = docs,py35,py27,pep8
+ minversion = 2.3.2
+ skipsdist = True
+ 
++[wrs]
++# This configuration assumes that the tox tests are being run directly within
++# the build tree therefore the {toxinitdir} variable points to a path within
++# the source tree.  For example:
++#    {MY_REPO}/addons/wr-cgcs/layers/cgcs/git/neutron
++#
++wrsdir = {toxinidir}/../../../../../..
++cgcsdir = {[wrs]wrsdir}/addons/wr-cgcs/layers/cgcs
++avsdir = {[wrs]wrsdir}/addons/wr-avs/layers/avs/
++deps = -e{[wrs]cgcsdir}/middleware/fault/recipes-common/fm-api
++       -e{[wrs]cgcsdir}/middleware/sysinv/recipes-common/cgts-client/cgts-client
++       -e{[wrs]cgcsdir}/middleware/config/recipes-common/tsconfig/tsconfig
++       -e{[wrs]avsdir}/python-vswitchclient
++
+ [testenv]
+ setenv = VIRTUAL_ENV={envdir}
+          PYTHONWARNINGS=default::DeprecationWarning
++         PYTHONDONTWRITEBYTECODE=1
+ passenv = TRACE_FAILONLY GENERATE_HASHES http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY
+ usedevelop = True
+ install_command =
+     pip install -U -c{env:UPPER_CONSTRAINTS_FILE:https://git.openstack.org/cgit/openstack/requirements/plain/upper-constraints.txt?h=stable/pike} {opts} {packages}
+ deps = -r{toxinidir}/requirements.txt
+        -r{toxinidir}/test-requirements.txt
++       {[wrs]deps}
+ whitelist_externals = sh
+ commands =
+   {toxinidir}/tools/ostestr_compat_shim.sh {posargs}
+-- 
+2.7.4
+

@@ -1,0 +1,215 @@
+From 96a1d6d6468607e8e1ef95264ddd5bca96ba47a5 Mon Sep 17 00:00:00 2001
+From: Steven Webster <steven.webster@windriver.com>
+Date: Fri, 16 Feb 2018 22:00:41 -0500
+Subject: [PATCH 136/155] US105493: SFC load balancing and scalability
+
+This commit introduces load balancing capability to AVS and
+networking-sfc.  The scalability of networking-sfc + neutron RPC
+exchanges is also improved.
+
+The following repos are modified:
+
+AVS:
+
+- Load balancing capability added to 'select' groups using a
+rendezvous hash algorithm. The actual hashes used depend on the
+value of a user configurable 'load balance' fields.
+
+- vswitchtest for select group / load balancing
+- new test mode: nshfwd to have vswitch act as a simple service
+function - flipping the ethernet addresses and decrementing
+the NSH service index.  Intended to be used with vswitch
+in a guest.
+
+Networking-sfc:
+
+- Driver unit tests
+- Modification to use buckets / groups rather than rules for
+service function ingress.
+- Use of eth encap actions rather than eth pop/push
+- Bug fix for setting tcp/udp range matches.
+
+Neutron:
+
+- The number of chains is checked on agent startup/restart.
+If the number of chains is 0, we don't send RPC requests to the
+server for every port update.  Rather, we wait until we have
+received at least one service path update (indicating we now
+have chains that need to be checked)
+- vswitch API/manager additions for adding/deleting/getting
+flow groups
+---
+ neutron/agent/vswitch/api.py         | 42 +++++++++++++++++++++++++++
+ neutron/agent/vswitch/manager.py     | 55 ++++++++++++++++++++++++++++++++++++
+ neutron/plugins/wrs/agent/avs/sfc.py | 13 +++++----
+ 3 files changed, 104 insertions(+), 6 deletions(-)
+
+diff --git a/neutron/agent/vswitch/api.py b/neutron/agent/vswitch/api.py
+index 075948b..29e3995 100644
+--- a/neutron/agent/vswitch/api.py
++++ b/neutron/agent/vswitch/api.py
+@@ -823,3 +823,45 @@ class VSwitchManagementAPI(object):
+         return self._execute_flow_request(
+             lambda: self.client.flowrule.delete(network_uuid, table_id,
+                                                 cookie))
++
++    def get_flow_group_list(self, network_uuid):
++        """
++        Sends a request to the vswitch requesting the full list of flow groups
++        on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowgroup.list(network_uuid))
++
++    def get_flow_group(self, network_uuid, group_id):
++        """
++        Sends a request to the vswitch requesting a specific flow group
++        on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowgroup.get(network_uuid, group_id))
++
++    def add_flow_group(self, network_uuid, group):
++        """
++        Sends a request to the vswitch requesting the addition of a
++        flow group on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowgroup.create(network_uuid, group))
++
++    def delete_flow_group(self, network_uuid, group_id):
++        """
++        Sends a request to the vswitch requesting the deletion of a
++        flow group for a given group id on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowgroup.delete(network_uuid, group_id))
++
++    def update_flow_group(self, network_uuid, group_id, group):
++        """
++        Sends a request to the vswitch requesting the update of a
++        flow group for a given group id on a given network.
++        """
++        return self._execute_flow_request(
++            lambda: self.client.flowgroup.update(network_uuid,
++                                                 group_id,
++                                                 group))
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index cbbe673..ba37cc2 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -1480,3 +1480,58 @@ class VSwitchManager(object):
+             msg = ("Failed to delete flow for {}, {}".
+                    format(cookie, e))
+             raise VSwitchManagerError(msg)
++
++    def get_flow_group_list(self, network_uuid):
++        """
++        Retrieves the current list of flow groups.
++        """
++        try:
++            return self.api.get_flow_group_list(network_uuid)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query flow group list for {}, {}".
++                   format(network_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def get_flow_group(self, network_uuid, group_id):
++        """
++        Retrieves a flow group on a given network.
++        """
++        try:
++            return self.api.get_flow_group(network_uuid, group_id)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to query flow group for {}, {}".
++                   format(group_id, e))
++            raise VSwitchManagerError(msg)
++
++    def add_flow_group(self, network_uuid, group):
++        """
++        Adds a flow group on a given network.
++        """
++        try:
++            return self.api.add_flow_group(network_uuid, group)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to add flow group on network {}, {}".
++                   format(network_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def delete_flow_group(self, network_uuid, group_id):
++        """
++        Deletes a flow group on a given network.
++        """
++        try:
++            return self.api.delete_flow_group(network_uuid, group_id)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to delete flow group on network {}, {}".
++                   format(network_uuid, e))
++            raise VSwitchManagerError(msg)
++
++    def update_flow_group(self, network_uuid, group_id, group):
++        """
++        Updates a flow group on a given network.
++        """
++        try:
++            return self.api.update_flow_group(network_uuid, group_id, group)
++        except exceptions.VSwitchError as e:
++            msg = ("Failed to update flow group on network {}, {}".
++                   format(network_uuid, e))
++            raise VSwitchManagerError(msg)
+diff --git a/neutron/plugins/wrs/agent/avs/sfc.py b/neutron/plugins/wrs/agent/avs/sfc.py
+index 84720cd..3665caa 100644
+--- a/neutron/plugins/wrs/agent/avs/sfc.py
++++ b/neutron/plugins/wrs/agent/avs/sfc.py
+@@ -21,8 +21,6 @@
+ # of an applicable Wind River license agreement.
+ #
+ 
+-import collections
+-
+ from oslo_config import cfg
+ from oslo_log import log as logging
+ import oslo_messaging
+@@ -88,18 +86,19 @@ class VswitchSFCNeutronAgent(object):
+         self.l2pop_rpc = l2population_rpc.L2populationRpcQueryMixin()
+         self.l2pop_connection = None
+         self.setup_l2pop_rpc_handler()
+-        self.details = collections.OrderedDict()
++        self.paths = []
++        self.init = True
+ 
+     def register_manager(self, manager):
+         self.vswitch_mgr = manager
+         self.sfc_driver.consume_api(self.vswitch_mgr)
+ 
+     def get_sfc_details(self, port_ids):
+-        return self.sfc_plugin_rpc.get_sfc_details(self.context, port_ids)
++        if (self.init or len(self.paths) > 0):
++            self.sfc_plugin_rpc.get_sfc_details(self.context, port_ids)
++            self.init = False
+ 
+     def setup_l2pop_rpc_handler(self):
+-        # We need to listen for l2pop RPC events to distribute the FDB
+-        # entries to BGP peers.
+         self.l2pop_handler = SfcL2PopHandler(self.sfc_driver)
+         consumers = [[topics.L2POPULATION, topics.UPDATE]]
+         self.l2pop_connection = agent_rpc.create_consumers(
+@@ -128,6 +127,7 @@ class VswitchSFCNeutronAgent(object):
+     def update_service_paths(self, context, **kwargs):
+         paths = kwargs['service_paths']
+         self.sfc_driver.update_service_paths(paths)
++        self.paths = [path.id for path in self.sfc_driver.get_service_paths()]
+ 
+     def update_classifiers(self, context, **kwargs):
+         fcs = kwargs['classifiers']
+@@ -136,6 +136,7 @@ class VswitchSFCNeutronAgent(object):
+     def delete_service_paths(self, context, **kwargs):
+         paths = kwargs['service_paths']
+         self.sfc_driver.delete_service_paths(paths)
++        self.paths = [path.id for path in self.sfc_driver.get_service_paths()]
+ 
+     def delete_classifiers(self, context, **kwargs):
+         fcs = kwargs['classifiers']
+-- 
+2.7.4
+

@@ -1,0 +1,41 @@
+From baa826445ce25501d1616a4fcd3371170e50f086 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Mon, 20 Nov 2017 13:21:04 -0500
+Subject: [PATCH 071/155] query one_or_none instead of catching exception in
+ _create_or_update_interface
+
+This commit is necessary as o oslo.log 3.27.0 to avoid displaying the exception
+"NoResultFound: No row was found for one" when logging from within the scope
+of _create_or_update_interface.
+
+Squash with "host: system host management extension" at next rebase.
+---
+ neutron/db/hosts_db.py | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index fdaac19..79831d7 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -346,13 +346,13 @@ class HostDbMixin(ext_host.HostPluginBase):
+                   'vlans': body['vlans'],
+                   'network_type': body['network_type']}
+         with context.session.begin(subtransactions=True):
+-            try:
+-                query = (context.session.query(HostInterface).
+-                         filter(HostInterface.id == interface_uuid))
+-                interface = query.one()
++            query = (context.session.query(HostInterface).
++                     filter(HostInterface.id == interface_uuid))
++            interface = query.one_or_none()
++            if interface:
+                 fields['updated_at'] = timeutils.utcnow()
+                 interface.update(fields)
+-            except exc.NoResultFound:
++            else:
+                 fields['id'] = interface_uuid
+                 fields['host_id'] = host_uuid
+                 fields['created_at'] = timeutils.utcnow()
+-- 
+2.7.4
+

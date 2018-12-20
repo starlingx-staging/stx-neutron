@@ -1,0 +1,38 @@
+From 1c28295576eefd2481f24225a82b8c0117e66d81 Mon Sep 17 00:00:00 2001
+From: Jakub Libosvar <libosvar@redhat.com>
+Date: Fri, 24 Nov 2017 16:53:11 +0000
+Subject: [PATCH 102/155] fullstack: Wait at least 3 minute for agents to
+ report
+
+Test runner polls neutron-server for agents for default value of
+wait_until_true() which is 60 seconds. It has been proven to be
+insufficient time on busy environments. This patch bumps the timeout to
+3 minutes and also highers polling interval from 1 seconds to 10
+seconds, to offload neutron-server.
+
+Change-Id: I108176ee5668c2bc456dda1810aa509212e7cb38
+Closes-bug: #1734357
+(cherry picked from commit 89e0ed9e3d1630197545280ef6c11828d0f2b1dc)
+---
+ neutron/tests/fullstack/resources/environment.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/tests/fullstack/resources/environment.py b/neutron/tests/fullstack/resources/environment.py
+index 21262e0..2071458 100644
+--- a/neutron/tests/fullstack/resources/environment.py
++++ b/neutron/tests/fullstack/resources/environment.py
+@@ -331,7 +331,10 @@ class Environment(fixtures.Fixture):
+         self.hosts = []
+ 
+     def wait_until_env_is_up(self):
+-        common_utils.wait_until_true(self._processes_are_ready)
++        common_utils.wait_until_true(
++            self._processes_are_ready,
++            timeout=180,
++            sleep=10)
+ 
+     def _processes_are_ready(self):
+         try:
+-- 
+2.7.4
+

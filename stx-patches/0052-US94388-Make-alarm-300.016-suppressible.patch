@@ -1,0 +1,26 @@
+From c6849fe73773604545c31ca299c1e76c79719b06 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Fri, 1 Sep 2017 14:17:44 -0400
+Subject: [PATCH 052/155] US94388: Make alarm 300.016 suppressible
+
+---
+ neutron/plugins/wrs/drivers/fm.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index 35b3b93..8621dd9 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -322,7 +322,8 @@ class DefaultFmDriver(fm.FmDriver):
+             probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
+             proposed_repair_action=(
+                 _("If condition persists, fix connectivity to peer.")),
+-            service_affecting=True)
++            service_affecting=True,
++            suppression=True)
+         self.fm_api.set_fault(fault)
+ 
+     def clear_bgp_peer_down_fault(self, host_id, agent_id, bgp_peer_id):
+-- 
+2.7.4
+

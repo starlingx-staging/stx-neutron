@@ -1,0 +1,148 @@
+From 49e8725a982a05666e6a213fa82e0e93563f55c1 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 9 Jun 2017 12:11:21 -0400
+Subject: [PATCH 049/155] CGTS-7263: dhcp: block port update from unbound agent
+
+The design of the DHCP port management is susceptible to race conditions
+leading to unavailability of DHCP services.  The design is that the server
+clears the device_id while the agent is responsible for setting it.
+
+This makes it is possible for the server to clear the device_id on a port and
+assign the network to another agent all while the previous agent might just be
+taking possession of the port.  If the agent takes possession of the port
+(i.e., set the device_id) before the server clears it then there is no issue,
+but if the agent takes possession of the port after the server clears it then
+the port is marked as being owned by the first agent.
+
+When the second agent is told to take over the network it tries to look for a
+port to reuse but finds none so creates a new one.  That leads to two problems.
+
+   a) an extra port is created and never deleted
+   b) that extra port creation may fail if there are no available IP addresses.
+
+This should be fixed by fixing the overall design so that the server manages
+the ports rather than the agent, but that would impact upgrades therefore we
+are opting to add a validation check on the update_dhcp_port API.  The check
+will prevent an agent from updating a dhcp port unless the network is bound to
+that agent.
+
+Conflicts:
+	neutron/api/rpc/handlers/dhcp_rpc.py
+---
+ neutron/api/rpc/handlers/dhcp_rpc.py               | 19 ++++++++++++++
+ .../tests/unit/api/rpc/handlers/test_dhcp_rpc.py   | 30 ++++++++++++++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/neutron/api/rpc/handlers/dhcp_rpc.py b/neutron/api/rpc/handlers/dhcp_rpc.py
+index aed76cc..5081f5d 100644
+--- a/neutron/api/rpc/handlers/dhcp_rpc.py
++++ b/neutron/api/rpc/handlers/dhcp_rpc.py
+@@ -275,6 +275,12 @@ class DhcpRpcCallback(object):
+         plugin = directory.get_plugin()
+         return self._port_action(plugin, context, port, 'create_port')
+ 
++    def is_agent_bound_to_network(self, plugin, context, host, network_id):
++        """Check whether an agent(host) is bound to a network."""
++        agents = plugin.get_dhcp_agents_hosting_networks(
++            context, [network_id], hosts=[host])
++        return bool(len(agents) != 0)
++
+     @oslo_messaging.expected_exceptions(exceptions.IpAddressGenerationFailure)
+     @db_api.retry_db_errors
+     def update_dhcp_port(self, context, **kwargs):
+@@ -289,6 +295,19 @@ class DhcpRpcCallback(object):
+             if (old_port['device_id'] != n_const.DEVICE_ID_RESERVED_DHCP_PORT
+                 and old_port['device_id'] != port['port']['device_id']):
+                 raise n_exc.DhcpPortInUse(port_id=port['id'])
++            else:
++                network_id = port['port']['network_id']
++                if not self.is_agent_bound_to_network(plugin, context,
++                                                      host, network_id):
++                    # NOTE(alegacy): avoid race condition of agent updating
++                    # port after ownership has already been removed and given
++                    # to another agent.
++                    LOG.warning("Host %(host)s tried to update port "
++                                "%(port_id)s on network %(network_id)s "
++                                "but agent is not bound to that network.",
++                                {'host': host, 'port_id': port['id'],
++                                 'network_id': network_id})
++                    raise n_exc.DhcpPortInUse(port_id=port['id'])
+             LOG.debug('Update dhcp port %(port)s '
+                       'from %(host)s.',
+                       {'port': port,
+diff --git a/neutron/tests/unit/api/rpc/handlers/test_dhcp_rpc.py b/neutron/tests/unit/api/rpc/handlers/test_dhcp_rpc.py
+index fc5a138..c173276 100644
+--- a/neutron/tests/unit/api/rpc/handlers/test_dhcp_rpc.py
++++ b/neutron/tests/unit/api/rpc/handlers/test_dhcp_rpc.py
+@@ -30,6 +30,14 @@ from neutron.db import provisioning_blocks
+ from neutron.tests import base
+ 
+ 
++def _fake_is_agent_bound_to_network(plugin, context, host, network_id):
++    return True
++
++
++def _fake_is_agent_bound_to_network_false(plugin, context, host, network_id):
++    return False
++
++
+ class TestDhcpRpcCallback(base.BaseTestCase):
+ 
+     def setUp(self):
+@@ -179,10 +187,26 @@ class TestDhcpRpcCallback(base.BaseTestCase):
+         self.plugin.get_port.return_value = {
+             'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
+         self.plugin.update_port.side_effect = n_exc.PortNotFound(port_id='66')
++        self.callbacks.is_agent_bound_to_network = \
++            _fake_is_agent_bound_to_network
+         self.assertIsNone(self.callbacks.update_dhcp_port(
+             context='ctx', host='host', port_id='66',
+             port={'port': {'network_id': 'a'}}))
+ 
++    def test_update_port_unbound_agent(self):
++        self.plugin.get_port.return_value = {
++            'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
++        self.plugin.update_port.side_effect = n_exc.PortNotFound(port_id='66')
++        self.callbacks.is_agent_bound_to_network = \
++            _fake_is_agent_bound_to_network_false
++        port = {'port': {'network_id': 'a'}}
++        self.assertRaises(exceptions.DhcpPortInUse,
++                          self.callbacks.update_dhcp_port,
++                          mock.Mock(),
++                          host='host',
++                          port_id='66',
++                          port=port)
++
+     def test_get_network_info_return_none_on_not_found(self):
+         self.plugin.get_network.side_effect = n_exc.NetworkNotFound(net_id='a')
+         retval = self.callbacks.get_network_info(mock.Mock(), network_id='a')
+@@ -253,6 +277,8 @@ class TestDhcpRpcCallback(base.BaseTestCase):
+         self.plugin.get_port.return_value = {
+             'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
+         self.callbacks._port_action = _fake_port_action
++        self.callbacks.is_agent_bound_to_network = \
++            _fake_is_agent_bound_to_network
+         self.callbacks.update_dhcp_port(mock.Mock(),
+                                         host='foo_host',
+                                         port_id='foo_port_id',
+@@ -280,6 +306,8 @@ class TestDhcpRpcCallback(base.BaseTestCase):
+ 
+         self.plugin.get_port.return_value = {'device_id': device_id}
+         self.callbacks._port_action = _fake_port_action
++        self.callbacks.is_agent_bound_to_network = \
++            _fake_is_agent_bound_to_network
+         self.callbacks.update_dhcp_port(
+             mock.Mock(), host='foo_host', port_id='foo_port_id', port=port)
+ 
+@@ -306,6 +334,8 @@ class TestDhcpRpcCallback(base.BaseTestCase):
+                          }
+         self.plugin.get_port.return_value = {
+             'device_id': n_const.DEVICE_ID_RESERVED_DHCP_PORT}
++        self.callbacks.is_agent_bound_to_network = \
++            _fake_is_agent_bound_to_network
+         self.callbacks.update_dhcp_port(mock.Mock(),
+                                         host='foo_host',
+                                         port_id='foo_port_id',
+-- 
+2.7.4
+

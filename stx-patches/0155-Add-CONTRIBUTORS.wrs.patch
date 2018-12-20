@@ -1,0 +1,33 @@
+From 205734b5f6911f4542bb2e108c8660be1eb45537 Mon Sep 17 00:00:00 2001
+From: "Dean Troyer (Intel)" <dean.troyer@intel.com>
+Date: Sun, 13 May 2018 20:06:55 -0700
+Subject: [PATCH 155/155] Add CONTRIBUTORS.wrs
+
+Signed-off-by: Dean Troyer (Intel) <dean.troyer@intel.com>
+---
+ CONTRIBUTORS.wrs | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+ create mode 100644 CONTRIBUTORS.wrs
+
+diff --git a/CONTRIBUTORS.wrs b/CONTRIBUTORS.wrs
+new file mode 100644
+index 0000000..370f19c
+--- /dev/null
++++ b/CONTRIBUTORS.wrs
+@@ -0,0 +1,13 @@
++The following contributors from Wind River have developed the seed code in this
++repository.  We look forward to community collaboration and contributions for
++additional features, enhancements and refactoring.
++
++Openstack including clients
++
++Contributors:
++=============
++ 
++Allain Legacy <Allain.Legacy@windriver.com>
++Matt Peters <Matt.Peters@windriver.com>
++Joseph Richard <Joseph.Richard@windriver.com>
++Steven Webster <Steven.Webster@windriver.com>
+-- 
+2.7.4
+

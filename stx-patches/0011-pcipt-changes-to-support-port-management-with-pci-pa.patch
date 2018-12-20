@@ -1,0 +1,70 @@
+From 916654a4c71a4174de5f203bc4dc13e60c4551a4 Mon Sep 17 00:00:00 2001
+From: Matt Peters <matt.peters@windriver.com>
+Date: Fri, 3 Jul 2015 13:55:49 -0400
+Subject: [PATCH 011/155] pcipt: changes to support port management with pci
+ passthrough
+
+This change implements minor changes to allow for better management of PCI
+passthrough ports in neutron.  Specifically, it allows for updating the MAC
+address of such ports so that they can be used with the virtual DHCP server and
+meta-data servers.  Also, since the ports are technically not managed their
+state is set to unknown.
+
+Conflicts:
+	neutron/common/constants.py
+
+Conflicts:
+	neutron/common/constants.py
+---
+ neutron/common/constants.py   |  3 +++
+ neutron/plugins/ml2/plugin.py | 12 +++++++++++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index c232764..ff9e514 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -261,3 +261,6 @@ QOS_SCHEDULER_POLICY_WEIGHT = "weight"
+ 
+ # VLAN Subnets
+ NONE_VLAN_TAG = 0
++
++# PCI-Passthrough support
++PORT_STATUS_UNKNOWN = 'UNKNOWN'
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 32209cb..eaf4693 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -337,10 +337,14 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+     def _check_mac_update_allowed(self, orig_port, port, binding):
+         unplugged_types = (portbindings.VIF_TYPE_BINDING_FAILED,
+                            portbindings.VIF_TYPE_UNBOUND)
++        allowed_models = (wrs_binding.VIF_MODEL_PCI_PASSTHROUGH,)
++
+         new_mac = port.get('mac_address')
+         mac_change = (new_mac is not None and
+                       orig_port['mac_address'] != new_mac)
+         if (mac_change and binding.vif_type not in unplugged_types):
++            if (mac_change and binding.vif_model in allowed_models):
++                return mac_change
+             raise exc.PortBound(port_id=orig_port['id'],
+                                 vif_type=binding.vif_type,
+                                 old_mac=orig_port['mac_address'],
+@@ -1332,7 +1336,13 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+     def _before_create_port(self, context, port):
+         attrs = port[port_def.RESOURCE_NAME]
+         if not attrs.get('status'):
+-            attrs['status'] = const.PORT_STATUS_DOWN
++            vif_model = attrs.get(wrs_binding.VIF_MODEL)
++            if vif_model == wrs_binding.VIF_MODEL_PCI_PASSTHROUGH:
++                # PCI passthrough devices are not managed by neutron, therefore
++                # set status to UNKNOWN since they will never be set to ACTIVE
++                attrs['status'] = const.PORT_STATUS_UNKNOWN
++            else:
++                attrs['status'] = const.PORT_STATUS_DOWN
+ 
+         registry.notify(resources.PORT, events.BEFORE_CREATE, self,
+                         context=context, port=attrs)
+-- 
+2.7.4
+

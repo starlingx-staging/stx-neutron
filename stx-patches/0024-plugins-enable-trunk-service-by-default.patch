@@ -1,0 +1,26 @@
+From 43a684946e781a25d21a4f50b8dc67d61be42809 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Mon, 6 Mar 2017 14:26:12 -0500
+Subject: [PATCH 024/155] plugins: enable trunk service by default
+
+Since we want customers to use this instead of our guest vlan subnets we are
+enabling this service plugin by default.
+---
+ neutron/plugins/common/constants.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/neutron/plugins/common/constants.py b/neutron/plugins/common/constants.py
+index 54aa42c..935939d 100644
+--- a/neutron/plugins/common/constants.py
++++ b/neutron/plugins/common/constants.py
+@@ -49,6 +49,7 @@ DEFAULT_SERVICE_PLUGINS = {
+     'flavors': 'flavors',
+     'revisions': 'revisions',
+     'segments': 'segments',
++    'trunk': 'trunk',
+ }
+ 
+ # Service operation status constants
+-- 
+2.7.4
+

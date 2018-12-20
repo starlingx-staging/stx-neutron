@@ -1,0 +1,42 @@
+From 6dc4b5de0df6b36236bd804e0bf5f7f34901a979 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Tue, 10 Oct 2017 13:18:51 -0400
+Subject: [PATCH 058/155] US102722: Pass vlan_id to AVR through subnet data for
+ port
+
+This commit adds passing of the vlan_id of a subnet that a router port is on.
+This is necessary to allow AVR to discriminate during an upgrade from R$ to R5,
+during which time there will be duplicate subnets for each vlan-tagged subnet.
+This will be used to either ignore interfaces on vlan-tagged subnets when the
+router is on an upgraded compute node, or to ignore duplicated interfaces when
+a router is on an unupgraded compute node,
+---
+ neutron/db/l3_db.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/db/l3_db.py b/neutron/db/l3_db.py
+index 6097d95..96b031c 100644
+--- a/neutron/db/l3_db.py
++++ b/neutron/db/l3_db.py
+@@ -1662,7 +1662,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+         query = query.filter(models_v2.Subnet.network_id.in_(network_ids))
+ 
+         fields = ['id', 'cidr', 'gateway_ip', 'dns_nameservers',
+-                  'network_id', 'ipv6_ra_mode', 'subnetpool_id']
++                  'network_id', 'ipv6_ra_mode', 'subnetpool_id',
++                  wrs_net.VLAN]
+ 
+         def make_subnet_dict_with_scope(row):
+             subnet_db, address_scope_id = row
+@@ -1722,6 +1723,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase,
+                                'dns_nameservers': subnet['dns_nameservers'],
+                                'ipv6_ra_mode': subnet['ipv6_ra_mode'],
+                                'subnetpool_id': subnet['subnetpool_id']}
++                if wrs_net.VLAN in subnet:
++                    subnet_info[wrs_net.VLAN] = subnet[wrs_net.VLAN]
+                 for fixed_ip in port['fixed_ips']:
+                     if fixed_ip['subnet_id'] == subnet['id']:
+                         port['subnets'].append(subnet_info)
+-- 
+2.7.4
+

@@ -1,0 +1,91 @@
+From eac1024fa1c8036ab23b3f43c06c2b7e8fc573d9 Mon Sep 17 00:00:00 2001
+From: Chris Friesen <chris.friesen@windriver.com>
+Date: Mon, 19 Jun 2017 13:57:24 -0600
+Subject: [PATCH 026/155] CGTS-7354: fix up vif_type and vnic_type for PCI-pt
+ ports from 15.12
+
+Back in 15.12 for PCI-passthrough ports we set the "vif_type" to "avs"
+and the "vnic_type" to "normal".
+
+In 16.10 upstream wanted to see "hostdev_physical" and "direct-physical"
+for those two columns respectively.  We introduced a workaround in
+nova to resolve the issue and then forgot about it.
+
+Now in 17.6 we want to fix it up properly so we don't have to keep
+patching nova.  This requires rewriting the DB entries.
+
+NOTE: this is a one-time fix, it doesn't need to be ported when we
+upgrade to newer upstream Neutron.
+---
+ .../alembic_migrations/versions/CONTRACT_HEAD      |  2 +-
+ ...cgts_7354_pci_passthrough_fix_vnic_vif_types.py | 51 ++++++++++++++++++++++
+ 2 files changed, 52 insertions(+), 1 deletion(-)
+ create mode 100644 neutron/db/migration/alembic_migrations/versions/wrs_newton/contract/cgts_7354_pci_passthrough_fix_vnic_vif_types.py
+
+diff --git a/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD b/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD
+index b0d0e20..bd414f1 100644
+--- a/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD
++++ b/neutron/db/migration/alembic_migrations/versions/CONTRACT_HEAD
+@@ -1 +1 @@
+-5c85685d616d
++cgts_7354
+diff --git a/neutron/db/migration/alembic_migrations/versions/wrs_newton/contract/cgts_7354_pci_passthrough_fix_vnic_vif_types.py b/neutron/db/migration/alembic_migrations/versions/wrs_newton/contract/cgts_7354_pci_passthrough_fix_vnic_vif_types.py
+new file mode 100644
+index 0000000..1428aa2
+--- /dev/null
++++ b/neutron/db/migration/alembic_migrations/versions/wrs_newton/contract/cgts_7354_pci_passthrough_fix_vnic_vif_types.py
+@@ -0,0 +1,51 @@
++# Copyright 2016 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++#
++# Copyright (c) 2017 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++"""Fix vnic_type and vif_type for pci-passthrough NICs from 15.12
++
++Revision ID: cgts_7354
++Revises: 5c85685d616d
++Create Date: 2017-06-19 00:00:01.000000
++
++"""
++
++from alembic import op
++
++
++# revision identifiers, used by Alembic.
++revision = 'cgts_7354'
++down_revision = '5c85685d616d'
++
++
++def upgrade():
++    # In 15.12 pci-passthrough ports were configured with a vif_type of "avs"
++    # and a vnic_type of "normal".  Now we want those to be
++    # "hostdev_physical" and "direct-physical", respectively.
++    op.execute(
++        "UPDATE ml2_port_bindings "
++        "SET vnic_type='direct-physical',vif_type='hostdev_physical' "
++        "WHERE vif_type='avs' and vnic_type='normal' and "
++        "vif_model='pci-passthrough'")
++    op.execute(
++        "UPDATE ml2_distributed_port_bindings "
++        "SET vnic_type='direct-physical',vif_type='hostdev_physical' "
++        "WHERE vif_type='avs' and vnic_type='normal' and "
++        "vif_model='pci-passthrough'")
+-- 
+2.7.4
+

@@ -1,0 +1,29 @@
+From 38e02d28c4b69ffb0d3ae5f4757c5adf9b247d24 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 15 Feb 2018 14:56:56 -0600
+Subject: [PATCH 132/155] CGTS-8967: fixup! l2pop: support for FDB extenders
+ from other projects
+
+The fdb_entries variable is a multi level dictionary.  The check for
+'physical_network' attributes must be done on the 2nd level.
+---
+ neutron/plugins/ml2/drivers/l2pop/mech_driver.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+index 92ec014..72aa03b 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+@@ -47,7 +47,8 @@ def register_fdb_extend_func(name, func):
+ 
+ def run_fdb_extend_funcs(context, network_id, fdb_entries, source=None,
+                          exclude_host=None):
+-    if 'physical_network' not in fdb_entries:
++    if any('physical_network' not in v or not v['physical_network']
++           for k, v in six.iteritems(fdb_entries)):
+         # NOTE(alegacy): unit tests may not provide this field for vxlan
+         # based networks therefore just exclude all extensions from running
+         # during the test.
+-- 
+2.7.4
+

@@ -1,0 +1,183 @@
+From 82613d42c06e90e730b31c3a4fc012aa03bdd1a5 Mon Sep 17 00:00:00 2001
+From: Reedip <reedip.banerjee@gmail.com>
+Date: Fri, 1 Sep 2017 06:20:01 +0000
+Subject: [PATCH 096/155] Skip MTU check during deletion of Networks
+
+MTU check can be skipped during deletion of Networks.
+The MTU check doesnt provide any additional support during deletion
+of the networks.
+Also if a network is created with MTU 'X' and the
+global_mtu later on is decreased to 'Y', the created
+network cannot be deleted due to the MTU check.
+
+Change-Id: Ia838d2a661c5098f90b58b2cb31557f2ebf78868
+Closes-Bug: #1713499
+
+Conflicts:
+	neutron/tests/fullstack/resources/environment.py
+---
+ neutron/plugins/ml2/plugin.py                    |  5 +-
+ neutron/tests/fullstack/resources/config.py      |  2 +-
+ neutron/tests/fullstack/resources/environment.py |  4 +-
+ neutron/tests/fullstack/test_mtu.py              | 80 ++++++++++++++++++++++++
+ 4 files changed, 87 insertions(+), 4 deletions(-)
+ create mode 100644 neutron/tests/fullstack/test_mtu.py
+
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index 5b1f8d5..5e1e39f 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -2205,6 +2205,7 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             return
+ 
+         network_id = segment.get('network_id')
++        validate_mtu = True
+ 
+         if event == events.PRECOMMIT_CREATE:
+             updated_segment = self.type_manager.reserve_network_segment(
+@@ -2214,11 +2215,13 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+             segment[api.SEGMENTATION_ID] = updated_segment[api.SEGMENTATION_ID]
+         elif event == events.PRECOMMIT_DELETE:
+             self.type_manager.release_network_segment(context, segment)
++            validate_mtu = False
+ 
+         # change in segments could affect resulting network mtu, so let's
+         # recalculate it
+         network_db = self._get_network(context, network_id)
+-        network_db.mtu = self._get_network_mtu(network_db)
++        network_db.mtu = self._get_network_mtu(network_db,
++                                               validate=validate_mtu)
+         network_db.save(session=context.session)
+ 
+         try:
+diff --git a/neutron/tests/fullstack/resources/config.py b/neutron/tests/fullstack/resources/config.py
+index 6293c96..ccc11b8 100644
+--- a/neutron/tests/fullstack/resources/config.py
++++ b/neutron/tests/fullstack/resources/config.py
+@@ -60,7 +60,6 @@ class NeutronConfigFixture(ConfigFixture):
+                  connection, rabbitmq_environment):
+         super(NeutronConfigFixture, self).__init__(
+             env_desc, host_desc, temp_dir, base_filename='neutron.conf')
+-
+         self.config.update({
+             'DEFAULT': {
+                 'host': self._generate_host(),
+@@ -70,6 +69,7 @@ class NeutronConfigFixture(ConfigFixture):
+                 'service_plugins': env_desc.service_plugins,
+                 'auth_strategy': 'noauth',
+                 'debug': 'True',
++                'global_physnet_mtu': env_desc.global_mtu,
+                 'agent_down_time': str(env_desc.agent_down_time),
+                 'transport_url':
+                     'rabbit://%(user)s:%(password)s@%(host)s:5672/%(vhost)s' %
+diff --git a/neutron/tests/fullstack/resources/environment.py b/neutron/tests/fullstack/resources/environment.py
+index 411ab16..21262e0 100644
+--- a/neutron/tests/fullstack/resources/environment.py
++++ b/neutron/tests/fullstack/resources/environment.py
+@@ -36,7 +36,7 @@ class EnvironmentDescription(object):
+     def __init__(self, network_type='vxlan', l2_pop=True, qos=False,
+                  mech_drivers='openvswitch,linuxbridge',
+                  service_plugins='router,trunk', arp_responder=False,
+-                 agent_down_time=75):
++                 agent_down_time=75, global_mtu=1500):
+         self.network_type = network_type
+         self.l2_pop = l2_pop
+         self.qos = qos
+@@ -44,7 +44,7 @@ class EnvironmentDescription(object):
+         self.mech_drivers = mech_drivers
+         self.arp_responder = arp_responder
+         self.agent_down_time = agent_down_time
+-
++        self.global_mtu = global_mtu
+         self.service_plugins = service_plugins
+         if self.qos:
+             self.service_plugins += ',qos'
+diff --git a/neutron/tests/fullstack/test_mtu.py b/neutron/tests/fullstack/test_mtu.py
+new file mode 100644
+index 0000000..bdcb89d
+--- /dev/null
++++ b/neutron/tests/fullstack/test_mtu.py
+@@ -0,0 +1,80 @@
++# Copyright 2017 NEC India
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++from oslo_utils import uuidutils
++
++from neutron.tests.fullstack import base
++from neutron.tests.fullstack.resources import environment
++from neutron.tests.unit import testlib_api
++
++load_tests = testlib_api.module_load_tests
++
++
++class MTUNetworkTestSetup(base.BaseFullStackTestCase):
++    of_interface = None
++    ovsdb_interface = None
++    number_of_hosts = 1
++
++    def setUp(self):
++        host_desc = [
++            environment.HostDescription(
++                l3_agent=False,
++                of_interface=self.of_interface,
++                ovsdb_interface=self.ovsdb_interface,
++                l2_agent_type=self.l2_agent_type
++            ) for _ in range(self.number_of_hosts)]
++        env_desc = environment.EnvironmentDescription()
++        env = environment.Environment(env_desc, host_desc)
++        super(MTUNetworkTestSetup, self).setUp(env)
++
++        self.tenant_id = uuidutils.generate_uuid()
++        self.subnet = self.safe_client.create_subnet(
++            self.tenant_id, self.network['id'],
++            cidr='10.0.0.0/24',
++            gateway_ip='10.0.0.1',
++            name='subnet-test',
++            enable_dhcp=False)
++
++    def _restart_neutron_server(self):
++        env_desc = environment.EnvironmentDescription(global_mtu=9000)
++        env = environment.Environment(env_desc, self.host_desc)
++        env.test_name = self.get_name()
++        self.useFixture(env)
++        env.neutron_server.restart()
++
++    def _create_network(self, mtu):
++        return self.safe_client.create_network(self.tenant_id,
++                                               mtu=mtu, name='test-network')
++
++    def _update_network(self, mtu):
++        return self.safe_client.update_network(self.tenant_id,
++                                               mtu=mtu, name='test-network')
++
++    def _delete_network(self):
++        return self.safe_client.delete_network(self.tenant_id)
++
++
++class TestMTUScenarios(MTUNetworkTestSetup, base.BaseFullStackTestCase):
++
++    def test_mtu_success_scenario(self):
++        self._create_network(1450)
++        self._update_network(9000)
++        res = self._delete_network()
++        self.assertEqual(0, res)
++
++    def test_mtu_failure_scenario(self):
++        self._create_network(9000)
++        self.assertRaises(self.exception, self._update_network, 1450)
++        self._restart_neutron_server()
++        res = self._delete_network()
++        self.assertEqual(0, res)
+-- 
+2.7.4
+

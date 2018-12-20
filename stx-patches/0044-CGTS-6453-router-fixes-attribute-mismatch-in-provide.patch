@@ -1,0 +1,40 @@
+From a1cea1d7379b6cf52179a6d5d57e8824f6e9e855 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 28 Feb 2017 14:21:58 -0500
+Subject: [PATCH 044/155] CGTS-6453: router: fixes attribute mismatch in
+ provider update
+
+The 'distributed' attribute is mistakenly copied in to the 'ha' attribute when
+running the _update_router_provider() method.  This is being hit when
+transitioning a router from Distributed to Centralized.  The side-effect is
+that the router becomes HA enabled at the end of the update which is not what
+the user requested.
+
+   neutron router-create test1
+   neutron router-show test1  # HA=false
+   neutron router-update test1 --admin_state_up false
+   neutron router-update test1 --admin_state_up true --distributed true
+   neutron router-show test1  # HA=false
+   neutron router-update test1 --admin_state_up false
+   neutron router-update test1 --admin_state_up true --distributed false
+   neutron router-show test1  # HA=true
+---
+ neutron/services/l3_router/service_providers/driver_controller.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/services/l3_router/service_providers/driver_controller.py b/neutron/services/l3_router/service_providers/driver_controller.py
+index 078a769..c491a59 100644
+--- a/neutron/services/l3_router/service_providers/driver_controller.py
++++ b/neutron/services/l3_router/service_providers/driver_controller.py
+@@ -130,7 +130,7 @@ class DriverController(object):
+             if 'distributed' not in router:
+                 router['distributed'] = old_router['distributed']
+             if 'ha' not in router:
+-                router['ha'] = old_router['distributed']
++                router['ha'] = old_router['ha']
+             new_drv = self._attrs_to_driver(router)
+         if new_drv:
+             LOG.debug("Router %(id)s migrating from %(old)s provider to "
+-- 
+2.7.4
+

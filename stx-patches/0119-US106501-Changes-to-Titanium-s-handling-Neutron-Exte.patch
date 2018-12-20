@@ -1,0 +1,238 @@
+From ab1baacc329a1e6d68a9cb7eeba22eaa29d1db50 Mon Sep 17 00:00:00 2001
+From: Jerry Sun <jerry.sun@windriver.com>
+Date: Mon, 22 Jan 2018 14:46:28 -0500
+Subject: [PATCH 119/155] US106501:Changes to Titanium's handling Neutron
+ Extensions
+
+Added wrs-header to neutron client requests
+Neutron responds with wrs-fields only when wrs-header is present in requests
+---
+ neutron/common/constants.py            |  2 ++
+ neutron/extensions/wrs_binding.py      | 11 ++++--
+ neutron/extensions/wrs_net.py          |  8 +++--
+ neutron/extensions/wrs_provider.py     | 12 ++++---
+ neutron/extensions/wrs_tm.py           |  4 ++-
+ neutron/pecan_wsgi/app.py              |  1 +
+ neutron/pecan_wsgi/hooks/__init__.py   |  2 ++
+ neutron/pecan_wsgi/hooks/wrs_fields.py | 65 ++++++++++++++++++++++++++++++++++
+ 8 files changed, 95 insertions(+), 10 deletions(-)
+ create mode 100644 neutron/pecan_wsgi/hooks/wrs_fields.py
+
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index eaf55db..1e11664 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -342,3 +342,5 @@ NONE_VLAN_TAG = 0
+ 
+ # PCI-Passthrough support
+ PORT_STATUS_UNKNOWN = 'UNKNOWN'
++
++WRS_FIELD_PREFIX = 'wrs-'
+diff --git a/neutron/extensions/wrs_binding.py b/neutron/extensions/wrs_binding.py
+index 9190802..401d81f 100644
+--- a/neutron/extensions/wrs_binding.py
++++ b/neutron/extensions/wrs_binding.py
+@@ -23,15 +23,19 @@
+ from neutron_lib.api import extensions as api_extensions
+ from neutron_lib import constants
+ 
++from neutron.common import constants as n_const
++
+ # The MTU value is associated to the network to which the port is attached
+-MTU = 'wrs-binding:mtu'
++# wrs-binding:mtu
++MTU = '%sbinding:mtu' % n_const.WRS_FIELD_PREFIX
+ 
+ # The VIF model describes the type of emulated device in the guest.  This is
+ # analoguous to the hw_vif_model property in Nova.  For clarity, the
+ # 'vif_type' above represents the type of virtual switch that runs on the
+ # host, and this field represents type type of hardware emulated in the
+ # guest.
+-VIF_MODEL = 'wrs-binding:vif_model'
++# wrs-binding:vif_model
++VIF_MODEL = '%sbinding:vif_model' % n_const.WRS_FIELD_PREFIX
+ 
+ VIF_MODEL_DEFAULT = 'default'
+ VIF_MODEL_VIRTIO = 'virtio'
+@@ -39,7 +43,8 @@ VIF_MODEL_PCI_PASSTHROUGH = 'pci-passthrough'
+ 
+ # The mac_filtering attribute describes whether the MAC filtering was enabled
+ # as an attribute of the project that this port is owned by.
+-MAC_FILTERING = 'wrs-binding:mac_filtering'
++# wrs-binding:mac_filtering
++MAC_FILTERING = '%sbinding:mac_filtering' % n_const.WRS_FIELD_PREFIX
+ 
+ VIF_TYPE_AVS = 'avs'
+ 
+diff --git a/neutron/extensions/wrs_net.py b/neutron/extensions/wrs_net.py
+index a232381..e241c62 100644
+--- a/neutron/extensions/wrs_net.py
++++ b/neutron/extensions/wrs_net.py
+@@ -24,12 +24,16 @@ from oslo_log import log as logging
+ 
+ from neutron_lib.api import extensions as api_extensions
+ 
++from neutron.common import constants as n_const
++
+ 
+ LOG = logging.getLogger(__name__)
+ 
+-VLAN = 'wrs-net:vlan_id'
++# wrs-net:vlan_id
++VLAN = '%snet:vlan_id' % n_const.WRS_FIELD_PREFIX
+ 
+-HOST = 'wrs-net:host'
++# wrs-net:host
++HOST = '%snet:host' % n_const.WRS_FIELD_PREFIX
+ 
+ 
+ EXTENDED_ATTRIBUTES_2_0 = {
+diff --git a/neutron/extensions/wrs_provider.py b/neutron/extensions/wrs_provider.py
+index e9f6052..3d3cb76 100644
+--- a/neutron/extensions/wrs_provider.py
++++ b/neutron/extensions/wrs_provider.py
+@@ -58,11 +58,15 @@ def _validate_ip_mcast_address(data, valid_values=None):
+ 
+ validators.add_validator('type:ip_mcast_address', _validate_ip_mcast_address)
+ 
+-NETWORK_TYPE = 'wrs-provider:network_type'
+-PHYSICAL_NETWORK = 'wrs-provider:physical_network'
+-SEGMENTATION_ID = 'wrs-provider:segmentation_id'
++# wrs-provider:network_type
++# wrs-provider:physical_network
++# wrs-provider:segmentation_id
++NETWORK_TYPE = '%sprovider:network_type' % n_const.WRS_FIELD_PREFIX
++PHYSICAL_NETWORK = '%sprovider:physical_network' % n_const.WRS_FIELD_PREFIX
++SEGMENTATION_ID = '%sprovider:segmentation_id' % n_const.WRS_FIELD_PREFIX
+ ATTRIBUTES = [NETWORK_TYPE, PHYSICAL_NETWORK, SEGMENTATION_ID]
+-MTU = 'wrs-provider:mtu'
++# wrs-provider:mtu
++MTU = '%sprovider:mtu' % n_const.WRS_FIELD_PREFIX
+ 
+ EXTENDED_ATTRIBUTES_2_0 = {
+     'subnets': {
+diff --git a/neutron/extensions/wrs_tm.py b/neutron/extensions/wrs_tm.py
+index fd31dcc..04e9f7d 100644
+--- a/neutron/extensions/wrs_tm.py
++++ b/neutron/extensions/wrs_tm.py
+@@ -29,6 +29,7 @@ from neutron._i18n import _
+ from neutron.api import extensions
+ from neutron.api.v2 import attributes as attr
+ from neutron.api.v2 import base
++from neutron.common import constants as n_const
+ 
+ import six
+ 
+@@ -59,7 +60,8 @@ RESOURCE_ATTRIBUTE_MAP = {
+     },
+ }
+ 
+-QOS = "wrs-tm:qos"
++# wrs-tm:qos
++QOS = "%stm:qos" % n_const.WRS_FIELD_PREFIX
+ 
+ EXTENDED_ATTRIBUTES_2_0 = {
+     'ports': {QOS: {'allow_post': True,
+diff --git a/neutron/pecan_wsgi/app.py b/neutron/pecan_wsgi/app.py
+index 279b3f3..dc6d97c 100644
+--- a/neutron/pecan_wsgi/app.py
++++ b/neutron/pecan_wsgi/app.py
+@@ -33,6 +33,7 @@ def v2_factory(global_config, **local_config):
+         hooks.ContextHook(),  # priority 95
+         hooks.ExceptionTranslationHook(),  # priority 100
+         hooks.BodyValidationHook(),  # priority 120
++        hooks.WrsFieldsHook(),  # priority 121
+         hooks.OwnershipValidationHook(),  # priority 125
+         hooks.QuotaEnforcementHook(),  # priority 130
+         hooks.NotifierHook(),  # priority 135
+diff --git a/neutron/pecan_wsgi/hooks/__init__.py b/neutron/pecan_wsgi/hooks/__init__.py
+index e557988..2a3a668 100644
+--- a/neutron/pecan_wsgi/hooks/__init__.py
++++ b/neutron/pecan_wsgi/hooks/__init__.py
+@@ -22,6 +22,7 @@ from neutron.pecan_wsgi.hooks import query_parameters
+ from neutron.pecan_wsgi.hooks import quota_enforcement
+ from neutron.pecan_wsgi.hooks import translation
+ from neutron.pecan_wsgi.hooks import userfilters
++from neutron.pecan_wsgi.hooks import wrs_fields
+ 
+ 
+ ExceptionTranslationHook = translation.ExceptionTranslationHook
+@@ -33,3 +34,4 @@ QuotaEnforcementHook = quota_enforcement.QuotaEnforcementHook
+ NotifierHook = notifier.NotifierHook
+ QueryParametersHook = query_parameters.QueryParametersHook
+ UserFilterHook = userfilters.UserFilterHook
++WrsFieldsHook = wrs_fields.WrsFieldsHook
+diff --git a/neutron/pecan_wsgi/hooks/wrs_fields.py b/neutron/pecan_wsgi/hooks/wrs_fields.py
+new file mode 100644
+index 0000000..cb87906
+--- /dev/null
++++ b/neutron/pecan_wsgi/hooks/wrs_fields.py
+@@ -0,0 +1,65 @@
++# All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License"); you may
++# not use this file except in compliance with the License. You may obtain
++# a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++# Copyright (c) 2017-2018 Wind River Systems, Inc.
++#
++# The right to copy, distribute, modify, or otherwise make use
++# of this software may be licensed only pursuant to the terms
++# of an applicable Wind River license agreement.
++#
++
++from neutron.common import constants as n_const
++from pecan import hooks
++
++
++class WrsFieldsHook(hooks.PecanHook):
++
++    # Do this at around the same as body validation hook
++    # we use this to strip out wrs- attributes when the request
++    # comes from a non-wrs client
++    # this is part of compliance to refstack, tempest, functest etc
++    priority = 121
++
++    def after(self, state):
++        # filter out wrs fields when the request does not
++        # comes from a wrs client
++        if state.request.headers.get('wrs-header') is not None:
++            return
++
++        try:
++            data = state.response.json
++        except ValueError:
++            return
++        resource = state.request.context.get('resource')
++        collection = state.request.context.get('collection')
++        if collection not in data and resource not in data:
++            return
++        is_single = resource in data
++        key = resource if resource in data else collection
++        if is_single:
++            data[key] = self._filter_item(
++                state.response.json[key])
++        else:
++            data[key] = [
++                self._filter_item(i)
++                for i in state.response.json[key]
++            ]
++        state.response.json = data
++
++    def _filter_item(self, item):
++        return {
++            field: value
++            for field, value in item.items()
++            if not field.startswith(n_const.WRS_FIELD_PREFIX)
++        }
+-- 
+2.7.4
+

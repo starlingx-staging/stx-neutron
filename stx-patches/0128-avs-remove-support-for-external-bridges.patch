@@ -1,0 +1,60 @@
+From b4f3d38ef229de5123ac0fb0c9c94878321d3592 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 29 Nov 2017 09:41:43 -0600
+Subject: [PATCH 128/155] avs: remove support for external bridges
+
+The newer versions of the ODL SDN controller no longer needs separate bridges
+for both east-west and north-south traffic. It can now handle all rules on the
+same integration bridge (br-int).
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 25 +++++--------------------
+ 1 file changed, 5 insertions(+), 20 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index c51a7b5..4b29b5a 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -135,9 +135,6 @@ sdn_opts = [
+     cfg.StrOpt('integration_bridge_name',
+                default='br-int',
+                help=_("Defines the default integration bridge name")),
+-    cfg.StrOpt('external_bridge_name',
+-               default='br-ex',
+-               help=_("Defines the default external bridge name")),
+ ]
+ 
+ 
+@@ -2438,25 +2435,13 @@ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+         """
+         Determine which network this port should be attached to.  The normal
+         case is that the network is specified by the neutron server based on
+-        which tenant network the device was attached to.  For SDN there are two
+-        cases to consider.  (1) the SDN controller is doing both layer2 and
+-        layer3 roles therefore it manages all bridges.  (2) The SDN controller
+-        is only doing layer2 in which case we need to manage our own external
+-        network bridges.
++        which tenant network the device was attached to.  For SDN all ports are
++        attached to the integration bridge (br-int).
+         """
+         device_owner = port_details['device_owner']
+-        if device_owner in DEVICES_ON_EXTERNAL_NETWORKS:
+-            if cfg.CONF.SDN.manage_external_networks:
+-                return super(VSwitchSdnNeutronAgent, self)._get_network_info(
+-                    port_details)
+-            else:
+-                network_name = cfg.CONF.SDN.external_bridge_name
+-                network_uuid = self.vswitch_mgr.get_openflow_bridge_uuid(
+-                    network_name)
+-        else:
+-            network_name = cfg.CONF.SDN.integration_bridge_name
+-            network_uuid = self.vswitch_mgr.get_openflow_bridge_uuid(
+-                network_name)
++        network_name = cfg.CONF.SDN.integration_bridge_name
++        network_uuid = self.vswitch_mgr.get_openflow_bridge_uuid(
++            network_name)
+         return network_uuid, network_name
+ 
+     def _handle_new_virtual_network(self, network_name, network):
+-- 
+2.7.4
+

@@ -1,0 +1,53 @@
+From cfc738139cc7be10fe683c88b199d4324ea95419 Mon Sep 17 00:00:00 2001
+From: Teresa Ho <teresa.ho@windriver.com>
+Date: Fri, 4 Aug 2017 09:11:12 -0400
+Subject: [PATCH 021/155] US100381: Post-install configuration of SDN
+
+The update allows enabling or disabling of SDN functionality after initial
+install.
+
+Conflicts:
+	neutron/db/hosts_db.py
+---
+ neutron/db/hosts_db.py | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index d77ae0c..669f295 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -23,6 +23,7 @@
+ import re
+ 
+ import six
++from tsconfig import tsconfig
+ 
+ from neutron_lib import constants as lib_constants
+ from neutron_lib import context
+@@ -681,6 +682,23 @@ class HostSchedulerDbMixin(HostDbMixin):
+         data = super(HostSchedulerDbMixin, self).update_host(
+             context, id, host)
+         agents = self.get_agents_by_hosts(context, [data['name']])
++
++        # Check if the l3 agent needs to be deleted
++        sdn_enabled = False
++        if tsconfig.sdn_enabled.lower() == 'yes':
++            sdn_enabled = True
++        l3plugin = directory.get_plugin(plugin_constants.L3)
++        if (l3plugin and sdn_enabled and
++            not utils.is_extension_supported(
++                    l3plugin, lib_constants.L3_AGENT_SCHEDULER_EXT_ALIAS)):
++            for agent in agents[:]:
++                if agent['agent_type'] == lib_constants.AGENT_TYPE_L3:
++                    # agent should not be configured since l3plugin router is
++                    # not enabled
++                    LOG.info("Deleting agent {}".format(agent['id']))
++                    self.delete_agent(context, agent['id'])
++                    agents.remove(agent)
++
+         if data.get('availability', constants.HOST_DOWN) == constants.HOST_UP:
+             LOG.debug("enabling {} agents on {}".format(len(agents), id))
+             self._auto_schedule_host(context, data)
+-- 
+2.7.4
+

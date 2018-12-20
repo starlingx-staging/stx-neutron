@@ -1,0 +1,513 @@
+From d03d7c39af0031dd935d52b7e90cad10b47457d4 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 18 Oct 2017 19:28:09 -0500
+Subject: [PATCH 091/155] avs: l2pop sync between db and avs
+
+adds support for synchronizing the l2pop database to the avs internal tables.
+After a full FDB is received we then look thru the AVS tables to remove any
+stale entries.  A "full FDB" is determined by looking for a new flag that we
+have added to the FDB RPC message.
+---
+ neutron/agent/vswitch/manager.py       |   2 +-
+ neutron/plugins/wrs/agent/avs/agent.py | 333 ++++++++++++++++++++++++++++++---
+ 2 files changed, 304 insertions(+), 31 deletions(-)
+
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index 15a41f7..664c9d3 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -1351,7 +1351,7 @@ class VSwitchManager(object):
+                    format(mac_address, interface_uuid, e))
+             raise VSwitchManagerError(msg)
+ 
+-    def get_vtep_endpoints(self, interface_uuid, static=True):
++    def get_vtep_endpoints(self, interface_uuid, static=None):
+         """
+         Retrieves the current list of VTEP endpoints.
+         """
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 2876fa9..89062cf 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -59,6 +59,7 @@ from neutron.common import constants as n_const
+ from neutron.common import ipv6_utils
+ from neutron.common import rpc as n_rpc
+ from neutron.common import topics
++from neutron.common import utils
+ from neutron.conf.agent import common as config
+ from neutron.drivers import fm
+ from neutron.extensions import securitygroup as ext_sg
+@@ -229,11 +230,7 @@ class VSwitchBaseRpcCallbacksMixin(object):
+         if network_id in networks:
+             network = networks[network_id]
+             if network['type'] == avs_constants.VSWITCH_LAYER2_NETWORK:
+-                self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
+-                self.virtual_networks.pop(network_id, None)
+-                segment = self.segment_cache.pop(network_id, None)
+-                self.providernet_cache.pop(
+-                    self.get_providernet_key(segment), None)
++                self.remove_network(network_id, in_use_interfaces)
+ 
+     def agent_updated(self, context, payload):
+         """Handle the agent_updated notification event."""
+@@ -284,6 +281,147 @@ class VSwitchTrunkSkeletonMixin(trunk_rpc.TrunkSkeleton):
+                 self.mark_port_for_refresh(trunk_details['port_id'])
+ 
+ 
++class VSwitchFDBCache(object):
++    """Tracks which FDB entries have been successfully added/removed.
++
++    This class implements a cache that manages VTEP gateway and device
++    records.  We use the cache in order to be able to audit the AVS VXLAN
++    endpoint records in the event that the process restarts and we have to
++    re-sync AVS to the neutron DB.
++    """
++
++    def __init__(self):
++        # cache all gateways and devices by provider interface_uuid
++        self.cache = collections.defaultdict(self._default_cache_item)
++        self.networks = {}
++
++    @staticmethod
++    def _default_cache_item():
++        return {'gateways': set(), 'devices': {}, 'ip-devices': {}}
++
++    def map_network(self, network_id, interface_uuid):
++        self.networks[network_id] = interface_uuid
++
++    def unmap_network(self, network_id):
++        return self.networks.pop(network_id, None)
++
++    def remove_interface(self, interface_uuid):
++        if interface_uuid in self.cache:
++            del self.cache[interface_uuid]
++
++    @staticmethod
++    def make_device_key(device):
++        return device['mac_address']
++
++    @staticmethod
++    def _make_device(mac_address, gateway_ip):
++        device = {'mac_address': mac_address,
++                  'gateway_ip': gateway_ip}
++        return device
++
++    def add_device(self, interface_uuid, mac_address, gateway_ip):
++        device = self._make_device(mac_address, gateway_ip)
++        key = self.make_device_key(device)
++        cache = self.cache[interface_uuid]
++        cache['devices'][key] = device
++
++    def remove_device(self, interface_uuid, mac_address):
++        cache = self.cache[interface_uuid]
++        if mac_address in cache['devices']:
++            del cache['devices'][mac_address]
++
++    def remove_gateway_devices(self, interface_uuid, gateway_ip):
++        cache = self.cache[interface_uuid]
++        for device in cache['devices'].values():
++            if device['gateway_ip'] == gateway_ip:
++                key = self.make_device_key(device)
++                del cache['devices'][key]
++
++    def _get_device(self, interface_uuid, key):
++        cache = self.cache[interface_uuid]
++        if key in cache['devices']:
++            return cache['devices'][key]
++
++    def get_device(self, interface_uuid, mac_address):
++        return self._get_device(interface_uuid, mac_address)
++
++    def device_installed(self, interface_uuid, mac_address, gateway_ip):
++        device = self.get_device(interface_uuid, mac_address)
++        if device:
++            return bool(device['gateway_ip'] == gateway_ip)
++
++    def get_devices(self, interface_uuid):
++        cache = self.cache[interface_uuid]
++        return cache['devices'].values()
++
++    @staticmethod
++    def make_ip_device_key(device):
++        return device['ip_address']
++
++    @staticmethod
++    def _make_ip_device(ip_address, mac_address, gateway_ip):
++        device = {'mac_address': mac_address,
++                  'ip_address': ip_address,
++                  'gateway_ip': gateway_ip}
++        return device
++
++    def add_ip_device(self, interface_uuid, ip_address, mac_address,
++                      gateway_ip):
++        device = self._make_ip_device(ip_address, mac_address, gateway_ip)
++        key = self.make_ip_device_key(device)
++        cache = self.cache[interface_uuid]
++        cache['ip-devices'][key] = device
++
++    def remove_ip_device(self, interface_uuid, ip_address):
++        cache = self.cache[interface_uuid]
++        if ip_address in cache['ip-devices']:
++            del cache['ip-devices'][ip_address]
++
++    def remove_gateway_ip_devices(self, interface_uuid, gateway_ip):
++        cache = self.cache[interface_uuid]
++        for device in cache['ip-devices'].values():
++            if device['gateway_ip'] == gateway_ip:
++                key = self.make_ip_device_key(device)
++                del cache['ip-devices'][key]
++
++    def _get_ip_device(self, interface_uuid, key):
++        cache = self.cache[interface_uuid]
++        if key in cache['ip-devices']:
++            return cache['ip-devices'][key]
++
++    def get_ip_device(self, interface_uuid, ip_address):
++        return self._get_ip_device(interface_uuid, ip_address)
++
++    def ip_device_installed(self, interface_uuid, ip_address, mac_address,
++                            gateway_ip):
++        device = self.get_ip_device(interface_uuid, ip_address)
++        if device:
++            return bool(device['mac_address'] == mac_address and
++                        device['gateway_ip'] == gateway_ip)
++
++    def get_ip_devices(self, interface_uuid):
++        cache = self.cache[interface_uuid]
++        return cache['ip-devices'].values()
++
++    def add_gateway(self, interface_uuid, gateway_ip):
++        cache = self.cache[interface_uuid]
++        cache['gateways'].add(gateway_ip)
++
++    def remove_gateway(self, interface_uuid, gateway_ip):
++        cache = self.cache[interface_uuid]
++        if gateway_ip in cache['gateways']:
++            cache['gateways'].remove(gateway_ip)
++
++    def get_gateway(self, interface_uuid, gateway_ip):
++        cache = self.cache[interface_uuid]
++        if gateway_ip in cache['gateways']:
++            return gateway_ip
++
++    def get_gateways(self, interface_uuid):
++        cache = self.cache[interface_uuid]
++        return cache['gateways']
++
++
+ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                                VSwitchTrunkSkeletonMixin,
+                                sg_rpc.SecurityGroupAgentRpcCallbackMixin,
+@@ -384,44 +522,159 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+ 
+     def _fdb_ip_add_entry(self, interface_uuid, ip_address,
+                           mac_address, agent_ip):
++        if mac_address == FLOODING_ENTRY_MAC:
++            return  # let the layer2 handler deal with this
++        if self.fdb_cache.ip_device_installed(
++                interface_uuid, ip_address, mac_address, agent_ip):
++            return
+         LOG.info("adding VTEP IP endpoint for {}:{} via {} over {}".
+                  format(mac_address, ip_address, agent_ip, interface_uuid))
+         self.vswitch_mgr.add_vtep_ip_endpoint(
+             interface_uuid, ip_address, mac_address, agent_ip)
++        self.fdb_cache.add_ip_device(
++            interface_uuid, ip_address, mac_address, agent_ip)
+ 
+     def _fdb_ip_delete_entry(self, interface_uuid, ip_address,
+                              mac_address, agent_ip):
++        if mac_address == FLOODING_ENTRY_MAC:
++            return  # let the layer2 handler deal with this
++        if not self.fdb_cache.get_ip_device(interface_uuid, ip_address):
++            return
+         LOG.info("removing VTEP IP endpoint for {}:{} via {} over {}".
+                  format(mac_address, ip_address, agent_ip, interface_uuid))
+         self.vswitch_mgr.delete_vtep_ip_endpoint(
+             interface_uuid, ip_address)
++        self.fdb_cache.remove_ip_device(interface_uuid, ip_address)
+ 
+     def _fdb_add_entry(self, interface_uuid, mac_address, agent_ip):
+         """
+         Handle insertion of one FDB entry.
+         """
+         if mac_address == FLOODING_ENTRY_MAC:
++            if self.fdb_cache.get_gateway(interface_uuid, agent_ip):
++                return
+             LOG.info("adding VTEP peer {} over {}".format(
+                 agent_ip, interface_uuid))
+             self.vswitch_mgr.add_vtep_peer(interface_uuid, agent_ip)
++            self.fdb_cache.add_gateway(interface_uuid, agent_ip)
+         else:
++            if not self.fdb_cache.get_gateway(interface_uuid, agent_ip):
++                # NOTE(alegacy): There are some cases where the server does
++                # not send a flood entry because it thinks that all nodes
++                # have already added it back when the first FDB entry was
++                # sent for that network.   That creates a race condition
++                # where a new node creates its first port on the network
++                # just as the server sends out another FDB update for that
++                # network (without a flood entry added).  To avoid this race
++                # condition we will just go ahead and add the flood entry
++                # on our own.
++                self._fdb_add_entry(interface_uuid, FLOODING_ENTRY_MAC,
++                                    agent_ip)
++
++            if self.fdb_cache.device_installed(
++                    interface_uuid, mac_address, agent_ip):
++                return
+             LOG.info("adding VTEP endpoint for {} via {} over {}".format(
+                 mac_address, agent_ip, interface_uuid))
+             self.vswitch_mgr.add_vtep_endpoint(
+                 interface_uuid, mac_address, agent_ip)
++            self.fdb_cache.add_device(
++                interface_uuid, mac_address, agent_ip)
+ 
+     def _fdb_delete_entry(self, interface_uuid, mac_address, agent_ip):
+         """
+         Handle removal of one FDB entry.
+         """
+         if mac_address == FLOODING_ENTRY_MAC:
++            if not self.fdb_cache.get_gateway(interface_uuid, agent_ip):
++                return
+             LOG.info("removing VTEP peer {} over {}".format(
+                 agent_ip, interface_uuid))
+             self.vswitch_mgr.delete_vtep_peer(interface_uuid, agent_ip)
++            self.fdb_cache.remove_gateway_ip_devices(interface_uuid, agent_ip)
++            self.fdb_cache.remove_gateway_devices(interface_uuid, agent_ip)
++            self.fdb_cache.remove_gateway(interface_uuid, agent_ip)
+         else:
++            if not self.fdb_cache.get_device(interface_uuid, mac_address):
++                return
+             LOG.info("removing VTEP endpoint for {} via {} over {}".
+                      format(mac_address, agent_ip, interface_uuid))
+             self.vswitch_mgr.delete_vtep_endpoint(interface_uuid, mac_address)
++            self.fdb_cache.remove_device(interface_uuid, mac_address)
++
++    def _get_fdb_installed_gateways(self, interface_uuid):
++        data = self.vswitch_mgr.get_vtep_peers(interface_uuid)
++        return [d['address'] for d in data]
++
++    def _get_fdb_installed_ip_devices(self, interface_uuid):
++        data = self.vswitch_mgr.get_vtep_ip_endpoints(interface_uuid)
++        devices = [{'mac_address': d['mac-address'],
++                    'ip_address': d['device-address']} for d in data]
++        return devices
++
++    def _get_fdb_installed_devices(self, interface_uuid):
++        data = self.vswitch_mgr.get_vtep_endpoints(
++            interface_uuid, static=True)
++        devices = [{'mac_address': d['mac-address']} for d in data]
++        return devices
++
++    def _fdb_audit_network_gateways(self, interface_uuid):
++        cached = self.fdb_cache.get_gateways(interface_uuid)
++        installed = self._get_fdb_installed_gateways(interface_uuid)
++        stale = set(installed) - set(cached)
++        for gateway in stale:
++            LOG.info("removing stale VTEP Peer {} over {}".format(
++                gateway, interface_uuid))
++            self.vswitch_mgr.delete_vtep_peer(
++                interface_uuid, gateway)
++
++    def _fdb_audit_network_devices(self, interface_uuid):
++        cached = self.fdb_cache.get_devices(interface_uuid)
++        installed = self._get_fdb_installed_devices(interface_uuid)
++        previous = set([d['mac_address'] for d in installed])
++        current = set([d['mac_address'] for d in cached])
++        stale = previous - current
++        for mac_address in stale:
++            LOG.info("removing stale VTEP endpoint for {} over {}".format(
++                mac_address, interface_uuid))
++            self.vswitch_mgr.delete_vtep_endpoint(
++                interface_uuid, mac_address)
++
++    def _fdb_audit_network_ip_devices(self, interface_uuid):
++        cached = self.fdb_cache.get_ip_devices(interface_uuid)
++        installed = self._get_fdb_installed_ip_devices(interface_uuid)
++        previous = set([d['ip_address'] for d in installed])
++        current = set([d['ip_address'] for d in cached])
++        stale = previous - current
++        for ip_address in stale:
++            LOG.info("removing stale VTEP IP endpoint for {}:{} over {}".
++                     format(d['mac_address'], d['ip_address'], interface_uuid))
++            self.vswitch_mgr.delete_vtep_ip_endpoint(
++                interface_uuid, ip_address)
++
++    def _fdb_audit_for_network(self, interface_uuid):
++        """Audit FDB between local DB and AVS.
++
++        The audit is triggered after successfully processing a full FDB sync
++        record from the server so we assume that all DB records are installed
++        in AVS; otherwise an error would have occurred.  For that reason the
++        audit only worries about finding stale entries and not missing
++        entries.
++        """
++        self._fdb_audit_network_ip_devices(interface_uuid)
++        self._fdb_audit_network_devices(interface_uuid)
++        self._fdb_audit_network_gateways(interface_uuid)
++
++    @utils.synchronized('avs-fdb-cache')
++    def fdb_audit(self):
++        for interface_uuid in self.fdb_audits.keys():
++            LOG.info("Auditing FDB for interface {}".format(
++                interface_uuid))
++            self._fdb_audit_for_network(interface_uuid)
++            del self.fdb_audits[interface_uuid]
++
++    def _trigger_fdb_audit_for_network(self, interface_uuid):
++        self.fdb_audits[interface_uuid] = True
+ 
+     def _process_fdb_for_network(self, network_id, fdb_entries,
+                                  fdb_handler, ip_handler, reverse=False):
+@@ -429,6 +682,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         Handle new FDB entries for a given network_id.
+         """
+         interface_uuid = self._fdb_resolve_interface(fdb_entries)
++        self.fdb_cache.map_network(network_id, interface_uuid)
+         port_entries = fdb_entries['ports']
+         LOG.debug("processing VTEP endpoints for interface "
+                   "{} on network {}".format(interface_uuid, network_id))
+@@ -442,23 +696,16 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 LOG.warning("no compatible address to reach {}".format(
+                     agent_ips))
+                 continue
+-            # Filter the list of ip:mac pairs and produce a unique set of MAC
+-            # addresses to avoid duplicating effort.
+-            mac_addresses = set([p.mac_address for p in ports])
+-
+-            # Sort by MAC address so that we can control when the flood
+-            # entry is processed.  For adds, AVS requires the peer entry to
+-            # be created first while for deletes it should happen last.
+-            mac_addresses = sorted(mac_addresses, reverse=reverse)
+-            for mac_address in mac_addresses:
+-                fdb_handler(interface_uuid, mac_address, agent_ip)
+-
+-            # Register the device IP address on the VXLAN so that it can be
+-            # used for avoiding broadcast packets whenever possible.
+-            for p in ports:
+-                if p.mac_address != FLOODING_ENTRY_MAC:
+-                    ip_handler(interface_uuid, p.ip_address,
+-                               p.mac_address, agent_ip)
++            sorted_ports = sorted(copy.deepcopy(ports),
++                                  key=lambda x: x.mac_address,
++                                  reverse=reverse)
++            for p in sorted_ports:
++                fdb_handler(interface_uuid, p.mac_address, agent_ip)
++                ip_handler(
++                    interface_uuid, p.ip_address, p.mac_address, agent_ip)
++
++        if fdb_entries.get('audit'):
++            self._trigger_fdb_audit_for_network(interface_uuid)
+ 
+     def _is_static_vxlan_segment(self, network_id, segment):
+         if 'segment_id' in segment:
+@@ -471,6 +718,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 return True
+         return False
+ 
++    @utils.synchronized('avs-fdb-cache')
+     def fdb_add(self, context, fdb_entries):
+         """
+         Handle new FDB entries published to this agent (or all agents).
+@@ -490,6 +738,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                                           self._fdb_add_entry,
+                                           self._fdb_ip_add_entry)
+ 
++    @utils.synchronized('avs-fdb-cache')
+     def fdb_remove(self, context, fdb_entries):
+         """
+         Handle new FDB entries published to this agent (or all agents).
+@@ -517,6 +766,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         if not self._is_static_vxlan_segment(network_id, segment):
+             return
+         interface_uuid = self._fdb_resolve_interface(segment)
++        self.fdb_cache.map_network(network_id, interface_uuid)
+         LOG.debug("processing VTEP IP endpoints for interface {} on "
+                   "network {}".format(interface_uuid, network_id))
+         for agent_ips, changes in six.iteritems(ip_changes):
+@@ -537,6 +787,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                     interface_uuid, port_info.ip_address,
+                     port_info.mac_address, agent_ip)
+ 
++    @utils.synchronized('avs-fdb-cache')
+     def fdb_update(self, context, fdb_entries):
+         source = fdb_entries.get('source', topics.L2POPULATION)
+         LOG.debug("fdb_update received from {}: {}".format(
+@@ -642,6 +893,16 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+         self.stale_ports = {}
+         self.updated_ports = set()
+ 
++    def remove_network(self, network_id, in_use_interfaces):
++        self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
++        self.virtual_networks.pop(network_id, None)
++        segment = self.segment_cache.pop(network_id, None)
++        self.providernet_cache.pop(
++            self.get_providernet_key(segment), None)
++        for uuid, iface in self.interface_details.items():
++            if iface['network_id'] == network_id:
++                self.interface_details.pop(uuid, None)
++
+     def notify_mainloop(self):
+         self.vif_event.set()
+         eventlet.greenthread.sleep(0)  # yield
+@@ -1211,14 +1472,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             if not self.vswitch_mgr.is_network_orphaned(network_id):
+                 continue
+             LOG.warning("Last port {} deleted; deleting network {}".format(
+-                        port_uuid, network_id))
+-            self.vswitch_mgr.delete_network(network_id, in_use_interfaces)
+-            self.virtual_networks.pop(network_id, None)
+-            segment = self.segment_cache.pop(network_id, None)
+-            self.providernet_cache.pop(self.get_providernet_key(segment), None)
+-            for uuid, iface in self.interface_details.items():
+-                if iface['network_id'] == network_id:
+-                    self.interface_details.pop(uuid, None)
++                port_uuid, network_id))
++            self.remove_network(network_id, in_use_interfaces)
+ 
+     def handle_removed_port(self, port_uuid):
+         """
+@@ -1741,6 +1996,9 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+         self.pnet_connectivity_manager = self
+         self.pnet_connectivity_interfaces = []
+         self.link_local_address = None
++        self.fdb_cache = VSwitchFDBCache()
++        self.fdb_audits = {}
++
+         super(VSwitchNeutronAgent, self).__init__(
+             interface_mappings,
+             polling_interval,
+@@ -1765,6 +2023,16 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+ 
+         self.dvr_agent.register_manager(self.vswitch_mgr)
+ 
++    def remove_network(self, network_id, in_use_interfaces):
++        super(VSwitchNeutronAgent, self).remove_network(
++            network_id, in_use_interfaces)
++        # NOTE(alegacy): whenever a network is removed we need to flush the
++        # FDB cache because AVS will have automatically removed any learned
++        # or programmed layer2/layer3 entries.
++        interface_uuid = self.fdb_cache.unmap_network(network_id)
++        if interface_uuid:
++            self.fdb_cache.remove_interface(interface_uuid)
++
+     def rpc_consumers(self):
+         result = super(VSwitchNeutronAgent, self).rpc_consumers()
+         result.extend([[topics.SECURITY_GROUP, topics.UPDATE],
+@@ -2064,9 +2332,14 @@ class VSwitchNeutronAgent(VSwitchBaseNeutronAgent,
+         except Exception:
+             LOG.exception("Failed to audit peer DVR MAC address list")
+ 
++    def _stale_fdb_loop(self):
++        """Handle any mismatches between AVS and the local FDB records."""
++        self.fdb_audit()
++
+     def daemon_loop_body(self):
+         self._audit_dvr_mac_addresses()
+         super(VSwitchNeutronAgent, self).daemon_loop_body()
++        self._stale_fdb_loop()
+ 
+ 
+ class VSwitchSdnNeutronAgent(VSwitchBaseNeutronAgent,
+-- 
+2.7.4
+

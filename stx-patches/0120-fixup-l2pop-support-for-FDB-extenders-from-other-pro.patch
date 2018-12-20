@@ -1,0 +1,48 @@
+From ccce61c4d0364ff47937d045fd13d4dbc99c0bf4 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 2 Jan 2018 08:58:27 -0600
+Subject: [PATCH 120/155] fixup! l2pop: support for FDB extenders from other
+ projects
+
+---
+ neutron/plugins/ml2/drivers/l2pop/mech_driver.py                 | 7 +++++++
+ neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py | 5 ++++-
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+index 4674669..92ec014 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+@@ -47,6 +47,13 @@ def register_fdb_extend_func(name, func):
+ 
+ def run_fdb_extend_funcs(context, network_id, fdb_entries, source=None,
+                          exclude_host=None):
++    if 'physical_network' not in fdb_entries:
++        # NOTE(alegacy): unit tests may not provide this field for vxlan
++        # based networks therefore just exclude all extensions from running
++        # during the test.
++        LOG.warning("Skipping FDB extensions due to missing physical_network"
++                    " attribute in fdb_entries")
++        return fdb_entries
+     for name, func in six.iteritems(l2pop_fdb_extend_funcs):
+         if source and name == source:
+             # Avoid data loops and do not provide data from a source back to
+diff --git a/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py b/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py
+index 8c42a5b..a301592 100644
+--- a/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py
++++ b/neutron/tests/unit/plugins/ml2/drivers/l2pop/test_mech_driver.py
+@@ -1265,7 +1265,10 @@ class TestL2PopulationMechDriver(base.BaseTestCase):
+                                   return_value=fdb_network_ports),\
+                 mock.patch.object(l2pop_db,
+                                   'get_distributed_active_network_ports',
+-                                  return_value=tunnel_network_ports):
++                                  return_value=tunnel_network_ports), \
++                mock.patch.object(l2pop_mech_driver,
++                                  'register_fdb_extend_func',
++                                  return_value=None):
+             session = mock.Mock()
+             agent = mock.Mock()
+             agent.host = HOST
+-- 
+2.7.4
+

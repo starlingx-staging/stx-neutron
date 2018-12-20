@@ -1,0 +1,50 @@
+From 392110f61fb7a41eb4fd7f1f258fee18243689b3 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Tue, 21 Nov 2017 14:38:20 -0500
+Subject: [PATCH 073/155] Revert "US77204: AVS memory reduction - neutron
+ metadata proxy"
+
+This reverts commit a198b461ba46a463616feebdad5569343458d4c8.
+---
+ etc/haproxy_router.cfg | 29 -----------------------------
+ 1 file changed, 29 deletions(-)
+ delete mode 100644 etc/haproxy_router.cfg
+
+diff --git a/etc/haproxy_router.cfg b/etc/haproxy_router.cfg
+deleted file mode 100644
+index 800ea66..0000000
+--- a/etc/haproxy_router.cfg
++++ /dev/null
+@@ -1,29 +0,0 @@
+-global
+-  daemon
+-  log  127.0.0.1 local1 info
+-  maxconn  4000
+-
+-defaults
+-  log  global
+-  maxconn  8000
+-  mode  http
+-  option  httplog
+-  option  dontlognull
+-  option  forwardfor
+-  retries  3
+-  stats  enable
+-  timeout  http-request 10s
+-  timeout  queue 10m
+-  timeout  connect 10s
+-  timeout  client 30s
+-  timeout  server 30s
+-  timeout  check 10s
+-
+-frontend neutron-metadata-proxy
+-  bind *:80
+-  default_backend neutron-metadata-agent
+-
+-backend neutron-metadata-agent
+-  http-request set-header X-Neutron-Router-ID "${HEADER_VALUE}"
+-  server neutron-metadata-proxy unix@/var/run/neutron/metadata_proxy
+-
+-- 
+2.7.4
+

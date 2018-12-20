@@ -1,0 +1,177 @@
+From 954787f236d51e21358b1c17f3c592d2505552ac Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 29 Aug 2017 10:02:52 -0500
+Subject: [PATCH 082/155] avs: support for l2pop flood entries
+
+In the first implementation of static vxlan, we chose to ignore the flood
+entries sent down from the mechanism driver because AVS was automatically
+creating peer entries for any layer2 or layer3 entries added.  Because peers
+and layer2/layer3 entries are treated spearately by BGP we needed to change AVS
+to do them separately.  Because of this we now need to add peers in AVS
+manually when a flood entry is sent from l2pop.
+---
+ neutron/agent/vswitch/api.py           |  2 +-
+ neutron/agent/vswitch/manager.py       | 22 ++++++++++----------
+ neutron/plugins/wrs/agent/avs/agent.py | 37 ++++++++++++++++++++++------------
+ 3 files changed, 36 insertions(+), 25 deletions(-)
+
+diff --git a/neutron/agent/vswitch/api.py b/neutron/agent/vswitch/api.py
+index 2932095..5647a8a 100644
+--- a/neutron/agent/vswitch/api.py
++++ b/neutron/agent/vswitch/api.py
+@@ -15,7 +15,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2013-2016 Wind River Systems, Inc.
++# Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index 1bfaac1..4d6ec4c 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -13,7 +13,7 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2013-2016 Wind River Systems, Inc.
++# Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -1331,9 +1331,9 @@ class VSwitchManager(object):
+         Adds a VTEP endpoint entry to direct traffic destined to a given MAC to
+         the IP address of a remote VTEP instance.
+         """
++        endpoint = {'mac-address': mac_address,
++                    'peer-address': ip_address}
+         try:
+-            endpoint = {'mac-address': mac_address,
+-                        'peer-address': ip_address}
+             return self.api.add_vtep_endpoint(interface_uuid, endpoint)
+         except exceptions.VSwitchError as e:
+             msg = ("Failed to add static VTEP endpoint {}: {}".format(
+@@ -1373,10 +1373,10 @@ class VSwitchManager(object):
+         """
+         try:
+             peer = {'address': ip_address}
+-            return self.api.add_peer(interface_uuid, peer)
++            return self.api.add_vtep_peer(interface_uuid, peer)
+         except exceptions.VSwitchError as e:
+-            msg = ("Failed to add static VTEP peer {}: {}".format(
+-                peer, e))
++            msg = ("Failed to add VTEP peer {}: {}".format(
++                ip_address, e))
+             raise VSwitchManagerError(msg)
+ 
+     def delete_vtep_peer(self, interface_uuid, ip_address):
+@@ -1384,9 +1384,9 @@ class VSwitchManager(object):
+         Removes a VTEP peer entry.
+         """
+         try:
+-            return self.api.delete_peer(interface_uuid, ip_address)
++            return self.api.delete_vtep_peer(interface_uuid, ip_address)
+         except exceptions.VSwitchError as e:
+-            msg = ("Failed to delete static VTEP endpoint {} on {}: {}".
++            msg = ("Failed to delete VTEP peer {} from {}: {}".
+                    format(ip_address, interface_uuid, e))
+             raise VSwitchManagerError(msg)
+ 
+@@ -1395,7 +1395,7 @@ class VSwitchManager(object):
+         Retrieves the current list of VTEP endpoints.
+         """
+         try:
+-            return self.api.get_peers(interface_uuid)
++            return self.api.get_vtep_peer_list(interface_uuid)
+         except exceptions.VSwitchError as e:
+             msg = ("Failed to query VTEP peer list for {}, {}".
+                    format(interface_uuid, e))
+@@ -1406,9 +1406,9 @@ class VSwitchManager(object):
+         Adds a VTEP IP endpoint entry to direct traffic destined to a given
+         device IP address to a specific remote VTEP instance.
+         """
++        endpoint = {'device-address': ip_address,
++                    'peer-address': peer_address}
+         try:
+-            endpoint = {'device-address': ip_address,
+-                        'peer-address': peer_address}
+             return self.api.add_vtep_ip_endpoint(interface_uuid, endpoint)
+         except exceptions.VSwitchError as e:
+             msg = ("Failed to add static VTEP IP endpoint {}: {}".format(
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 6436894..14f9962 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -396,26 +396,30 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         Handle insertion of one FDB entry.
+         """
+         if mac_address == FLOODING_ENTRY_MAC:
+-            # Ignore flooding entry; AVS does it on its own
+-            return
+-        LOG.info("adding VTEP endpoint for {} via {} over {}".format(
+-            mac_address, agent_ip, interface_uuid))
+-        self.vswitch_mgr.add_vtep_endpoint(
+-            interface_uuid, mac_address, agent_ip)
++            LOG.info("adding VTEP peer {} over {}".format(
++                agent_ip, interface_uuid))
++            self.vswitch_mgr.add_vtep_peer(interface_uuid, agent_ip)
++        else:
++            LOG.info("adding VTEP endpoint for {} via {} over {}".format(
++                mac_address, agent_ip, interface_uuid))
++            self.vswitch_mgr.add_vtep_endpoint(
++                interface_uuid, mac_address, agent_ip)
+ 
+     def _fdb_delete_entry(self, interface_uuid, mac_address, agent_ip):
+         """
+         Handle removal of one FDB entry.
+         """
+         if mac_address == FLOODING_ENTRY_MAC:
+-            # Ignore flooding entry; AVS does it on its own
+-            return
+-        LOG.info("removing VTEP endpoint for {} via {} over {}".format(
+-            mac_address, agent_ip, interface_uuid))
+-        self.vswitch_mgr.delete_vtep_endpoint(interface_uuid, mac_address)
++            LOG.info("removing VTEP peer {} over {}".format(
++                agent_ip, interface_uuid))
++            self.vswitch_mgr.add_vtep_peer(interface_uuid, agent_ip)
++        else:
++            LOG.info("removing VTEP endpoint for {} via {} over {}".
++                     format(mac_address, agent_ip, interface_uuid))
++            self.vswitch_mgr.delete_vtep_endpoint(interface_uuid, mac_address)
+ 
+     def _process_fdb_for_network(self, network_id, fdb_entries,
+-                                 fdb_handler, ip_handler):
++                                 fdb_handler, ip_handler, reverse=False):
+         """
+         Handle new FDB entries for a given network_id.
+         """
+@@ -436,8 +440,14 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             # Filter the list of ip:mac pairs and produce a unique set of MAC
+             # addresses to avoid duplicating effort.
+             mac_addresses = set([p.mac_address for p in ports])
++
++            # Sort by MAC address so that we can control when the flood
++            # entry is processed.  For adds, AVS requires the peer entry to
++            # be created first while for deletes it should happen last.
++            mac_addresses = sorted(mac_addresses, reverse=reverse)
+             for mac_address in mac_addresses:
+                 fdb_handler(interface_uuid, mac_address, agent_ip)
++
+             # Register the device IP address on the VXLAN so that it can be
+             # used for avoiding broadcast packets whenever possible.
+             for p in ports:
+@@ -472,7 +482,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 continue
+             self._process_fdb_for_network(network_id, fdb_entries,
+                                           self._fdb_delete_entry,
+-                                          self._fdb_ip_delete_entry)
++                                          self._fdb_ip_delete_entry,
++                                          reverse=True)
+ 
+     def _process_ip_change_for_network(self, network_id, ip_changes):
+         """
+-- 
+2.7.4
+

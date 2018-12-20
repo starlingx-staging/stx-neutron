@@ -1,0 +1,45 @@
+From 28579116b256d4983a892e91a1ac167783c4dd19 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 31 Oct 2017 12:49:19 -0500
+Subject: [PATCH 065/155] CGTS-8104: dvr: do not create agent gateway ports
+ unless dvr
+
+This update addresses an issue in the l3 dvr scheduler that causes floatingip
+agent gateway ports to be created in non-DVR scenarios when a VM is
+live-migrated from one node to another.  When the VM is migrated the
+dvr_handle_new_service_port method is invoked and it proceeds to create an
+agent gateway port for the agent at the destination node regardless if whether
+that VM instance is serviced by a DVR enabled router or not.
+
+If the router is DVR enabled then this is an optimization because the agent
+would have done it itself anyway.
+
+If the router is not DVR enabled then an unused port will have been created and
+since the router is not DVR enabled nothing will delete that port even if all
+router attachments to the external network are deleted.
+
+The fix is to only perform the action if the FIP associated to the VM port is
+being serviced by a DVR enabled router.
+
+Conflicts:
+	neutron/db/l3_dvr_db.py
+---
+ neutron/db/l3_dvr_db.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/neutron/db/l3_dvr_db.py b/neutron/db/l3_dvr_db.py
+index db1a990..60cf01e 100644
+--- a/neutron/db/l3_dvr_db.py
++++ b/neutron/db/l3_dvr_db.py
+@@ -840,6 +840,8 @@ class _DVRAgentInterfaceMixin(object):
+         if not fips:
+             return
+         fip = fips[0]
++        if not fip or not fip.get('router_id'):
++            return
+         network_id = fip.get('floating_network_id')
+         agent_gw_port = self.create_fip_agent_gw_port_if_not_exists(
+             context.elevated(), network_id, host)
+-- 
+2.7.4
+

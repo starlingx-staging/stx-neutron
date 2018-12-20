@@ -1,0 +1,113 @@
+From e660309aaa5d8c007476d7c79e815829e5b5a4e3 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Tue, 21 Nov 2017 10:25:53 -0500
+Subject: [PATCH 074/155] Use standard implementation of metadata through
+ haproxy in AVR.
+
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 39 ++++++++++++----------------------
+ 1 file changed, 13 insertions(+), 26 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index eab8433..56a5156 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -43,6 +43,7 @@ from neutron.agent.l3 import agent as l3_agent
+ from neutron.agent.linux import external_process
+ from neutron.agent.linux import interface
+ from neutron.agent.linux import ip_lib
++from neutron.agent.metadata import driver as metadata_driver
+ from neutron.agent import rpc
+ from neutron.agent.vswitch import api as vswitch_api
+ from neutron.agent.vswitch import constants as vswitch_constants
+@@ -52,6 +53,7 @@ from neutron.common import constants as n_const
+ from neutron.common import topics
+ from neutron.common import utils
+ from neutron.conf.agent import common as config
++from neutron.conf.agent.metadata import config as meta_conf
+ from neutron.extensions import wrs_binding
+ from neutron import manager
+ from neutron import service as neutron_service
+@@ -133,10 +135,6 @@ class AVRAgentManager(manager.Manager):
+                    help=_("Interval to periodically resync.")),
+         cfg.BoolOpt('enable_metadata_proxy', default=True,
+                     help=_("Allow running metadata proxy.")),
+-        cfg.StrOpt('metadata_proxy_socket',
+-                   default='$state_path/metadata_proxy',
+-                   help=_('Location of Metadata Proxy UNIX domain '
+-                          'socket')),
+         cfg.IntOpt('metadata_port',
+                    default=80,
+                    help=_("TCP Port used by Neutron metadata namespace "
+@@ -200,6 +198,9 @@ class AVRAgentManager(manager.Manager):
+             self.resync_task = loopingcall.FixedIntervalLoopingCall(
+                 self._sync_routers_task)
+             self.resync_task.start(interval=resync_interval)
++        self.process_monitor = external_process.ProcessMonitor(
++            config=self.conf,
++            resource_type='router')
+ 
+     def after_start(self):
+         eventlet.spawn_n(self._event_handler)
+@@ -1273,20 +1274,6 @@ class AVRAgentManager(manager.Manager):
+             msg = 'Failed trying to delete namespace: %s' % name
+             LOG.exception(msg)
+ 
+-    def _get_metadata_proxy_callback(self, router_id):
+-        cfg_file = '/etc/neutron/haproxy_router.cfg'
+-
+-        def callback(pid_file):
+-            proxy_cmd = ['haproxy',
+-                         '-D',
+-                         '-p',
+-                         '%s' % pid_file,
+-                         '-f',
+-                         '%s' % cfg_file]
+-            return proxy_cmd
+-
+-        return callback
+-
+     def _get_metadata_proxy_process_manager(self, router_id, ns_name,
+                                             addl_env=None):
+         return external_process.ProcessManager(
+@@ -1353,12 +1340,10 @@ class AVRAgentManager(manager.Manager):
+ 
+         self._create_namespace(ns_name)
+         self._create_metadata_port(router_id, ns_name)
+-        callback = self._get_metadata_proxy_callback(router_id)
+-        addl_env = {'HEADER_VALUE': router_id}
+-        pm = self._get_metadata_proxy_process_manager(router_id, ns_name,
+-                                                      addl_env)
+-        if not pm.active:
+-            pm.enable(callback)
++        metadata_driver.MetadataDriver.spawn_monitored_metadata_proxy(
++            self.process_monitor, ns_name,
++            self.conf.metadata_port,
++            self.conf, router_id=router_id)
+ 
+     def _destroy_metadata_proxy(self, router):
+         if not self.conf.enable_metadata_proxy:
+@@ -1367,9 +1352,10 @@ class AVRAgentManager(manager.Manager):
+         router_id = router.get('id')
+         ns_name = self._get_router_namespace(router_id)
+ 
++        metadata_driver.MetadataDriver.destroy_monitored_metadata_proxy(
++            self.process_monitor, router_id, self.conf, ns_name)
+         self._destroy_metadata_port(router_id, ns_name)
+-        pm = self._get_metadata_proxy_process_manager(router_id, ns_name)
+-        pm.disable()
++
+         if self.conf.router_delete_namespaces:
+             self._delete_namespace(ns_name)
+ 
+@@ -1426,6 +1412,7 @@ def _register_opts(conf):
+     config.register_agent_state_opts_helper(conf)
+     config.register_availability_zone_opts_helper(conf)
+     config.register_root_helper(conf)
++    meta_conf.register_meta_conf_opts(meta_conf.SHARED_OPTS, conf)
+     conf.register_opts(interface.OPTS)
+     conf.register_opts(external_process.OPTS)
+ 
+-- 
+2.7.4
+

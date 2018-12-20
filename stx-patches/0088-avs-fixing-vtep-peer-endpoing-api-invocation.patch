@@ -1,0 +1,26 @@
+From 7c68448d681e4ab1f857a724b63a65f7dc355366 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Sat, 7 Oct 2017 17:57:55 -0500
+Subject: [PATCH 088/155] avs: fixing vtep peer endpoing api invocation
+
+The wrong method name was used to managed IP endpoints.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 35d1599..2876fa9 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -417,7 +417,7 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+         if mac_address == FLOODING_ENTRY_MAC:
+             LOG.info("removing VTEP peer {} over {}".format(
+                 agent_ip, interface_uuid))
+-            self.vswitch_mgr.add_vtep_peer(interface_uuid, agent_ip)
++            self.vswitch_mgr.delete_vtep_peer(interface_uuid, agent_ip)
+         else:
+             LOG.info("removing VTEP endpoint for {} via {} over {}".
+                      format(mac_address, agent_ip, interface_uuid))
+-- 
+2.7.4
+

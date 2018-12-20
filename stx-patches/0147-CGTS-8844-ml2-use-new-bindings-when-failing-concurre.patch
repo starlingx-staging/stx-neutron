@@ -1,0 +1,54 @@
+From da31d0e38ce826aa2110d6c56b6babf3363da87c Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 14 Mar 2018 14:06:29 -0500
+Subject: [PATCH 147/155] CGTS-8844: ml2: use new bindings when failing
+ concurrent operation
+
+When 2 concurrent calls to _bind_port_if_needed happen only one of the two
+callers will succeed.  If the caller that succeeds did not specify that an RPC
+notification was allowed then no RPC notification will be sent to the agent.
+The other caller will fail to send the RPC notification because the resulting
+PortContext object will not having any binding_levels set.
+
+Since this failure results in a system state that requires manual intervention
+we are going to try and handle this by updating the PortContext with the
+binding levels from the current binding so that the caller will continue on and
+send an RPC notification.
+
+See bug report:
+   https://bugs.launchpad.net/neutron/+bug/1755810
+---
+ neutron/plugins/ml2/plugin.py | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index c8c1ec9..ed127be 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -730,6 +730,23 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+                 # Call the mechanism driver precommit methods, commit
+                 # the results, and call the postcommit methods.
+                 self.mechanism_manager.update_port_precommit(cur_context)
++            else:
++                # NOTE(alegacy): To avoid leaving ports stuck in a DOWN state
++                # we need to try and populate the PortContext with the
++                # current binding levels so that the caller can issue a
++                # proper RPC notification.  See the following bug report for
++                # more information:
++                #     https://bugs.launchpad.net/neutron/+bug/1755810
++                #
++                LOG.warning("concurrent port binding failure on {}".format(
++                    port_id))
++                levels = db.get_binding_levels(plugin_context, port_id,
++                                               cur_binding.host)
++                for level in levels:
++                    cur_context._push_binding_level(level)
++                cur_context._binding = driver_context.InstanceSnapshot(
++                    cur_binding)
++
+         if commit:
+             # Continue, using the port state as of the transaction that
+             # just finished, whether that transaction committed new
+-- 
+2.7.4
+

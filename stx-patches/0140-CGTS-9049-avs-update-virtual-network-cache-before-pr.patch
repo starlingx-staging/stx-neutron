@@ -1,0 +1,42 @@
+From e532d64a53f8adf7dd763560b95f04c005e1358c Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Fri, 23 Feb 2018 14:14:21 -0600
+Subject: [PATCH 140/155] CGTS-9049: avs: update virtual network cache before
+ processing
+
+The virtual network cache is only updated after the new networks are
+processed but unfortunately handling deferred ports needs the updated
+network view otherwise the ports just get readded to the deferred list.
+---
+ neutron/plugins/wrs/agent/avs/agent.py | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 325bb4c..2f52ac0 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -1250,9 +1250,9 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+                 data = {'port': port, 'details': details}
+                 self.deferred_ports[network_name][port_uuid] = data
+                 LOG.warning("Deferring setup of {} port {} "
+-                            "due to missing network {} ({})".format(
++                            "due to missing network {}".format(
+                                 device_owner, port_uuid,
+-                                network_name, network_uuid))
++                                network_name))
+                 return
+             network_uuid = instance['uuid']
+ 
+@@ -1980,8 +1980,8 @@ class VSwitchBaseNeutronAgent(vif_api.VifAgentListenerMixin,
+             # audit the virtual networks
+             previous = self.virtual_networks
+             current = self.vswitch_mgr.get_networks()
+-            self._process_virtual_networks(current, previous)
+             self.virtual_networks = current
++            self._process_virtual_networks(current, previous)
+         except Exception as e:
+             # Clear the device list and resync with the plugin
+             LOG.exception("Failed to process virtual "
+-- 
+2.7.4
+

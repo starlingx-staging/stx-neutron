@@ -1,0 +1,90 @@
+From 030dde6871169158e58f5ba191e25319a0d2cb10 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Thu, 31 Aug 2017 13:12:30 -0500
+Subject: [PATCH 084/155] avs: agent changes for avs arp responder
+
+Now that AVS layer3 entries include the device MAC address the agent
+needs to pass that info along via the API.
+---
+ neutron/agent/vswitch/manager.py       |  6 ++++--
+ neutron/plugins/wrs/agent/avs/agent.py | 25 +++++++++++++++----------
+ 2 files changed, 19 insertions(+), 12 deletions(-)
+
+diff --git a/neutron/agent/vswitch/manager.py b/neutron/agent/vswitch/manager.py
+index 4d6ec4c..15a41f7 100644
+--- a/neutron/agent/vswitch/manager.py
++++ b/neutron/agent/vswitch/manager.py
+@@ -1401,12 +1401,14 @@ class VSwitchManager(object):
+                    format(interface_uuid, e))
+             raise VSwitchManagerError(msg)
+ 
+-    def add_vtep_ip_endpoint(self, interface_uuid, ip_address, peer_address):
++    def add_vtep_ip_endpoint(self, interface_uuid, ip_address,
++                             mac_address, peer_address):
+         """
+         Adds a VTEP IP endpoint entry to direct traffic destined to a given
+         device IP address to a specific remote VTEP instance.
+         """
+-        endpoint = {'device-address': ip_address,
++        endpoint = {'mac-address': mac_address,
++                    'device-address': ip_address,
+                     'peer-address': peer_address}
+         try:
+             return self.api.add_vtep_ip_endpoint(interface_uuid, endpoint)
+diff --git a/neutron/plugins/wrs/agent/avs/agent.py b/neutron/plugins/wrs/agent/avs/agent.py
+index 6e5d26e..fe60996 100644
+--- a/neutron/plugins/wrs/agent/avs/agent.py
++++ b/neutron/plugins/wrs/agent/avs/agent.py
+@@ -382,15 +382,17 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             return agent_v4[0]
+         return None
+ 
+-    def _fdb_ip_add_entry(self, interface_uuid, ip_address, agent_ip):
+-        LOG.info("adding VTEP IP endpoint for {} via {} over {}".format(
+-            ip_address, agent_ip, interface_uuid))
++    def _fdb_ip_add_entry(self, interface_uuid, ip_address,
++                          mac_address, agent_ip):
++        LOG.info("adding VTEP IP endpoint for {}:{} via {} over {}".
++                 format(mac_address, ip_address, agent_ip, interface_uuid))
+         self.vswitch_mgr.add_vtep_ip_endpoint(
+-            interface_uuid, ip_address, agent_ip)
++            interface_uuid, ip_address, mac_address, agent_ip)
+ 
+-    def _fdb_ip_delete_entry(self, interface_uuid, ip_address, agent_ip):
+-        LOG.info("removing VTEP IP endpoint for {} via {} over {}".format(
+-            ip_address, agent_ip, interface_uuid))
++    def _fdb_ip_delete_entry(self, interface_uuid, ip_address,
++                             mac_address, agent_ip):
++        LOG.info("removing VTEP IP endpoint for {}:{} via {} over {}".
++                 format(mac_address, ip_address, agent_ip, interface_uuid))
+         self.vswitch_mgr.delete_vtep_ip_endpoint(
+             interface_uuid, ip_address)
+ 
+@@ -455,7 +457,8 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+             # used for avoiding broadcast packets whenever possible.
+             for p in ports:
+                 if p.mac_address != FLOODING_ENTRY_MAC:
+-                    ip_handler(interface_uuid, p.ip_address, agent_ip)
++                    ip_handler(interface_uuid, p.ip_address,
++                               p.mac_address, agent_ip)
+ 
+     def fdb_add(self, context, fdb_entries):
+         """
+@@ -507,10 +510,12 @@ class VSwitchRpcCallbacksMixin(VSwitchBaseRpcCallbacksMixin,
+                 continue
+             for port_info in changes.get('before', []):
+                 self._fdb_ip_delete_entry(
+-                    interface_uuid, port_info.ip_address, agent_ip)
++                    interface_uuid, port_info.ip_address,
++                    port_info.mac_address, agent_ip)
+             for port_info in changes.get('after', []):
+                 self._fdb_ip_add_entry(
+-                    interface_uuid, port_info.ip_address, agent_ip)
++                    interface_uuid, port_info.ip_address,
++                    port_info.mac_address, agent_ip)
+ 
+     def fdb_update(self, context, fdb_entries):
+         LOG.debug("fdb_update received {}".format(fdb_entries))
+-- 
+2.7.4
+

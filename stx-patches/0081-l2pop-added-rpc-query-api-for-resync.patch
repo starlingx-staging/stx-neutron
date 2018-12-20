@@ -1,0 +1,191 @@
+From 88b7bc759f952c38cd067b1cc2c441c96947998b Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 23 Aug 2017 11:47:55 -0500
+Subject: [PATCH 081/155] l2pop: added rpc query api for resync
+
+This commit extends the l2pop rpc handles to allow an agent to query the full
+FDB for a list of network_id values.  This is needed by the dynamic-routing
+agent to get a full FDB snapshot whenever it restarts.  This is not needed by
+normal layer2 agents because the l2pop mechanism driver is able to detect
+whenever the first port comes up on an agent and therefore knows when to send
+the full FDB.  Since the dynamic-routing agent has not ports bound to it the
+l2pop mechanism driver does not any trigger to send this information to it.
+---
+ neutron/plugins/ml2/drivers/l2pop/mech_driver.py   | 34 ++++++++++++++++++++--
+ neutron/plugins/ml2/drivers/l2pop/rpc.py           | 25 +++++++++++++++-
+ .../drivers/l2pop/rpc_manager/l2population_rpc.py  | 31 ++++++++++++++++++++
+ 3 files changed, 87 insertions(+), 3 deletions(-)
+
+diff --git a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+index 713e94f..cb51106 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
++++ b/neutron/plugins/ml2/drivers/l2pop/mech_driver.py
+@@ -26,8 +26,10 @@ from neutron._i18n import _
+ from neutron.conf.plugins.ml2.drivers import l2pop as config
+ from neutron.db import api as db_api
+ from neutron.db import l3_hamode_db
++from neutron.extensions import providernet as provider
+ from neutron.plugins.ml2.drivers.l2pop import db as l2pop_db
+ from neutron.plugins.ml2.drivers.l2pop import rpc as l2pop_rpc
++from neutron import service
+ 
+ LOG = logging.getLogger(__name__)
+ 
+@@ -39,11 +41,22 @@ class L2populationMechanismDriver(api.MechanismDriver):
+     def __init__(self):
+         super(L2populationMechanismDriver, self).__init__()
+         self.L2populationAgentNotify = l2pop_rpc.L2populationAgentNotifyAPI()
++        self.L2populationServer = None
+ 
+     def initialize(self):
+         LOG.debug("Experimental L2 population driver")
+         self.rpc_ctx = n_context.get_admin_context_without_session()
+ 
++    def get_workers(self):
++        # NOTE(alegacy): Run this RPC handler is a thread separate from the
++        # other server RPC handlers to make sure that any long queries do
++        # not slow down other RPC requests.
++        return [service.RpcWorker([self], worker_process_count=0)]
++
++    def start_rpc_listeners(self):
++        self.L2populationServer = l2pop_rpc.L2populationServerQueryAPI(self)
++        return self.L2populationServer.start()
++
+     def _get_port_fdb_entries(self, port):
+         # the port might be concurrently deleted
+         if not port or not port.get('fixed_ips'):
+@@ -234,7 +247,7 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         ports = agent_fdb_entries[network_id]['ports']
+         ports.update(self._get_tunnels(
+             fdb_network_ports + tunnel_network_ports,
+-            agent.host,
++            agent.host if agent else None,
+             physical_network=physical_network))
+         for agent_ip, fdbs in ports.items():
+             for binding, agent in fdb_network_ports:
+@@ -249,7 +262,7 @@ class L2populationMechanismDriver(api.MechanismDriver):
+                      physical_network=None):
+         agents = {}
+         for __, agent in tunnel_network_ports:
+-            if agent.host == exclude_host:
++            if exclude_host is not None and agent.host == exclude_host:
+                 continue
+ 
+             ip = l2pop_db.get_agent_ip(
+@@ -379,3 +392,20 @@ class L2populationMechanismDriver(api.MechanismDriver):
+         if physical_network:
+             template[network_id]['physical_network'] = physical_network
+         return template
++
++    def _get_fdb_entries(self, context, plugin, network_id, host):
++        network = plugin.get_network(context, network_id)
++        segment = {
++            'network_type': network[provider.NETWORK_TYPE],
++            'physical_network': network[provider.PHYSICAL_NETWORK],
++            'segmentation_id': network[provider.SEGMENTATION_ID]}
++        return self._create_agent_fdb(
++            context.session, host, segment, network_id)
++
++    def get_fdb_entries(self, context, network_ids, host=None):
++        fdb_entries = {}
++        plugin = directory.get_plugin()
++        for network_id in network_ids:
++            entries = self._get_fdb_entries(context, plugin, network_id, host)
++            fdb_entries.update(entries)
++        return fdb_entries
+diff --git a/neutron/plugins/ml2/drivers/l2pop/rpc.py b/neutron/plugins/ml2/drivers/l2pop/rpc.py
+index 9c00b47..89da6b9 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/rpc.py
++++ b/neutron/plugins/ml2/drivers/l2pop/rpc.py
+@@ -21,12 +21,13 @@ import oslo_messaging
+ from neutron.common import rpc as n_rpc
+ from neutron.common import topics
+ 
+-
+ LOG = logging.getLogger(__name__)
+ 
+ 
+ PortInfo = collections.namedtuple("PortInfo", "mac_address ip_address")
+ 
++L2POP_QUERY = "query"
++
+ 
+ class L2populationAgentNotifyAPI(object):
+ 
+@@ -85,3 +86,25 @@ class L2populationAgentNotifyAPI(object):
+             else:
+                 self._notification_fanout(context, 'update_fdb_entries',
+                                           fdb_entries)
++
++
++class L2populationServerQueryAPI(object):
++    """Server side of the L2POP RPC API.
++
++    API version history:
++        1.0 - Initial version.
++    """
++
++    def __init__(self, endpoint):
++        """
++        Create an RPC listener to handle RPC query requests coming from
++        agents.  These query RPCs exist for the purpose of the BGP DR agent
++        and are not intended for regular L2 agents.
++        """
++        self.l2pop_listener = n_rpc.create_connection()
++        topic = topics.get_topic_name(
++            topics.PLUGIN, topics.L2POPULATION, L2POP_QUERY)
++        self.l2pop_listener.create_consumer(topic, [endpoint], fanout=False)
++
++    def start(self):
++        return self.l2pop_listener.consume_in_threads()
+diff --git a/neutron/plugins/ml2/drivers/l2pop/rpc_manager/l2population_rpc.py b/neutron/plugins/ml2/drivers/l2pop/rpc_manager/l2population_rpc.py
+index bca71ef..ad223ae 100644
+--- a/neutron/plugins/ml2/drivers/l2pop/rpc_manager/l2population_rpc.py
++++ b/neutron/plugins/ml2/drivers/l2pop/rpc_manager/l2population_rpc.py
+@@ -19,12 +19,43 @@ import itertools
+ from neutron_lib import constants as n_const
+ from oslo_config import cfg
+ from oslo_log import helpers as log_helpers
++import oslo_messaging
+ import six
+ 
++from neutron.common import rpc as n_rpc
++from neutron.common import topics
+ from neutron.plugins.ml2.drivers.l2pop import rpc as l2pop_rpc
+ from neutron.plugins.ml2.drivers.openvswitch.agent import vlanmanager
+ 
+ 
++class L2populationRpcQueryMixin(object):
++    """Agent side of the L2-population RPC API.
++
++    API version history:
++        1.0 - Initial version.
++    """
++
++    def __init__(self, topic=topics.PLUGIN):
++        topic = topics.get_topic_name(
++            topic, topics.L2POPULATION, l2pop_rpc.L2POP_QUERY)
++        target = oslo_messaging.Target(topic=topic, version='1.0')
++        self.client = n_rpc.get_client(target)
++
++    def get_fdb_entries(self, context, network_ids, host=None):
++        """
++        Retrieves the FDB entries required to populate the FDB on a given
++        host.
++
++        If host is not supplied then the full set of FDB entries for the
++        network is returned.
++        """
++        cctxt = self.client.prepare()
++        results = cctxt.call(context, 'get_fdb_entries',
++                             network_ids=network_ids,
++                             host=host)
++        return L2populationRpcCallBackMixin._unmarshall_fdb_entries(results)
++
++
+ @six.add_metaclass(abc.ABCMeta)
+ class L2populationRpcCallBackMixin(object):
+     '''General mixin class of L2-population RPC call back.
+-- 
+2.7.4
+

@@ -1,0 +1,31 @@
+From 4e7b4013855b367a2baf2e585bb84dd9c724e9cb Mon Sep 17 00:00:00 2001
+From: Matt Peters <matt.peters@windriver.com>
+Date: Tue, 30 Jan 2018 14:43:08 -0500
+Subject: [PATCH 123/155] CGTS-8775: Old VM MAC remains in neutron router ARP
+ when stack is deleted and recreated
+
+The static ARP entries being added for the distributed router interface
+does not add the ARP entry if the neighbour entry already exists, however
+the same IP address may have been assigned to a different port and
+therefore needs to be updated to reflect the change in MAC address.
+---
+ neutron/plugins/wrs/agent/avr/agent.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/plugins/wrs/agent/avr/agent.py b/neutron/plugins/wrs/agent/avr/agent.py
+index 5feb81a..0efc762 100644
+--- a/neutron/plugins/wrs/agent/avr/agent.py
++++ b/neutron/plugins/wrs/agent/avr/agent.py
+@@ -597,7 +597,8 @@ class AVRAgentManager(manager.Manager):
+             for addr in port['fixed_ips'] or []:
+                 if addr['subnet_id'] != subnet_id:
+                     continue
+-                if addr['ip_address'] not in neighbours:
++                if (addr['ip_address'] not in neighbours or
++                        port['mac_address'] != neighbours[addr['ip_address']]):
+                     self.vswitch_mgr.add_neighbour(interface_uuid,
+                                                    addr['ip_address'],
+                                                    port['mac_address'])
+-- 
+2.7.4
+

@@ -1,0 +1,84 @@
+From 88dbf579dc17d3d7a1c64495780e28338d525d2e Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Thu, 3 Aug 2017 11:48:45 -0400
+Subject: [PATCH 051/155] US94388: Neutron changes to support alarming for BGP
+ peers down
+
+This commit introduces the API to allow the BGP dynamic-routing agent to
+raise alarms for connectivity failures to BGP peers.
+---
+ neutron/plugins/wrs/drivers/fm.py | 51 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+diff --git a/neutron/plugins/wrs/drivers/fm.py b/neutron/plugins/wrs/drivers/fm.py
+index d73f3be..35b3b93 100644
+--- a/neutron/plugins/wrs/drivers/fm.py
++++ b/neutron/plugins/wrs/drivers/fm.py
+@@ -99,6 +99,21 @@ class DefaultFmDriver(fm.FmDriver):
+                                     agent_id)
+ 
+     @staticmethod
++    def _get_bgp_peer_entity_type_id():
++        return "{}.{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                 fm_constants.FM_ENTITY_TYPE_AGENT,
++                                 fm_constants.FM_ENTITY_TYPE_BGP_PEER)
++
++    @staticmethod
++    def _get_bgp_peer_entity_instance_id(host_id, agent_id, bgp_peer_id):
++        return "{}={}.{}={}.{}={}".format(fm_constants.FM_ENTITY_TYPE_HOST,
++                                          host_id,
++                                          fm_constants.FM_ENTITY_TYPE_AGENT,
++                                          agent_id,
++                                          fm_constants.FM_ENTITY_TYPE_BGP_PEER,
++                                          bgp_peer_id)
++
++    @staticmethod
+     def _get_ml2_driver_entity_type_id():
+         return "{}.{}".format(fm_constants.FM_ENTITY_TYPE_HOST,
+                               fm_constants.FM_ENTITY_TYPE_ML2DRIVER)
+@@ -284,6 +299,42 @@ class DefaultFmDriver(fm.FmDriver):
+         self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_AGENT,
+                                 entity_instance_id)
+ 
++    def report_bgp_peer_down_fault(self, host_id, agent_id, bgp_peer_id):
++        """
++        Generate a fault management alarm condition for BGP peer down
++        """
++        entity_type_id = self._get_bgp_peer_entity_type_id()
++        entity_instance_id = self._get_bgp_peer_entity_instance_id(host_id,
++                                                                   agent_id,
++                                                                   bgp_peer_id)
++        reason_text = (_("Dynamic routing agent %(agent_id)s lost connectivity"
++                         " to peer %(bgp_peer_id)s.") %
++                       {"agent_id": agent_id, "bgp_peer_id": bgp_peer_id})
++
++        fault = fm_api.Fault(
++            alarm_id=fm_constants.FM_ALARM_ID_NETWORK_BGP_PEER,
++            alarm_state=fm_constants.FM_ALARM_STATE_SET,
++            entity_type_id=entity_type_id,
++            entity_instance_id=entity_instance_id,
++            severity=fm_constants.FM_ALARM_SEVERITY_MAJOR,
++            reason_text=reason_text,
++            alarm_type=fm_constants.FM_ALARM_TYPE_7,
++            probable_cause=fm_constants.ALARM_PROBABLE_CAUSE_55,
++            proposed_repair_action=(
++                _("If condition persists, fix connectivity to peer.")),
++            service_affecting=True)
++        self.fm_api.set_fault(fault)
++
++    def clear_bgp_peer_down_fault(self, host_id, agent_id, bgp_peer_id):
++        """
++        Clear a fault management alarm condition for BGP peer down
++        """
++        entity_instance_id = self._get_bgp_peer_entity_instance_id(host_id,
++                                                                   agent_id,
++                                                                   bgp_peer_id)
++        self.fm_api.clear_fault(fm_constants.FM_ALARM_ID_NETWORK_BGP_PEER,
++                                entity_instance_id)
++
+     def report_ml2_driver_fault(self, hostname, driver, reason):
+         """
+         Generate a fault management alarm condition for ML2 driver
+-- 
+2.7.4
+

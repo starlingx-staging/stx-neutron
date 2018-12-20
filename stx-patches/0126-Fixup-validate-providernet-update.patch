@@ -1,0 +1,49 @@
+From aec589f58186ec2051c7d26f80b1fd650e092521 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Tue, 30 Jan 2018 15:30:33 -0500
+Subject: [PATCH 126/155] Fixup validate providernet update
+
+---
+ neutron/db/providernet_db.py | 26 ++++++++++++++------------
+ 1 file changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/neutron/db/providernet_db.py b/neutron/db/providernet_db.py
+index 427c265..6990b55 100644
+--- a/neutron/db/providernet_db.py
++++ b/neutron/db/providernet_db.py
+@@ -461,18 +461,20 @@ class ProviderNetDbMixin(ext_providernet.ProviderNetPluginBase):
+ 
+     def _validate_providernet_update(self, context, providernet_id,
+                                      providernet_data):
+-        providernet = self._get_providernet_by_id(context, providernet_id)
+-        pnet_mtu = providernet_data['mtu']
+-        pnet_name = providernet['name']
+-        filters = {
+-            provider.PHYSICAL_NETWORK: pnet_name,
+-        }
+-        fields = ['mtu']
+-        networks = self.get_networks(context, filters=filters, fields=fields)
+-        for network in networks:
+-            if providernet_data['mtu'] < network['mtu']:
+-                msg = _("Requested MTU %s is too small") % pnet_mtu
+-                raise n_exc.InvalidInput(error_message=msg)
++        if 'mtu' in providernet_data:
++            providernet = self._get_providernet_by_id(context, providernet_id)
++            pnet_mtu = providernet_data['mtu']
++            pnet_name = providernet['name']
++            filters = {
++                provider.PHYSICAL_NETWORK: pnet_name,
++            }
++            fields = ['mtu']
++            networks = self.get_networks(context, filters=filters,
++                                         fields=fields)
++            for network in networks:
++                if pnet_mtu < network['mtu']:
++                    msg = _("Requested MTU %s is too small") % pnet_mtu
++                    raise n_exc.InvalidInput(error_message=msg)
+ 
+     @db_api.retry_if_session_inactive()
+     def create_providernet(self, context, providernet):
+-- 
+2.7.4
+

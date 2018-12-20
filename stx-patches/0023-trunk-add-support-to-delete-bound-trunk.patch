@@ -1,0 +1,43 @@
+From 6955351c5eca6e37061fb0140d11ea53693fe0e1 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Sun, 5 Mar 2017 16:00:09 -0500
+Subject: [PATCH 023/155] trunk: add support to delete bound trunk
+
+If it is possible to trunk a bound port then it is reasonable to assume
+that doing the opposite is also possible.
+---
+ neutron/services/trunk/plugin.py                 | 2 +-
+ neutron/tests/unit/services/trunk/test_plugin.py | 4 +++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/neutron/services/trunk/plugin.py b/neutron/services/trunk/plugin.py
+index f5043de..10959e8 100644
+--- a/neutron/services/trunk/plugin.py
++++ b/neutron/services/trunk/plugin.py
+@@ -260,7 +260,7 @@ class TrunkPlugin(service_base.ServicePluginBase,
+             trunk = self._get_trunk(context, trunk_id)
+             rules.trunk_can_be_managed(context, trunk)
+             trunk_port_validator = rules.TrunkPortValidator(trunk.port_id)
+-            if not trunk_port_validator.is_bound(context):
++            if trunk_port_validator.can_be_trunked(context):
+                 # NOTE(status_police): when a trunk is deleted, the logical
+                 # object disappears from the datastore, therefore there is no
+                 # status transition involved. If PRECOMMIT failures occur,
+diff --git a/neutron/tests/unit/services/trunk/test_plugin.py b/neutron/tests/unit/services/trunk/test_plugin.py
+index f24d942..6ff5ca9 100644
+--- a/neutron/tests/unit/services/trunk/test_plugin.py
++++ b/neutron/tests/unit/services/trunk/test_plugin.py
+@@ -91,7 +91,9 @@ class TrunkPluginTestCase(test_plugin.Ml2PluginV2TestCase):
+                 parent_port, child_port, child_port['port']['id'],
+                 trunk_exc.PortInUseAsSubPort)
+ 
+-    def test_delete_trunk_raise_in_use(self):
++    # NOTE(alegacy): we have changed this behaviour to allow deleting a trunk
++    # that is bound as long as the driver says that it can handle bound ports.
++    def notest_delete_trunk_raise_in_use(self):
+         with self.port() as port:
+             trunk = self._create_test_trunk(port)
+             core_plugin = directory.get_plugin()
+-- 
+2.7.4
+

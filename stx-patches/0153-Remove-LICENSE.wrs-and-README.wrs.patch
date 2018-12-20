@@ -1,0 +1,42 @@
+From da96b37a58ea3a7797ad20957d02df28695ec213 Mon Sep 17 00:00:00 2001
+From: Jesus Ornelas Aguayo <jesus.ornelas.aguayo@intel.com>
+Date: Sat, 12 May 2018 18:54:51 -0400
+Subject: [PATCH 153/155] Remove LICENSE.wrs and README.wrs
+
+LICENSE with apache2.0 license and README are availables in
+this repository, deleting LICENSE.wrs and README.wrs
+
+Signed-off-by: Jesus Ornelas Aguayo <jesus.ornelas.aguayo@intel.com>
+---
+ LICENSE.wrs | 5 -----
+ README.wrs  | 6 ------
+ 2 files changed, 11 deletions(-)
+ delete mode 100644 LICENSE.wrs
+ delete mode 100644 README.wrs
+
+diff --git a/LICENSE.wrs b/LICENSE.wrs
+deleted file mode 100644
+index 1c7414c..0000000
+--- a/LICENSE.wrs
++++ /dev/null
+@@ -1,5 +0,0 @@
+-#
+-#  Copyright (c) 2013-2014 Wind River Systems, Inc.
+-#
+-# SPDX-License-Identifier: Apache-2.0
+-#
+diff --git a/README.wrs b/README.wrs
+deleted file mode 100644
+index 4b00b84..0000000
+--- a/README.wrs
++++ /dev/null
+@@ -1,6 +0,0 @@
+-Wind River Titanium Cloud Extensions
+-
+-This package contains Wind River Titanium Cloud extensions
+-that are distributed as source.  The changes are subject
+-to the license agreements of Wind River. Refer to LICENSE.wrs
+-for further details.
+-- 
+2.7.4
+

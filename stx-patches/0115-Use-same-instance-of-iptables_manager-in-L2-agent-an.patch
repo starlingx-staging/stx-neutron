@@ -1,0 +1,506 @@
+From d8d2a6e34fd7cd2a695db2347cd8f95daf9ce8f7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?S=C5=82awek=20Kap=C5=82o=C5=84ski?= <slawek@kaplonski.pl>
+Date: Thu, 14 Dec 2017 14:51:01 +0100
+Subject: [PATCH 115/155] Use same instance of iptables_manager in L2 agent and
+ extensions
+
+This commit adds common_agent_extension class which is agent API
+for L2 extension drivers used e.g. by Linuxbridge agent.
+This is necessary to be able to use instance of iptables_manager
+used in firewall driver also in L2 extension drivers (like qos).
+
+This patch refactors little bit iptables_manager code to make possible
+to initialize e.g. mangle or nat table on demand, even if iptables
+is created as "state_less"
+
+Change-Id: I3b66e49b7f176124e8aea3eb96d0d465f1ab1ea0
+Closes-Bug: #1736674
+(cherry picked from commit cbee0f9f88ff34f70ff19590471b5405e06ff2a9)
+---
+ .../contributor/internals/l2_agent_extensions.rst  |  11 +++
+ .../contributor/internals/quality_of_service.rst   |   4 +
+ neutron/agent/linux/iptables_manager.py            | 100 +++++++++++----------
+ .../ml2/drivers/agent/_agent_manager_base.py       |   7 ++
+ neutron/plugins/ml2/drivers/agent/_common_agent.py |   3 +-
+ .../agent/extension_drivers/qos_driver.py          |  21 ++++-
+ .../agent/linuxbridge_agent_extension_api.py       |  32 +++++++
+ .../linuxbridge/agent/linuxbridge_neutron_agent.py |  25 ++++++
+ .../drivers/macvtap/agent/macvtap_neutron_agent.py |   3 +
+ .../unit/agent/linux/test_iptables_manager.py      |  12 +++
+ .../agent/extension_drivers/test_qos_driver.py     |  37 ++++++++
+ .../agent/test_linuxbridge_agent_extension_api.py  |  33 +++++++
+ ...ommon-agent-extension-api-3fd06ff67329200a.yaml |  12 +++
+ 13 files changed, 251 insertions(+), 49 deletions(-)
+ create mode 100644 neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_agent_extension_api.py
+ create mode 100644 neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/test_linuxbridge_agent_extension_api.py
+ create mode 100644 releasenotes/notes/common-agent-extension-api-3fd06ff67329200a.yaml
+
+diff --git a/doc/source/contributor/internals/l2_agent_extensions.rst b/doc/source/contributor/internals/l2_agent_extensions.rst
+index 3484ddf..0a4e778 100644
+--- a/doc/source/contributor/internals/l2_agent_extensions.rst
++++ b/doc/source/contributor/internals/l2_agent_extensions.rst
+@@ -41,3 +41,14 @@ hardened bridge objects with cookie values allocated for calling extensions::
+ Bridge objects returned by those methods already have new default cookie values
+ allocated for extension flows. All flow management methods (add_flow, mod_flow,
+ ...) enforce those allocated cookies.
++
++Linuxbridge agent API
++~~~~~~~~~~~~~~~~~~~~~~
++
++* neutron.plugins.ml2.drivers.linuxbridge.agent.linuxbridge_agent_extension_api
++
++The Linux bridge agent extension API object includes a method that returns an
++instance of the IptablesManager class, which is used by the L2 agent to manage
++security group rules::
++
++#. get_iptables_manager
+diff --git a/doc/source/contributor/internals/quality_of_service.rst b/doc/source/contributor/internals/quality_of_service.rst
+index 8fee36f..c139b14 100644
+--- a/doc/source/contributor/internals/quality_of_service.rst
++++ b/doc/source/contributor/internals/quality_of_service.rst
+@@ -380,6 +380,10 @@ tc. Details about how it is calculated can be found in
+ `here <http://unix.stackexchange.com/a/100797>`_. This solution is similar to Open
+ vSwitch implementation.
+ 
++The Linux bridge DSCP marking implementation relies on the
++linuxbridge_extension_api to request access to the IptablesManager class
++and to manage chains in the ``mangle`` table in iptables.
++
+ QoS driver design
+ -----------------
+ 
+diff --git a/neutron/agent/linux/iptables_manager.py b/neutron/agent/linux/iptables_manager.py
+index 4dcb8e7..98fde3f 100644
+--- a/neutron/agent/linux/iptables_manager.py
++++ b/neutron/agent/linux/iptables_manager.py
+@@ -330,31 +330,66 @@ class IptablesManager(object):
+             tables['filter'].add_rule('neutron-filter-top', '-j $local',
+                                       wrap=False)
+ 
++        self.ipv4.update({'raw': IptablesTable(binary_name=self.wrap_name)})
++        self.ipv6.update({'raw': IptablesTable(binary_name=self.wrap_name)})
++
+         # Wrap the built-in chains
+         builtin_chains = {4: {'filter': ['INPUT', 'OUTPUT', 'FORWARD']},
+                           6: {'filter': ['INPUT', 'OUTPUT', 'FORWARD']}}
+-
+-        if not state_less:
+-            self.ipv4.update(
+-                {'mangle': IptablesTable(binary_name=self.wrap_name)})
+-            builtin_chains[4].update(
+-                {'mangle': ['PREROUTING', 'INPUT', 'FORWARD', 'OUTPUT',
+-                            'POSTROUTING']})
+-            self.ipv6.update(
+-                {'mangle': IptablesTable(binary_name=self.wrap_name)})
+-            builtin_chains[6].update(
+-                {'mangle': ['PREROUTING', 'INPUT', 'FORWARD', 'OUTPUT',
+-                            'POSTROUTING']})
+-            self.ipv4.update(
+-                {'nat': IptablesTable(binary_name=self.wrap_name)})
+-            builtin_chains[4].update({'nat': ['PREROUTING',
+-                                      'OUTPUT', 'POSTROUTING']})
+-
+-        self.ipv4.update({'raw': IptablesTable(binary_name=self.wrap_name)})
+         builtin_chains[4].update({'raw': ['PREROUTING', 'OUTPUT']})
+-        self.ipv6.update({'raw': IptablesTable(binary_name=self.wrap_name)})
+         builtin_chains[6].update({'raw': ['PREROUTING', 'OUTPUT']})
++        self._configure_builtin_chains(builtin_chains)
+ 
++        if not state_less:
++            self.initialize_mangle_table()
++            self.initialize_nat_table()
++
++    def initialize_mangle_table(self):
++        self.ipv4.update(
++            {'mangle': IptablesTable(binary_name=self.wrap_name)})
++        self.ipv6.update(
++            {'mangle': IptablesTable(binary_name=self.wrap_name)})
++
++        builtin_chains = {
++            4: {'mangle': ['PREROUTING', 'INPUT', 'FORWARD', 'OUTPUT',
++                           'POSTROUTING']},
++            6: {'mangle': ['PREROUTING', 'INPUT', 'FORWARD', 'OUTPUT',
++                           'POSTROUTING']}}
++        self._configure_builtin_chains(builtin_chains)
++
++        # Add a mark chain to mangle PREROUTING chain. It is used to
++        # identify ingress packets from a certain interface.
++        self.ipv4['mangle'].add_chain('mark')
++        self.ipv4['mangle'].add_rule('PREROUTING', '-j $mark')
++
++    def initialize_nat_table(self):
++        self.ipv4.update(
++            {'nat': IptablesTable(binary_name=self.wrap_name)})
++
++        builtin_chains = {
++            4: {'nat': ['PREROUTING', 'OUTPUT', 'POSTROUTING']}}
++        self._configure_builtin_chains(builtin_chains)
++
++        # Add a neutron-postrouting-bottom chain. It's intended to be
++        # shared among the various neutron components. We set it as the
++        # last chain of POSTROUTING chain.
++        self.ipv4['nat'].add_chain('neutron-postrouting-bottom', wrap=False)
++        self.ipv4['nat'].add_rule(
++            'POSTROUTING', '-j neutron-postrouting-bottom', wrap=False)
++
++        # We add a snat chain to the shared neutron-postrouting-bottom
++        # chain so that it's applied last.
++        self.ipv4['nat'].add_chain('snat')
++        self.ipv4['nat'].add_rule('neutron-postrouting-bottom',
++                                  '-j $snat', wrap=False,
++                                  comment=ic.SNAT_OUT)
++
++        # And then we add a float-snat chain and jump to first thing in
++        # the snat chain.
++        self.ipv4['nat'].add_chain('float-snat')
++        self.ipv4['nat'].add_rule('snat', '-j $float-snat')
++
++    def _configure_builtin_chains(self, builtin_chains):
+         for ip_version in builtin_chains:
+             if ip_version == 4:
+                 tables = self.ipv4
+@@ -367,33 +402,6 @@ class IptablesManager(object):
+                     tables[table].add_rule(chain, '-j $%s' %
+                                            (chain), wrap=False)
+ 
+-        if not state_less:
+-            # Add a neutron-postrouting-bottom chain. It's intended to be
+-            # shared among the various neutron components. We set it as the
+-            # last chain of POSTROUTING chain.
+-            self.ipv4['nat'].add_chain('neutron-postrouting-bottom',
+-                                       wrap=False)
+-            self.ipv4['nat'].add_rule('POSTROUTING',
+-                                      '-j neutron-postrouting-bottom',
+-                                      wrap=False)
+-
+-            # We add a snat chain to the shared neutron-postrouting-bottom
+-            # chain so that it's applied last.
+-            self.ipv4['nat'].add_chain('snat')
+-            self.ipv4['nat'].add_rule('neutron-postrouting-bottom',
+-                                      '-j $snat', wrap=False,
+-                                      comment=ic.SNAT_OUT)
+-
+-            # And then we add a float-snat chain and jump to first thing in
+-            # the snat chain.
+-            self.ipv4['nat'].add_chain('float-snat')
+-            self.ipv4['nat'].add_rule('snat', '-j $float-snat')
+-
+-            # Add a mark chain to mangle PREROUTING chain. It is used to
+-            # identify ingress packets from a certain interface.
+-            self.ipv4['mangle'].add_chain('mark')
+-            self.ipv4['mangle'].add_rule('PREROUTING', '-j $mark')
+-
+     def get_tables(self, ip_version):
+         return {4: self.ipv4, 6: self.ipv6}[ip_version]
+ 
+diff --git a/neutron/plugins/ml2/drivers/agent/_agent_manager_base.py b/neutron/plugins/ml2/drivers/agent/_agent_manager_base.py
+index 7f8727e..94b3045 100644
+--- a/neutron/plugins/ml2/drivers/agent/_agent_manager_base.py
++++ b/neutron/plugins/ml2/drivers/agent/_agent_manager_base.py
+@@ -162,6 +162,13 @@ class CommonAgentManagerBase(object):
+         """
+ 
+     @abc.abstractmethod
++    def get_agent_api(self, **kwargs):
++        """Get L2 extensions drivers API interface class.
++
++        :return: instance of the class containing Agent Extension API
++        """
++
++    @abc.abstractmethod
+     def get_rpc_consumers(self):
+         """Get a list of topics for which an RPC consumer should be created
+ 
+diff --git a/neutron/plugins/ml2/drivers/agent/_common_agent.py b/neutron/plugins/ml2/drivers/agent/_common_agent.py
+index dade685..98598ee 100644
+--- a/neutron/plugins/ml2/drivers/agent/_common_agent.py
++++ b/neutron/plugins/ml2/drivers/agent/_common_agent.py
+@@ -173,8 +173,9 @@ class CommonAgentLoop(service.Service):
+         ext_manager.register_opts(cfg.CONF)
+         self.ext_manager = (
+             ext_manager.L2AgentExtensionsManager(cfg.CONF))
++        agent_api = self.mgr.get_agent_api(sg_agent=self.sg_agent)
+         self.ext_manager.initialize(
+-            connection, self.mgr.get_extension_driver_type())
++            connection, self.mgr.get_extension_driver_type(), agent_api)
+ 
+     def _clean_network_ports(self, device):
+         for netid, ports_list in self.network_ports.items():
+diff --git a/neutron/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/qos_driver.py b/neutron/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/qos_driver.py
+index b038fbe..0773521 100644
+--- a/neutron/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/qos_driver.py
++++ b/neutron/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/qos_driver.py
+@@ -20,6 +20,7 @@ from neutron.agent.l2.extensions import qos_linux as qos
+ from neutron.agent.linux import iptables_manager
+ from neutron.agent.linux import tc_lib
+ import neutron.common.constants as const
++from neutron.common import ipv6_utils
+ from neutron.services.qos.drivers.linuxbridge import driver
+ 
+ LOG = log.getLogger(__name__)
+@@ -39,10 +40,26 @@ class QosLinuxbridgeAgentDriver(qos.QosLinuxAgentDriver):
+     IPTABLES_DIRECTION_PREFIX = {const.INGRESS_DIRECTION: "i",
+                                  const.EGRESS_DIRECTION: "o"}
+ 
++    def __init__(self):
++        super(QosLinuxbridgeAgentDriver, self).__init__()
++        self.iptables_manager = None
++        self.agent_api = None
++        self.tbf_latency = cfg.CONF.QOS.tbf_latency
++
++    def consume_api(self, agent_api):
++        self.agent_api = agent_api
++
+     def initialize(self):
+         LOG.info("Initializing Linux bridge QoS extension")
+-        self.iptables_manager = iptables_manager.IptablesManager(use_ipv6=True)
+-        self.tbf_latency = cfg.CONF.QOS.tbf_latency
++        if self.agent_api:
++            self.iptables_manager = self.agent_api.get_iptables_manager()
++        if not self.iptables_manager:
++            # If agent_api can't provide iptables_manager, it can be
++            # created here for extension needs
++            self.iptables_manager = iptables_manager.IptablesManager(
++                state_less=True,
++                use_ipv6=ipv6_utils.is_enabled_and_bind_by_default())
++        self.iptables_manager.initialize_mangle_table()
+ 
+     def _dscp_chain_name(self, direction, device):
+         return iptables_manager.get_chain_name(
+diff --git a/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_agent_extension_api.py b/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_agent_extension_api.py
+new file mode 100644
+index 0000000..720552d
+--- /dev/null
++++ b/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_agent_extension_api.py
+@@ -0,0 +1,32 @@
++# Copyright 2017 OVH SAS
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++
++class LinuxbridgeAgentExtensionAPI(object):
++    '''Implements the Agent API for L2 agent.
++
++    Extensions can gain access to this API by overriding the consume_api
++    method which has been added to the AgentExtension class.
++    '''
++
++    def __init__(self, iptables_manager):
++        super(LinuxbridgeAgentExtensionAPI, self).__init__()
++        self.iptables_manager = iptables_manager
++
++    def get_iptables_manager(self):
++        """Allows extensions to get an iptables manager, used by agent,
++        to use for managing extension specific iptables rules
++        """
++        return self.iptables_manager
+diff --git a/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_neutron_agent.py b/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_neutron_agent.py
+index 3c7c121..e3299ad 100644
+--- a/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_neutron_agent.py
++++ b/neutron/plugins/ml2/drivers/linuxbridge/agent/linuxbridge_neutron_agent.py
+@@ -52,6 +52,8 @@ from neutron.plugins.ml2.drivers.linuxbridge.agent.common \
+     import constants as lconst
+ from neutron.plugins.ml2.drivers.linuxbridge.agent.common \
+     import utils as lb_utils
++from neutron.plugins.ml2.drivers.linuxbridge.agent import \
++    linuxbridge_agent_extension_api as agent_extension_api
+ from neutron.plugins.ml2.drivers.linuxbridge.agent \
+     import linuxbridge_capabilities
+ 
+@@ -63,6 +65,13 @@ BRIDGE_NAME_PREFIX = "brq"
+ MAX_VLAN_POSTFIX_LEN = 5
+ VXLAN_INTERFACE_PREFIX = "vxlan-"
+ 
++IPTABLES_DRIVERS = [
++    'iptables',
++    'iptables_hybrid',
++    'neutron.agent.linux.iptables_firewall.IptablesFirewallDriver',
++    'neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver'
++]
++
+ 
+ class LinuxBridgeManager(amb.CommonAgentManagerBase):
+     def __init__(self, bridge_mappings, interface_mappings):
+@@ -72,6 +81,7 @@ class LinuxBridgeManager(amb.CommonAgentManagerBase):
+         self.validate_interface_mappings()
+         self.validate_bridge_mappings()
+         self.ip = ip_lib.IPWrapper()
++        self.agent_api = None
+         # VXLAN related parameters:
+         self.local_ip = cfg.CONF.VXLAN.local_ip
+         self.vxlan_mode = lconst.VXLAN_NONE
+@@ -794,6 +804,21 @@ class LinuxBridgeManager(amb.CommonAgentManagerBase):
+     def get_rpc_callbacks(self, context, agent, sg_agent):
+         return LinuxBridgeRpcCallbacks(context, agent, sg_agent)
+ 
++    def get_agent_api(self, **kwargs):
++        if self.agent_api:
++            return self.agent_api
++        sg_agent = kwargs.get("sg_agent")
++        iptables_manager = self._get_iptables_manager(sg_agent)
++        self.agent_api = agent_extension_api.LinuxbridgeAgentExtensionAPI(
++            iptables_manager)
++        return self.agent_api
++
++    def _get_iptables_manager(self, sg_agent):
++        if not sg_agent:
++            return None
++        if cfg.CONF.SECURITYGROUP.firewall_driver in IPTABLES_DRIVERS:
++            return sg_agent.firewall.iptables
++
+     def get_rpc_consumers(self):
+         consumers = [[topics.PORT, topics.UPDATE],
+                      [topics.NETWORK, topics.DELETE],
+diff --git a/neutron/plugins/ml2/drivers/macvtap/agent/macvtap_neutron_agent.py b/neutron/plugins/ml2/drivers/macvtap/agent/macvtap_neutron_agent.py
+index 2acd4b8..33cad62 100644
+--- a/neutron/plugins/ml2/drivers/macvtap/agent/macvtap_neutron_agent.py
++++ b/neutron/plugins/ml2/drivers/macvtap/agent/macvtap_neutron_agent.py
+@@ -144,6 +144,9 @@ class MacvtapManager(amb.CommonAgentManagerBase):
+     def get_rpc_callbacks(self, context, agent, sg_agent):
+         return MacvtapRPCCallBack(context, agent, sg_agent)
+ 
++    def get_agent_api(self, **kwargs):
++        pass
++
+     def get_rpc_consumers(self):
+         consumers = [[topics.PORT, topics.UPDATE],
+                      [topics.NETWORK, topics.DELETE],
+diff --git a/neutron/tests/unit/agent/linux/test_iptables_manager.py b/neutron/tests/unit/agent/linux/test_iptables_manager.py
+index 754b583..6456d5a 100644
+--- a/neutron/tests/unit/agent/linux/test_iptables_manager.py
++++ b/neutron/tests/unit/agent/linux/test_iptables_manager.py
+@@ -1330,3 +1330,15 @@ class IptablesManagerStateLessTestCase(base.BaseTestCase):
+ 
+     def test_mangle_not_found(self):
+         self.assertNotIn('mangle', self.iptables.ipv4)
++
++    def test_initialize_mangle_table(self):
++        iptables = iptables_manager.IptablesManager(state_less=True)
++        iptables.initialize_mangle_table()
++        self.assertIn('mangle', iptables.ipv4)
++        self.assertNotIn('nat', iptables.ipv4)
++
++    def test_initialize_nat_table(self):
++        iptables = iptables_manager.IptablesManager(state_less=True)
++        iptables.initialize_nat_table()
++        self.assertIn('nat', iptables.ipv4)
++        self.assertNotIn('mangle', iptables.ipv4)
+diff --git a/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/test_qos_driver.py b/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/test_qos_driver.py
+index 52f9d9d..a13a2a6 100644
+--- a/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/test_qos_driver.py
++++ b/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/extension_drivers/test_qos_driver.py
+@@ -78,6 +78,43 @@ class QosLinuxbridgeAgentDriverTestCase(base.BaseTestCase):
+     def _dscp_rule_tag(self, device):
+         return "dscp-%s" % device
+ 
++    def test_initialize_iptables_manager_passed_through_api(self):
++        iptables_manager = mock.Mock()
++        qos_drv = qos_driver.QosLinuxbridgeAgentDriver()
++        with mock.patch.object(
++            qos_drv, "agent_api"
++        ) as agent_api, mock.patch(
++            "neutron.agent.linux.iptables_manager.IptablesManager"
++        ) as IptablesManager:
++            agent_api.get_iptables_manager.return_value = (
++                iptables_manager)
++            qos_drv.initialize()
++            self.assertEqual(iptables_manager, qos_drv.iptables_manager)
++            self.assertNotEqual(IptablesManager(), qos_drv.iptables_manager)
++            iptables_manager.initialize_mangle_table.assert_called_once_with()
++
++    def test_initialize_iptables_manager_not_passed_through_api(self):
++        qos_drv = qos_driver.QosLinuxbridgeAgentDriver()
++        with mock.patch.object(
++            qos_drv, "agent_api"
++        ) as agent_api, mock.patch(
++            "neutron.agent.linux.iptables_manager.IptablesManager"
++        ) as IptablesManager:
++            agent_api.get_iptables_manager.return_value = None
++            qos_drv.initialize()
++            self.assertEqual(IptablesManager(), qos_drv.iptables_manager)
++            IptablesManager().initialize_mangle_table.assert_called_once_with()
++
++    def test_initialize_iptables_manager_no_agent_api(self):
++        qos_drv = qos_driver.QosLinuxbridgeAgentDriver()
++        with mock.patch(
++            "neutron.agent.linux.iptables_manager.IptablesManager"
++        ) as IptablesManager:
++            qos_driver.agent_api = None
++            qos_drv.initialize()
++            self.assertEqual(IptablesManager(), qos_drv.iptables_manager)
++            IptablesManager().initialize_mangle_table.assert_called_once_with()
++
+     def test_create_egress_bandwidth_limit(self):
+         with mock.patch.object(
+             tc_lib.TcCommand, "set_filters_bw_limit"
+diff --git a/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/test_linuxbridge_agent_extension_api.py b/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/test_linuxbridge_agent_extension_api.py
+new file mode 100644
+index 0000000..8963193
+--- /dev/null
++++ b/neutron/tests/unit/plugins/ml2/drivers/linuxbridge/agent/test_linuxbridge_agent_extension_api.py
+@@ -0,0 +1,33 @@
++# Copyright 2017 OVH SAS
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++import mock
++
++from neutron.plugins.ml2.drivers.linuxbridge.agent import \
++    linuxbridge_agent_extension_api as ext_api
++from neutron.tests import base
++
++
++class TestLinuxbridgeAgentExtensionAPI(base.BaseTestCase):
++
++    def setUp(self):
++        super(TestLinuxbridgeAgentExtensionAPI, self).setUp()
++        self.iptables_manager = mock.Mock()
++        self.extension_api = ext_api.LinuxbridgeAgentExtensionAPI(
++            self.iptables_manager)
++
++    def test_get_iptables_manager(self):
++        self.assertEqual(self.iptables_manager,
++                         self.extension_api.get_iptables_manager())
+diff --git a/releasenotes/notes/common-agent-extension-api-3fd06ff67329200a.yaml b/releasenotes/notes/common-agent-extension-api-3fd06ff67329200a.yaml
+new file mode 100644
+index 0000000..bb878e9
+--- /dev/null
++++ b/releasenotes/notes/common-agent-extension-api-3fd06ff67329200a.yaml
+@@ -0,0 +1,12 @@
++---
++features:
++  - |
++    L2 agents based on ``ML2`` ``_common_agent`` have now the L2 extension API
++    available. This API can be used by L2 extension drivers to request
++    resources from the L2 agent.
++    It is used, for example, to pass an instance of the ``IptablesManager``
++    to the ``Linuxbridge`` L2 agent ``QoS extension driver``.
++fixes:
++  - |
++    Fixes bug 1736674, security group rules are now properly applied
++    by ``Linuxbridge L2 agent`` with ``QoS extension driver`` enabled.
+-- 
+2.7.4
+

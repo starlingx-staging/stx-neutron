@@ -1,0 +1,58 @@
+From ba9d9f60a7a2665194cacb92a05e0acd2dc3de41 Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Sun, 5 Mar 2017 15:58:55 -0500
+Subject: [PATCH 022/155] trunk: add rpc notifications for trunk updates
+
+There are no notifications sent to the agent when a trunk is disabled or
+enabled.  This commit adds the appropriate local registrations and RPC
+notifications to the backend.
+
+Conflicts:
+	neutron/services/trunk/rpc/backend.py
+	neutron/services/trunk/rpc/server.py
+---
+ neutron/services/trunk/rpc/backend.py | 4 +++-
+ neutron/services/trunk/rpc/server.py  | 5 +++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/neutron/services/trunk/rpc/backend.py b/neutron/services/trunk/rpc/backend.py
+index 98eb39e..38f822a 100644
+--- a/neutron/services/trunk/rpc/backend.py
++++ b/neutron/services/trunk/rpc/backend.py
+@@ -38,7 +38,8 @@ class ServerSideRpcBackend(object):
+     # agent-based driver that may integrate with the trunk service
+     # plugin, e.g. linux bridge or ovs.
+     @registry.receives(trunk_consts.TRUNK,
+-                       [events.AFTER_CREATE, events.AFTER_DELETE])
++                       [events.AFTER_CREATE, events.AFTER_DELETE,
++                        events.AFTER_UPDATE])
+     @registry.receives(trunk_consts.SUBPORTS,
+                        [events.AFTER_CREATE, events.AFTER_DELETE])
+     def process_event(self, resource, event, trunk_plugin, payload):
+@@ -57,6 +58,7 @@ class ServerSideRpcBackend(object):
+             method = {
+                 events.AFTER_CREATE: self._stub.trunk_created,
+                 events.AFTER_DELETE: self._stub.trunk_deleted,
++                events.AFTER_UPDATE: self._stub.trunk_updated,
+             }
+         LOG.debug("Emitting event %s for resource %s", event, resource)
+         method[event](context, payload)
+diff --git a/neutron/services/trunk/rpc/server.py b/neutron/services/trunk/rpc/server.py
+index d4297f8..8cf0c10 100644
+--- a/neutron/services/trunk/rpc/server.py
++++ b/neutron/services/trunk/rpc/server.py
+@@ -182,6 +182,11 @@ class TrunkStub(object):
+         self._resource_rpc.push(context, [trunk], events.DELETED)
+ 
+     @log_helpers.log_method_call
++    def trunk_updated(self, context, trunk):
++        """Tell the agent about a trunk being updated."""
++        self._resource_rpc.push(context, [trunk], events.UPDATED)
++
++    @log_helpers.log_method_call
+     def subports_added(self, context, subports):
+         """Tell the agent about new subports to add."""
+         self._resource_rpc.push(context, subports, events.CREATED)
+-- 
+2.7.4
+

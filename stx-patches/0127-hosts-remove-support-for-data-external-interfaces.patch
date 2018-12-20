@@ -1,0 +1,64 @@
+From 71e1706155fce8f3cae32da13ad19c59fb9bf92b Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Wed, 29 Nov 2017 09:40:59 -0600
+Subject: [PATCH 127/155] hosts: remove support for data external interfaces
+
+Data external interfaces are no longer required by newer versions of the ODL
+controller (Nitrogen) therefore we can remove support for these interfaces.
+---
+ neutron/db/hosts_db.py | 16 +++++++---------
+ 1 file changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 1e353eb..53014c7 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -53,10 +53,9 @@ from neutron_lib.plugins import directory
+ LOG = logging.getLogger(__name__)
+ 
+ DATA_NETWORK = "data"
+-DATA_EXTERNAL_NETWORK = "data-external"
+ 
+ # data interface types to be considered when scheduling resources
+-DATA_NETWORK_TYPES = [DATA_NETWORK, DATA_EXTERNAL_NETWORK]
++DATA_NETWORK_TYPES = [DATA_NETWORK]
+ 
+ PCI_PASSTHROUGH = "pci-passthrough"
+ PCI_SRIOV_PASSTHROUGH = "pci-sriov"
+@@ -261,9 +260,8 @@ class HostDbMixin(ext_host.HostPluginBase):
+     def _update_providernet_states(self, context):
+         with context.session.begin(subtransactions=True):
+             # Find all providernets that are currently marked as DOWN and are
+-            # bound to a host that is UP.
+-            # Only do this for 'data' and 'data-external' networktypes since
+-            # only limited state information is available for the pci nts
++            # bound to a host that is UP.  Only do this for 'data' networktypes
++            # since only limited state information is available for the pci nts
+             providernets = self._get_providernet_networktype(
+                 context, DATA_NETWORK_TYPES)
+             data = {'status': constants.PROVIDERNET_ACTIVE}
+@@ -285,9 +283,9 @@ class HostDbMixin(ext_host.HostPluginBase):
+                 self._clear_providernet_fault(providernet)
+ 
+             # Update providernet states for providernets without at least one
+-            # binding to a host that is UP.
+-            # Only do this for 'data' and 'data-external' networktypes since
+-            # only limited state information is available for the pci nts
++            # binding to a host that is UP.  Only do this for 'data'
++            # networktypes since only limited state information is available
++            # for the pci nts
+             providernets = (
+                 context.session.query(providernet_db.ProviderNet)
+                 .outerjoin(HostInterfaceProviderNetBinding,
+@@ -575,7 +573,7 @@ class HostDbMixin(ext_host.HostPluginBase):
+     def _validate_interface_network_type(self, context, interface):
+         interface.setdefault('network_type', DATA_NETWORK)
+         network_type = interface['network_type']
+-        if network_type not in [DATA_NETWORK, DATA_EXTERNAL_NETWORK,
++        if network_type not in [DATA_NETWORK,
+             PCI_PASSTHROUGH, PCI_SRIOV_PASSTHROUGH]:
+             raise ext_host.HostInvalidInterfaceNetworkType(
+                 value=network_type)
+-- 
+2.7.4
+

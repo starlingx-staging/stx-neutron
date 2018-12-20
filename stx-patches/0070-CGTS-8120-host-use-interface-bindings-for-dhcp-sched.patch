@@ -1,0 +1,307 @@
+From 00dd7cb201cc9896f6e6b5e14b5d1ecf18903b5c Mon Sep 17 00:00:00 2001
+From: Allain Legacy <allain.legacy@windriver.com>
+Date: Tue, 14 Nov 2017 14:47:34 -0600
+Subject: [PATCH 070/155] CGTS-8120: host: use interface bindings for dhcp
+ scheduling
+
+During the newton rebase we noticed that upstream changed the dhcp scheduler to
+use the segment host mapping table in some instances to schedule networks
+(i.e., routed networks).  We thought that it would be a good idea to remove our
+customer scheduling extensions and use the upstream version.  We have realized
+that the upstream implementation does not deal with configurations that have
+both an L2 agent and SRIOV agent running on the same node.  They assume that
+because an SRIOV agent has reported that it has connectivity to a physical
+network that DHCP can go on that node.  Unfortunately that is not the case
+because the L2 agent would need to report that it had a mapping to that
+physical network in order to support the DHCP server.
+
+So, we are putting our implementation back in.  Ours will looks at the
+providernet interface host mappings which are our own invention in order to
+figure out which networks can go on which nodes.
+
+Conflicts:
+	neutron/scheduler/dhcp_host_agent_scheduler.py
+---
+ neutron/plugins/common/constants.py                |   1 -
+ neutron/scheduler/dhcp_host_agent_scheduler.py     |  78 ++++++++++++-
+ .../tests/unit/plugins/wrs/test_agent_scheduler.py | 130 ++++++++++-----------
+ 3 files changed, 137 insertions(+), 72 deletions(-)
+
+diff --git a/neutron/plugins/common/constants.py b/neutron/plugins/common/constants.py
+index 935939d..7ddd031 100644
+--- a/neutron/plugins/common/constants.py
++++ b/neutron/plugins/common/constants.py
+@@ -48,7 +48,6 @@ DEFAULT_SERVICE_PLUGINS = {
+     'network_ip_availability': 'network-ip-availability',
+     'flavors': 'flavors',
+     'revisions': 'revisions',
+-    'segments': 'segments',
+     'trunk': 'trunk',
+ }
+ 
+diff --git a/neutron/scheduler/dhcp_host_agent_scheduler.py b/neutron/scheduler/dhcp_host_agent_scheduler.py
+index b6ab409..5fb809c 100644
+--- a/neutron/scheduler/dhcp_host_agent_scheduler.py
++++ b/neutron/scheduler/dhcp_host_agent_scheduler.py
+@@ -21,8 +21,10 @@
+ # of an applicable Wind River license agreement.
+ #
+ 
++from neutron_lib.api.definitions import provider_net as provider
+ from neutron_lib import constants
+ from oslo_log import log as logging
++from sqlalchemy import and_
+ from sqlalchemy import sql
+ 
+ from neutron.common import constants as n_const
+@@ -30,6 +32,7 @@ from neutron.db import hosts_db
+ from neutron.db.models import agent as agent_model
+ from neutron.db.models import segment as segments_model
+ from neutron.db import models_v2
++from neutron.db import providernet_db
+ from neutron.scheduler import dhcp_agent_scheduler
+ 
+ LOG = logging.getLogger(__name__)
+@@ -46,17 +49,39 @@ class HostBasedScheduler(dhcp_agent_scheduler.AZAwareWeightScheduler):
+         super(HostBasedScheduler, self).__init__(HostDhcpFilter())
+ 
+     def get_dhcp_subnets_for_host(self, plugin, context, host, fields):
++        # NOTE(alegacy): the auto_schedule_networks method does not
++        # constrain the search for networks to only those hosts that can
++        # actually implement them.  The schedule network code on the other
++        # hand at least tries to do this by checking the segment access of
++        # all candidate hosts, but the host scheduling does not do the same.
++        #  That ends up treating all agents as capable of handling all
++        # networks which is not true.  To solve this we take advantage of
++        # our host interface bindings to find those networks/subnets that
++        # have a provider network binding to the specified host.
+         query = (context.session.query(models_v2.Subnet)
+                  .join(models_v2.Network,
+                        models_v2.Network.id == models_v2.Subnet.network_id)
+                  .join(segments_model.NetworkSegment,
+                        segments_model.NetworkSegment.network_id ==
+                        models_v2.Network.id)
+-                 .join(segments_model.SegmentHostMapping,
+-                       segments_model.SegmentHostMapping.segment_id ==
+-                       segments_model.NetworkSegment.id)
+-                 .filter(models_v2.Subnet.enable_dhcp == sql.expression.true())
+-                 .filter(segments_model.SegmentHostMapping.host == host))
++                 .join(providernet_db.ProviderNet,
++                       providernet_db.ProviderNet.name ==
++                       segments_model.NetworkSegment.physical_network)
++                 .join(hosts_db.HostInterfaceProviderNetBinding,
++                       hosts_db.HostInterfaceProviderNetBinding
++                       .providernet_id ==
++                       providernet_db.ProviderNet.id)
++                 .join(hosts_db.HostInterface,
++                       and_(hosts_db.HostInterface.id ==
++                            hosts_db.HostInterfaceProviderNetBinding
++                            .interface_id,
++                            hosts_db.HostInterface.network_type.
++                            in_(hosts_db.DATA_NETWORK_TYPES)))
++                 .join(hosts_db.Host,
++                       hosts_db.Host.id == hosts_db.HostInterface.host_id)
++                 .filter(hosts_db.Host.name == host)
++                 .filter(models_v2.Subnet.enable_dhcp ==
++                         sql.expression.true()))
+         return [plugin._make_subnet_dict(s, fields=fields, context=context)
+                 for s in query.all()]
+ 
+@@ -89,3 +114,46 @@ class HostDhcpFilter(dhcp_agent_scheduler.DhcpFilter):
+                 LOG.warning(('No more active DHCP agents on active hosts'))
+                 return []
+         return active_dhcp_agents
++
++    @staticmethod
++    def _get_hosts_for_network(context, network):
++        physical_network = network[provider.PHYSICAL_NETWORK]
++        hosts = (context.session.query(hosts_db.Host)
++                 .join(hosts_db.HostInterface,
++                       and_((hosts_db.HostInterface.network_type.
++                             in_(hosts_db.DATA_NETWORK_TYPES)),
++                            (hosts_db.HostInterface.host_id ==
++                             hosts_db.Host.id)))
++                 .join(hosts_db.HostInterfaceProviderNetBinding,
++                       (hosts_db.HostInterfaceProviderNetBinding.
++                        interface_id == hosts_db.HostInterface.id))
++                 .join(providernet_db.ProviderNet,
++                       (providernet_db.ProviderNet.id ==
++                        hosts_db.HostInterfaceProviderNetBinding.
++                        providernet_id))
++                 .filter(hosts_db.Host.availability == n_const.HOST_UP)
++                 .filter(providernet_db.ProviderNet.name == physical_network))
++        return [h.name for h in hosts.all()]
++
++    def _filter_agents_with_network_access(self, plugin, context,
++                                           network, hostable_agents):
++        # NOTE(alegacy): the super class will filter the agent list down to
++        # only those that have access to the network, but the mechanism by
++        # which it does that relies on which mechanism driver reports that
++        # it has access to that network segment.  It does not take in to
++        # account that the mechanism driver may be SRIOV and may not be able
++        # to hook up a DHCP agent port to that network.  In order to fix
++        # that in a way that does not affect a tonne of upstream unit tests
++        # we are going to deal with it in our own DHCP Filter subclass that
++        # looks at the network type of each host interface binding to return
++        # only those agents that are on a node that has a data interface
++        # binding to the provider network which implements the specified
++        # tenant network.
++        if 'candidate_hosts' in network:
++            hostable_dhcp_hosts = network['candidate_hosts']
++        else:
++            hostable_dhcp_hosts = self._get_hosts_for_network(
++                context, network)
++        reachable_agents = [agent for agent in hostable_agents
++                            if agent['host'] in hostable_dhcp_hosts]
++        return reachable_agents
+diff --git a/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py b/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+index 8c70ef1..b4b443d 100644
+--- a/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
++++ b/neutron/tests/unit/plugins/wrs/test_agent_scheduler.py
+@@ -13,7 +13,7 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ #
+-# Copyright (c) 2013-2015 Wind River Systems, Inc.
++# Copyright (c) 2013-2017 Wind River Systems, Inc.
+ #
+ # The right to copy, distribute, modify, or otherwise make use
+ # of this software may be licensed only pursuant to the terms
+@@ -759,71 +759,69 @@ class WrsL3AgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+ 
+ 
+ class WrsDhcpAgentSchedulerTestCase(WrsAgentSchedulerTestCase):
+-    # TODO(alegacy): these tests are disabled because the code was replaced
+-    # with similar upstream behaviour.  Need to determine if upstream test
+-    # coverage is sufficient or if these needs to be rewritten.
+-    #
+-    #
+-    #def test_get_dhcp_networks_for_host_with_no_networks(self):
+-    #    # Check which dhcp networks can be scheduled on this host
+-    #    data = self._dhcp_scheduler.get_dhcp_networks_for_host(
+-    #        self._plugin, self.adminContext, HOST4['name'])
+-    #    ids = data.keys()
+-    #    # Should not be any networks available for this agent as HOST4 is
+-    #    # only associated with pci-sriov data interfaces and those interface
+-    #    # types are excluded by the scheduler
+-    #    self.assertEqual(len(ids), 0)
+-    #
+-    #def test_get_dhcp_networks_for_host(self):
+-    #    # Check which dhcp networks can be scheduled on this host
+-    #    data = self._dhcp_scheduler.get_dhcp_networks_for_host(
+-    #        self._plugin, self.adminContext, HOST1['name'])
+-    #    ids = data.keys()
+-    #    # Should only be the first 2 networks that can be scheduled on this
+-    #    # host node.
+-    #    self.assertEqual(len(ids), 2)
+-    #
+-    #def test_get_agents_for_network_without_agents(self):
+-    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-    #        self._plugin, self.adminContext,
+-    #        self._get_network(NET1['name']))
+-    #    # Should not have any candidate agents since there are no agents
+-    #    self.assertEqual(len(data), 0)
+-    #
+-    #def test_get_agents_for_network(self):
+-    #    self._register_dhcp_agents(HOSTS)
+-    #    data = self._list_dhcp_agents()
+-    #    self.assertEqual(len(data['agents']), len(HOSTS))
+-    #    # Get the list of agents that can support this network
+-    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-    #        self._plugin, self.adminContext,
+-    #        self._get_network(NET1['name']))
+-    #    # It should be schedulable on the first 3 nodes
+-    #    self.assertEqual(len(data), 3)
+-    #
+-    #def test_get_agents_for_network_isolated(self):
+-    #    self._register_dhcp_agents(HOSTS)
+-    #    data = self._list_dhcp_agents()
+-    #    self.assertEqual(len(data['agents']), len(HOSTS))
+-    #    # Get the list of agents that can support this network
+-    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-    #        self._plugin, self.adminContext,
+-    #        self._get_network(NET4['name']))
+-    #    # It should not be schedulable on any nodes
+-    #    self.assertEqual(len(data), 0)
+-    #
+-    #def test_get_agents_for_network_sriov(self):
+-    #    self._register_dhcp_agents(HOSTS)
+-    #    data = self._list_dhcp_agents()
+-    #    self.assertEqual(len(data['agents']), len(HOSTS))
+-    #    # Get the list of agents that can support this network
+-    #    data = self._dhcp_scheduler.resource_filter._get_candidate_agents(
+-    #        self._plugin, self.adminContext,
+-    #        self._get_network(NET5['name']))
+-    #    # It should not be schedulable on any nodes because NET5 is
+-    #    # associated only with pci-sriov data interfaces and the scheduler
+-    #    # should be excluding these from the choices.
+-    #    self.assertEqual(len(data), 0)
++
++    def test_get_dhcp_networks_for_host_with_no_networks(self):
++        # Check which dhcp networks can be scheduled on this host
++        data = self._dhcp_scheduler.get_dhcp_subnets_for_host(
++            self._plugin, self.adminContext, HOST4['name'], fields=None)
++        # Should not be any networks available for this agent as HOST4 is
++        # only associated with pci-sriov data interfaces and those interface
++        # types are excluded by the scheduler
++        self.assertEqual(len(data), 0)
++
++    def test_get_dhcp_networks_for_host(self):
++        # Check which dhcp networks can be scheduled on this host
++        data = self._dhcp_scheduler.get_dhcp_subnets_for_host(
++            self._plugin, self.adminContext, HOST1['name'], fields=None)
++        # Should be subnets 1, 2, and 7 to 10 that can be scheduled
++        self.assertEqual(len(data), 6)
++
++    def test_get_agents_for_network_without_agents(self):
++        dhcp_filter = self._dhcp_scheduler.resource_filter
++        data = dhcp_filter._get_network_hostable_dhcp_agents(
++            self._plugin, self.adminContext,
++            self._get_network(NET1['name']))
++        # Should not have any candidate agents since there are no agents
++        self.assertEqual(len(data['hostable_agents']), 0)
++
++    def test_get_agents_for_network(self):
++        self._register_dhcp_agents(HOSTS)
++        data = self._list_dhcp_agents()
++        self.assertEqual(len(data['agents']), len(HOSTS))
++        # Get the list of agents that can support this network
++        dhcp_filter = self._dhcp_scheduler.resource_filter
++        data = dhcp_filter._get_network_hostable_dhcp_agents(
++            self._plugin, self.adminContext,
++            self._get_network(NET1['name']))
++        # It should be schedulable on the first 3 nodes
++        self.assertEqual(len(data['hostable_agents']), 3)
++
++    def test_get_agents_for_network_isolated(self):
++        self._register_dhcp_agents(HOSTS)
++        data = self._list_dhcp_agents()
++        self.assertEqual(len(data['agents']), len(HOSTS))
++        # Get the list of agents that can support this network
++        dhcp_filter = self._dhcp_scheduler.resource_filter
++        data = dhcp_filter._get_network_hostable_dhcp_agents(
++            self._plugin, self.adminContext,
++            self._get_network(NET4['name']))
++        # It should not be schedulable on any nodes
++        self.assertEqual(len(data['hostable_agents']), 0)
++
++    def test_get_agents_for_network_sriov(self):
++        self._register_dhcp_agents(HOSTS)
++        data = self._list_dhcp_agents()
++        self.assertEqual(len(data['agents']), len(HOSTS))
++        # Get the list of agents that can support this network
++        dhcp_filter = self._dhcp_scheduler.resource_filter
++        data = dhcp_filter._get_network_hostable_dhcp_agents(
++            self._plugin, self.adminContext,
++            self._get_network(NET5['name']))
++        # It should not be schedulable on any nodes because NET5 is
++        # associated only with pci-sriov data interfaces and the scheduler
++        # should be excluding these from the choices.
++        self.assertEqual(len(data['hostable_agents']), 0)
++
+     def _get_agent_network_counts(self):
+         counts = []
+         agents = self._list_dhcp_agents()['agents']
+-- 
+2.7.4
+

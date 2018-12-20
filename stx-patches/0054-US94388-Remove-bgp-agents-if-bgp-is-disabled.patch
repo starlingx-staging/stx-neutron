@@ -1,0 +1,59 @@
+From 0c395cf7b08736f5bf3ccd5aa832b77ee2443315 Mon Sep 17 00:00:00 2001
+From: Joseph Richard <Joseph.Richard@windriver.com>
+Date: Tue, 5 Sep 2017 16:43:09 -0400
+Subject: [PATCH 054/155] US94388: Remove bgp agents if bgp is disabled.
+
+---
+ neutron/common/constants.py   | 1 +
+ neutron/db/hosts_db.py        | 5 +++++
+ neutron/plugins/ml2/plugin.py | 6 ++++++
+ 3 files changed, 12 insertions(+)
+
+diff --git a/neutron/common/constants.py b/neutron/common/constants.py
+index 3bd16a0..6d8a796 100644
+--- a/neutron/common/constants.py
++++ b/neutron/common/constants.py
+@@ -47,6 +47,7 @@ HA_ROUTER_STATE_ACTIVE = 'active'
+ HA_ROUTER_STATE_STANDBY = 'standby'
+ 
+ AGENT_TYPE_WRS_VSWITCH = 'AVS agent'
++AGENT_TYPE_BGP_ROUTING = 'BGP dynamic routing agent'
+ 
+ PAGINATION_INFINITE = 'infinite'
+ 
+diff --git a/neutron/db/hosts_db.py b/neutron/db/hosts_db.py
+index 669f295..fdaac19 100644
+--- a/neutron/db/hosts_db.py
++++ b/neutron/db/hosts_db.py
+@@ -753,6 +753,11 @@ class HostSchedulerDbMixin(HostDbMixin):
+         new_alive_topics = set()
+         host_availability = {}
+         for uuid, agent in six.iteritems(self.agents):
++            if agent['agent_type'] == constants.AGENT_TYPE_BGP_ROUTING:
++                if not self.is_bgp_enabled():
++                    self.agents[uuid] = None
++                    self.delete_agent(admin_context, uuid)
++                    continue
+             hostname = agent['host']
+             if hostname not in host_availability:
+                 # NOTE(alegacy): Cache to avoid repeating for multiple
+diff --git a/neutron/plugins/ml2/plugin.py b/neutron/plugins/ml2/plugin.py
+index fdc9719..ec433c6 100644
+--- a/neutron/plugins/ml2/plugin.py
++++ b/neutron/plugins/ml2/plugin.py
+@@ -420,6 +420,12 @@ class Ml2Plugin(db_base_plugin_v2.NeutronDbPluginV2,
+         context = n_ctx.get_admin_context()
+         self._schedule_sequential_providernet_audits(context)
+ 
++    def is_bgp_enabled(self):
++        if not hasattr(self, 'bgp_enabled'):
++            service_plugins = directory.get_service_plugins()
++            self.bgp_enabled = 'bgp' in service_plugins
++        return self.bgp_enabled
++
+     def run_providernet_connectivity_tests(self):
+         context = n_ctx.get_admin_context()
+         self._run_providernet_connectivity_tests(context)
+-- 
+2.7.4
+
